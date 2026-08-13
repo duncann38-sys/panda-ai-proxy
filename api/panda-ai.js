@@ -15,19 +15,21 @@ const PRICE = {PRICE_LEVEL_INEXPENSIVE:'\u00a3',PRICE_LEVEL_MODERATE:'\u00a3\u00
 
 function distMeters(aLat,aLng,bLat,bLng){const R=6371000,toRad=x=>x*Math.PI/180;const dLat=toRad(bLat-aLat),dLng=toRad(bLng-aLng);const s=Math.sin(dLat/2)**2+Math.cos(toRad(aLat))*Math.cos(toRad(bLat))*Math.sin(dLng/2)**2;return Math.round(2*R*Math.asin(Math.sqrt(s)));}
 
-async function searchVenues(query,lat,lng){
-  if(!MAPS_KEY||!query) return [];
+async function searchVenues(query,lat,lng,pageToken){
+  if(!MAPS_KEY||!query) return {venues:[],nextPageToken:null};
   try{
+    const reqBody={textQuery:query,maxResultCount:20,rankPreference:'DISTANCE',locationBias:{circle:{center:{latitude:lat,longitude:lng},radius:6000.0}}};
+    if(pageToken) reqBody.pageToken=pageToken;
     const r=await fetch('https://places.googleapis.com/v1/places:searchText',{
       method:'POST',
       headers:{'Content-Type':'application/json','X-Goog-Api-Key':MAPS_KEY,
-        'X-Goog-FieldMask':['places.id','places.displayName','places.formattedAddress','places.shortFormattedAddress','places.location','places.rating','places.userRatingCount','places.priceLevel','places.primaryTypeDisplayName','places.googleMapsUri','places.websiteUri','places.nationalPhoneNumber','places.currentOpeningHours.openNow','places.photos'].join(',')},
-      body:JSON.stringify({textQuery:query,maxResultCount:12,rankPreference:'DISTANCE',locationBias:{circle:{center:{latitude:lat,longitude:lng},radius:6000.0}}})
+        'X-Goog-FieldMask':['places.id','places.displayName','places.formattedAddress','places.shortFormattedAddress','places.location','places.rating','places.userRatingCount','places.priceLevel','places.primaryTypeDisplayName','places.googleMapsUri','places.websiteUri','places.nationalPhoneNumber','places.currentOpeningHours.openNow','places.photos','nextPageToken'].join(',')},
+      body:JSON.stringify(reqBody)
     });
-    if(!r.ok) return [];
+    if(!r.ok) return {venues:[],nextPageToken:null};
     const data=await r.json();
     const places=data.places||[];
-    return places.map(p=>{
+    const venues=places.map(p=>{
       const loc=p.location||{};const photo=(p.photos&&p.photos[0])||null;
       const attr=photo&&photo.authorAttributions&&photo.authorAttributions[0]?photo.authorAttributions[0].displayName:'';
       return {id:p.id,name:p.displayName?.text||'Unknown',type:p.primaryTypeDisplayName?.text||'',
@@ -39,7 +41,8 @@ async function searchVenues(query,lat,lng){
         phone:p.nationalPhoneNumber||'',website:p.websiteUri||'',mapsUri:p.googleMapsUri||'',
         photoName:photo?photo.name:'',photoAttribution:attr};
     }).sort((a,b)=>(a.distanceMeters??9e9)-(b.distanceMeters??9e9));
-  }catch{return []}
+    return {venues,nextPageToken:data.nextPageToken||null};
+  }catch{return {venues:[],nextPageToken:null}}
 }
 
 function fmtDist(m){return m==null?'':(m<1000?`${m} m`:`${(m/1000).toFixed(1)} km`);}
@@ -71,7 +74,7 @@ export default async function handler(req,res){
     const lat=location?.lat??DEFAULT_LAT, lng=location?.lng??DEFAULT_LNG;
 
     // FAST PATH: Discover feed
-    if(body.venuesOnly){const venues=await searchVenues(body.query,lat,lng);res.status(200).json({venues});return;}
+    if(body.venuesOnly){const {venues,nextPageToken}=await searchVenues(body.query,lat,lng,body.pageToken);res.status(200).json({venues,nextPageToken});return;}
 
     // CHAT PATH with function calling
     const credentials=JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
@@ -96,7 +99,7 @@ export default async function handler(req,res){
       const fc=parts.find(p=>p.functionCall);
       if(!fc) break;
       const q=fc.functionCall.args?.query||latestUserText(contents);
-      const found=await searchVenues(q,lat,lng);
+      const found=(await searchVenues(q,lat,lng)).venues;
       if(found.length) venues=found;
       convo.push(cand.content);
       convo.push({role:'user',parts:[{functionResponse:{name:'find_places',response:{venues:venuesToText(found)}}}]});
