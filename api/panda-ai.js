@@ -1,13 +1,14 @@
 // Panda AI proxy — Vercel serverless function.
 // Holds a Google service account, mints a FRESH access token on every request
-// (so it never expires like the AQ. token), calls Gemini, returns { text }.
+// (so it never expires like a static token), calls Gemini on Vertex AI, returns { text }.
 //
 // The Panda app POSTs the Gemini request body { systemInstruction, contents,
 // generationConfig } here and gets back { text }.
 
 import { GoogleAuth } from 'google-auth-library';
 
-const MODEL = process.env.PANDA_MODEL || 'gemini-1.5-flash';
+const MODEL = process.env.PANDA_MODEL || 'gemini-2.5-flash';
+const LOCATION = process.env.PANDA_LOCATION || 'us-central1';
 
 export default async function handler(req, res) {
   // CORS — set ALLOWED_ORIGIN to your site (e.g. https://duncann38-sys.github.io) for safety.
@@ -18,29 +19,49 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') { res.status(405).json({ error: 'POST only' }); return; }
 
   try {
+    // Service account JSON is stored in the GOOGLE_SERVICE_ACCOUNT env var on Vercel.
+    const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+
     const auth = new GoogleAuth({
-      credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT),
+      credentials,
       scopes: ['https://www.googleapis.com/auth/cloud-platform'],
     });
     const client = await auth.getClient();
-    const token = (await client.getAccessToken()).token; // fresh, auto-managed
+    const { token } = await client.getAccessToken();
 
-    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    // Project is read straight from the service account so nothing is hardcoded.
+    const projectId = credentials.project_id;
 
-    const r = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify(body),
-      }
-    );
-    const data = await r.json();
+    const url =
+      `https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${projectId}` +
+      `/locations/${LOCATION}/publishers/google/models/${MODEL}:generateContent`;
+
+    const upstream = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      // The app already sends { systemInstruction, contents, generationConfig },
+      // which is exactly the Vertex generateContent body — forward it as-is.
+      body: JSON.stringify(req.body),
+    });
+
+    const data = await upstream.json();
+
+    if (!upstream.ok) {
+      res.status(upstream.status).json({
+        error: data.error?.message || 'Gemini error',
+        detail: data,
+      });
+      return;
+    }
+
     const text =
-      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      (data.error ? 'Error: ' + data.error.message : 'No response');
+      data.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
+
     res.status(200).json({ text });
-  } catch (e) {
-    res.status(500).json({ error: String((e && e.message) || e) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 }
