@@ -92,6 +92,8 @@ async function searchVenues(query, lat, lng) {
           p.currentOpeningHours && typeof p.currentOpeningHours.openNow === 'boolean'
             ? p.currentOpeningHours.openNow
             : null,
+        lat: loc.latitude ?? null,
+        lng: loc.longitude ?? null,
         distanceMeters:
           loc.latitude != null ? distMeters(lat, lng, loc.latitude, loc.longitude) : null,
         phone: p.nationalPhoneNumber || '',
