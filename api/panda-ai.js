@@ -1,3 +1,4 @@
+
 // Panda AI proxy — Vercel serverless function.
 // - venuesOnly mode: direct Google Places search for the Discover feed (no Gemini).
 // - chat mode: Gemini decides (via function calling) WHEN to search venues, so
@@ -58,6 +59,23 @@ const GREET_RE=/^\s*(hi+|hey+|hello+|yo+|sup|hiya|howdy|heya|good\s?(morning|aft
 const PLACE_RE=/\b(eat|food|lunch|dinner|breakfast|brunch|coffee|drink|drinks|bar|pub|wine|beer|cocktail|restaurant|cafe|takeaway|book|table|rooftop|club|night|date|hungry|thirsty|steak|pizza|sushi|burger|ramen|curry|tapas|brunch|football|match|watch|near|nearby|around|open|cheap|budget|fancy|vegan|halal|£|\$)\b/i;
 function isGreeting(t){return GREET_RE.test((t||'').trim());}
 function wantsPlaces(t){return PLACE_RE.test(t||'');}
+// Map free text to a CLEAN places query so the safety-net never searches raw
+// text like "i want dinner for 40 pounds" (which matched "40 LBS Coffee Bar").
+function fallbackQuery(text){
+  const t=(text||'').toLowerCase();
+  const map=[
+    [/\b(club|clubbing|night ?out|big night|rave|party|dance)\b/,'nightclubs and bars'],
+    [/\b(cocktail|drinks?|pub|wine|beer|booze)\b/,'bars and pubs'],
+    [/\b(coffee|cafe|espresso|flat white)\b/,'coffee shops'],
+    [/\b(breakfast|brunch)\b/,'brunch and breakfast'],
+    [/\b(lunch)\b/,'lunch restaurants'],
+    [/\b(football|match|sport|game)\b/,'sports bars showing football'],
+    [/\b(date|romantic|anniversary)\b/,'romantic restaurants'],
+    [/\b(dinner|eat|food|hungry|restaurant|meal|takeaway)\b/,'restaurants'],
+  ];
+  for(const [re,q] of map){ if(re.test(t)) return q; }
+  return 'restaurants and bars';
+}
 function pick(a){return a[Math.floor(Math.random()*a.length)];}
 const GREET_LINES=[
   "Hey hey \uD83D\uDC3C what are we feeling — food, drinks, or full send?",
@@ -119,8 +137,9 @@ export default async function handler(req,res){
         return;
       }
       const wantOpen=/\bopen\b/i.test(userText);
-      let found=(await searchVenues(userText,lat,lng,null,wantOpen)).venues;
-      if(!found.length){found=(await searchVenues(userText.split(' ').slice(0,4).join(' ')+' restaurants bars',lat,lng)).venues;}
+      const q=fallbackQuery(userText);
+      let found=(await searchVenues(q,lat,lng,null,wantOpen)).venues;
+      if(!found.length){found=(await searchVenues('restaurants and bars',lat,lng)).venues;}
       res.status(200).json({text:found.length?"Grabbed a few spots near you \uD83D\uDC3C":pick(NORESULT_LINES),venues:found});
     }
 
@@ -170,7 +189,7 @@ export default async function handler(req,res){
       const b=req.body||{};const loc=b.location||{};const lat=loc.lat??DEFAULT_LAT,lng=loc.lng??DEFAULT_LNG;
       const ut=latestUserText(b.contents);
       if(isGreeting(ut)||!wantsPlaces(ut)){res.status(200).json({text:pick(GREET_LINES),venues:[]});return;}
-      const found=(await searchVenues(ut||'restaurants bars near me',lat,lng)).venues;
+      const found=(await searchVenues(fallbackQuery(ut),lat,lng)).venues;
       res.status(200).json({text:found.length?"Here are some nearby spots \uD83D\uDC3C":pick(NORESULT_LINES),venues:found});
     }
     catch(e){res.status(200).json({text:"I glitched for a second \u2014 give that another go.",venues:[]});}
