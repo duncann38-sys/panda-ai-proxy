@@ -51,8 +51,8 @@ function latestUserText(contents){if(!Array.isArray(contents))return '';for(let 
 
 const FIND_PLACES_TOOL={function_declarations:[{
   name:'find_places',
-  description:"Search for real restaurants, bars, cafes, pubs and venues near the user's current location. Call this ONLY when the user is asking for somewhere to eat, drink, or go out, or for recommendations. Do NOT call it for greetings, thanks, small talk, or general questions.",
-  parameters:{type:'object',properties:{query:{type:'string',description:"What to look for, e.g. 'breakfast', 'cocktail bars', 'italian restaurants', 'late night food'."}},required:['query']}
+  description:"Search real venues near the user for ANY going-out intent — restaurants, bars, wine bars, pubs, cafes; lunch/brunch/dinner; cheap eats and budget spots; date-night; specific cuisines or drinks (rose wine, natural wine, cocktails); places to WATCH FOOTBALL or sport; live music; rooftops. Call it whenever the user wants somewhere to go, eat, drink, or something to do out. Do NOT call it for pure greetings, thanks or small talk. Also call it when the user names a SPECIFIC venue - pass that exact name as the query. Craft the query to match the intent precisely so results stay on-subject.",
+  parameters:{type:'object',properties:{query:{type:'string',description:"A concise Google Places query capturing the intent, e.g. 'affordable lunch restaurants', 'rose wine bars', 'sports bars showing football', 'romantic dinner', 'rooftop cocktail bars', 'live music venues'."}},required:['query']}
 }]};
 
 async function gemini(token,projectId,body){
@@ -89,28 +89,38 @@ export default async function handler(req,res){
     if(generationConfig)baseBody.generationConfig=generationConfig;
 
     let venues=[];
-    let resp=await gemini(token,projectId,baseBody);
-    if(!resp.ok){res.status(resp.status).json({error:resp.data?.error?.message||'Gemini error',detail:resp.data});return;}
-
+    async function safeGemini(b){try{return await gemini(token,projectId,b);}catch(e){return {ok:false,status:500,data:{}};}}
+    let resp=await safeGemini(baseBody);
+    if(!resp.ok){
+      const q=latestUserText(contents)||'restaurants bars near me';
+      const found=(await searchVenues(q,lat,lng)).venues;
+      res.status(200).json({text:found.length?"Grabbed a few spots near you \uD83D\uDC3C":"My brain buffered for a sec \u2014 give that another go in a moment.",venues:found});
+      return;
+    }
     let rounds=0;
-    while(rounds<3){
+    while(rounds<2){
       const cand=resp.data.candidates?.[0];
       const parts=cand?.content?.parts||[];
       const fc=parts.find(p=>p.functionCall);
       if(!fc) break;
       const q=fc.functionCall.args?.query||latestUserText(contents);
-      const found=(await searchVenues(q,lat,lng)).venues;
+      let found=(await searchVenues(q,lat,lng)).venues;
+      if(!found.length){const broad=(latestUserText(contents)||q).split(' ').slice(0,4).join(' ')+' restaurants bars';found=(await searchVenues(broad,lat,lng)).venues;}
       if(found.length) venues=found;
       convo.push(cand.content);
       convo.push({role:'user',parts:[{functionResponse:{name:'find_places',response:{venues:venuesToText(found)}}}]});
       const nextBody={contents:convo,tools:[FIND_PLACES_TOOL]};
       if(baseBody.systemInstruction)nextBody.systemInstruction=baseBody.systemInstruction;
       if(generationConfig)nextBody.generationConfig=generationConfig;
-      resp=await gemini(token,projectId,nextBody);
-      if(!resp.ok){res.status(resp.status).json({error:resp.data?.error?.message||'Gemini error',detail:resp.data});return;}
+      resp=await safeGemini(nextBody);
+      if(!resp.ok) break;
       rounds++;
     }
-    const text=(resp.data.candidates?.[0]?.content?.parts||[]).map(p=>p.text||'').join('');
+    let text=(resp.data?.candidates?.[0]?.content?.parts||[]).map(p=>p.text||'').join('').trim();
+    if(!text) text=venues.length?"Here is what I dug up near you \uD83D\uDC3C":"Nothing jumped out \u2014 rephrase it and I will dig again.";
     res.status(200).json({text,venues});
-  }catch(err){res.status(500).json({error:err.message});}
+  }catch(err){
+    try{const b=req.body||{};const loc=b.location||{};const lat=loc.lat??DEFAULT_LAT,lng=loc.lng??DEFAULT_LNG;const q=latestUserText(b.contents)||'restaurants bars near me';const found=(await searchVenues(q,lat,lng)).venues;res.status(200).json({text:found.length?"Here are some nearby spots \uD83D\uDC3C":"I glitched for a second \u2014 give that another go.",venues:found});}
+    catch(e){res.status(200).json({text:"I glitched for a second \u2014 give that another go.",venues:[]});}
+  }
 }
