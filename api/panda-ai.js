@@ -3,8 +3,14 @@
 // - venuesOnly mode: direct Google Places search for the Discover feed (no Gemini).
 // - chat mode: Gemini decides (via function calling) WHEN to search venues, so
 //   greetings get banter and cards only appear when you actually ask for places.
-
+//
+// CACHING (added): every Google Places lookup goes through searchVenues(). We now
+// cache the RAW Google result in Firestore for ~10 min, keyed by query + a coarse
+// location grid (so nearby users share one paid call). Distances are recomputed
+// per-caller from their exact lat/lng, so accuracy is unaffected. If Firestore is
+// unavailable for any reason, we silently fall back to calling Google (never breaks).
 import { GoogleAuth } from 'google-auth-library';
+import admin from 'firebase-admin';
 
 // Try these models in order until one responds (guards against a bad model env).
 const MODELS = (process.env.PANDA_MODEL
@@ -13,12 +19,50 @@ const MODELS = (process.env.PANDA_MODEL
 const LOCATION = process.env.PANDA_LOCATION || 'us-central1';
 const MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY;
 const DEFAULT_LAT = 51.5074, DEFAULT_LNG = -0.1278;
-
 const PRICE = {PRICE_LEVEL_INEXPENSIVE:'\u00a3',PRICE_LEVEL_MODERATE:'\u00a3\u00a3',PRICE_LEVEL_EXPENSIVE:'\u00a3\u00a3\u00a3',PRICE_LEVEL_VERY_EXPENSIVE:'\u00a3\u00a3\u00a3\u00a3'};
+
+// ---- Cache config ----
+const CACHE_TTL_MS   = 10 * 60 * 1000;   // 10 minutes
+const CACHE_GRID     = 100;              // round lat/lng to 2 dp (~1.1km grid) so nearby users share a key
+const CACHE_COLLECTION = 'places_cache';
+
+// Lazy Firestore init — safe if the env var is missing (cache just no-ops).
+let _db = null, _dbTried = false;
+function db(){
+  if(_dbTried) return _db;
+  _dbTried = true;
+  try{
+    if(!process.env.FIREBASE_SERVICE_ACCOUNT) return (_db=null);
+    if(!admin.apps.length){
+      admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
+    }
+    _db = admin.firestore();
+  }catch(e){ _db = null; }
+  return _db;
+}
 
 function distMeters(aLat,aLng,bLat,bLng){const R=6371000,toRad=x=>x*Math.PI/180;const dLat=toRad(bLat-aLat),dLng=toRad(bLng-aLng);const s=Math.sin(dLat/2)**2+Math.cos(toRad(aLat))*Math.cos(toRad(bLat))*Math.sin(dLng/2)**2;return Math.round(2*R*Math.asin(Math.sqrt(s)));}
 
-async function searchVenues(query,lat,lng,pageToken,openNow){
+// Build a stable cache key from the query + coarse grid + flags.
+function cacheKey(query,lat,lng,openNow,pageToken){
+  const gLat=Math.round(lat*CACHE_GRID)/CACHE_GRID;
+  const gLng=Math.round(lng*CACHE_GRID)/CACHE_GRID;
+  const raw=`${(query||'').toLowerCase().trim()}|${gLat},${gLng}|o${openNow===true?1:0}|p${pageToken||''}`;
+  // Firestore doc IDs can't contain '/', so base64-encode the key.
+  return Buffer.from(raw).toString('base64').replace(/\//g,'_').slice(0,480);
+}
+
+// Given RAW cached venues (no distance), recompute distances for THIS caller.
+function withDistances(rawVenues,lat,lng){
+  return (rawVenues||[]).map(v=>({
+    ...v,
+    distanceMeters: (v.lat!=null && v.lng!=null) ? distMeters(lat,lng,v.lat,v.lng) : null
+  })).sort((a,b)=>(a.distanceMeters??9e9)-(b.distanceMeters??9e9));
+}
+
+// The raw Google Places call (unchanged logic; returns venues WITHOUT distance so
+// they can be cached and re-used for any nearby caller).
+async function googleSearch(query,lat,lng,pageToken,openNow){
   if(!MAPS_KEY||!query) return {venues:[],nextPageToken:null};
   try{
     const reqBody={textQuery:query,maxResultCount:20,rankPreference:'DISTANCE',locationBias:{circle:{center:{latitude:lat,longitude:lng},radius:6000.0}}};
@@ -41,21 +85,57 @@ async function searchVenues(query,lat,lng,pageToken,openNow){
         rating:p.rating||null,ratingCount:p.userRatingCount||null,price:PRICE[p.priceLevel]||'',
         openNow:(p.currentOpeningHours&&typeof p.currentOpeningHours.openNow==='boolean')?p.currentOpeningHours.openNow:null,
         lat:loc.latitude??null,lng:loc.longitude??null,
-        distanceMeters:loc.latitude!=null?distMeters(lat,lng,loc.latitude,loc.longitude):null,
         phone:p.nationalPhoneNumber||'',website:p.websiteUri||'',mapsUri:p.googleMapsUri||'',
         photoName:photo?photo.name:'',photoAttribution:attr};
-    }).sort((a,b)=>(a.distanceMeters??9e9)-(b.distanceMeters??9e9));
+    });
     return {venues,nextPageToken:data.nextPageToken||null};
   }catch{return {venues:[],nextPageToken:null}}
+}
+
+// Cache-aware wrapper. Same signature the rest of the file already uses.
+async function searchVenues(query,lat,lng,pageToken,openNow){
+  if(!MAPS_KEY||!query) return {venues:[],nextPageToken:null};
+  const store=db();
+  const key = store ? cacheKey(query,lat,lng,openNow,pageToken) : null;
+
+  // 1) Try cache
+  if(store && key){
+    try{
+      const snap=await store.collection(CACHE_COLLECTION).doc(key).get();
+      if(snap.exists){
+        const d=snap.data();
+        if(d && (Date.now()-d.ts) < CACHE_TTL_MS){
+          // HIT — recompute distances for this caller, skip Google entirely.
+          return { venues: withDistances(d.venues, lat, lng), nextPageToken: d.nextPageToken||null, cached:true };
+        }
+      }
+    }catch(e){ /* ignore cache read errors, fall through to Google */ }
+  }
+
+  // 2) MISS — call Google
+  const fresh=await googleSearch(query,lat,lng,pageToken,openNow);
+
+  // 3) Save to cache (best-effort; never blocks the response on failure)
+  if(store && key && fresh.venues.length){
+    try{
+      await store.collection(CACHE_COLLECTION).doc(key).set({
+        ts: Date.now(),
+        venues: fresh.venues,             // raw, no distance
+        nextPageToken: fresh.nextPageToken||null,
+        q: (query||'').slice(0,120)
+      });
+    }catch(e){ /* ignore cache write errors */ }
+  }
+
+  return { venues: withDistances(fresh.venues, lat, lng), nextPageToken: fresh.nextPageToken||null, cached:false };
 }
 
 function fmtDist(m){return m==null?'':(m<1000?`${m} m`:`${(m/1000).toFixed(1)} km`);}
 function venuesToText(v){if(!v.length)return 'No matching venues found nearby.';return v.slice(0,15).map((x,i)=>{const bits=[x.type,fmtDist(x.distanceMeters),x.rating?`${x.rating}\u2605`:'',x.price,x.openNow===true?'open now':x.openNow===false?'closed':''].filter(Boolean).join(' \u00b7 ');return `${i+1}. ${x.name}${bits?' \u2014 '+bits:''}`;}).join('\n');}
 function latestUserText(contents){if(!Array.isArray(contents))return '';for(let i=contents.length-1;i>=0;i--){const c=contents[i];if(c?.role==='user'&&Array.isArray(c.parts)){const t=c.parts.map(p=>p.text||'').join(' ').trim();if(t)return t;}}return '';}
-
 // --- Personality helpers (used only when Gemini is unreachable, so the app
 //     still feels like Panda instead of dumping random venues). -------------
-const GREET_RE=/^\s*(hi+|hey+|hello+|yo+|sup|hiya|howdy|heya|good\s?(morning|afternoon|evening|day)|thanks|thank\s?you|cheers|ta|nice one|ok(ay)?|cool|nice|lol|haha|hah|👋|🙏|🐼)\s*[!.?]*\s*$/i;
+const GREET_RE=/^\s*(hi+|hey+|hello+|yo+|sup|hiya|howdy|heya|good\s?(morning|afternoon|evening|day)|thanks|thank\s?you|cheers|ta|nice one|ok(ay)?|cool|nice|lol|haha|hah| | | )\s*[!.?]*\s*$/i;
 const PLACE_RE=/\b(eat|food|lunch|dinner|breakfast|brunch|coffee|drink|drinks|bar|pub|wine|beer|cocktail|restaurant|cafe|takeaway|book|table|rooftop|club|night|date|hungry|thirsty|steak|pizza|sushi|burger|ramen|curry|tapas|brunch|football|match|watch|near|nearby|around|open|cheap|budget|fancy|vegan|halal|£|\$)\b/i;
 function isGreeting(t){return GREET_RE.test((t||'').trim());}
 function wantsPlaces(t){return PLACE_RE.test(t||'');}
@@ -89,7 +169,6 @@ const NORESULT_LINES=[
   "Nothing jumped out for that exact thing. Give me a cuisine or a budget and I\u2019ll dig again.",
   "That one\u2019s playing hard to get \u2014 rephrase it and I\u2019ll have another go \uD83D\uDC3C"
 ];
-
 async function gemini(token,projectId,body){
   let last={ok:false,status:0,data:{}};
   for(const model of MODELS){
@@ -105,31 +184,25 @@ async function gemini(token,projectId,body){
   }
   return last;
 }
-
 // Vertex REST expects camelCase "functionDeclarations" (NOT function_declarations).
 const FIND_PLACES_TOOL={functionDeclarations:[{
   name:'find_places',
   description:"Search real venues near the user for ANY going-out intent — restaurants, bars, wine bars, pubs, cafes; lunch/brunch/dinner; cheap eats and budget spots; date-night; specific cuisines or drinks (rose wine, natural wine, cocktails); places to WATCH FOOTBALL or sport; live music; rooftops. Call it whenever the user wants somewhere to go, eat, drink, or something to do out. Do NOT call it for pure greetings, thanks or small talk. Also call it when the user names a SPECIFIC venue - pass that exact name as the query. Craft the query to match the intent precisely so results stay on-subject.",
   parameters:{type:'object',properties:{query:{type:'string',description:"A concise Google Places query capturing the intent, e.g. 'affordable lunch restaurants', 'rose wine bars', 'sports bars showing football', 'romantic dinner', 'rooftop cocktail bars', 'live music venues'."}},required:['query']}
 }]};
-
 export default async function handler(req,res){
   res.setHeader('Access-Control-Allow-Origin',process.env.ALLOWED_ORIGIN||'*');
   res.setHeader('Access-Control-Allow-Methods','POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers','Content-Type');
   if(req.method==='OPTIONS'){res.status(204).end();return;}
   if(req.method!=='POST'){res.status(405).json({error:'POST only'});return;}
-
   try{
     const body=req.body||{};
     const {systemInstruction,contents,generationConfig,location}=body;
     const lat=location?.lat??DEFAULT_LAT, lng=location?.lng??DEFAULT_LNG;
-
     // FAST PATH: Discover feed
     if(body.venuesOnly){const {venues,nextPageToken}=await searchVenues(body.query,lat,lng,body.pageToken);res.status(200).json({venues,nextPageToken});return;}
-
     const userText=latestUserText(contents);
-
     // Graceful degrade helper: NEVER dump random venues for greetings/small talk.
     async function degrade(){
       if(isGreeting(userText) || !wantsPlaces(userText)){
@@ -142,7 +215,6 @@ export default async function handler(req,res){
       if(!found.length){found=(await searchVenues('restaurants and bars',lat,lng)).venues;}
       res.status(200).json({text:found.length?"Grabbed a few spots near you \uD83D\uDC3C":pick(NORESULT_LINES),venues:found});
     }
-
     // CHAT PATH with function calling
     let credentials;
     try{ credentials=JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT); }
@@ -151,16 +223,13 @@ export default async function handler(req,res){
     const client=await auth.getClient();
     const {token}=await client.getAccessToken();
     const projectId=credentials.project_id;
-
     const convo=Array.isArray(contents)?contents.slice():[];
     const baseBody={contents:convo,tools:[FIND_PLACES_TOOL]};
     if(systemInstruction)baseBody.systemInstruction=systemInstruction.parts?systemInstruction:{parts:[{text:String(systemInstruction)}]};
     if(generationConfig)baseBody.generationConfig=generationConfig;
-
     let venues=[];
     let resp=await gemini(token,projectId,baseBody);
     if(!resp.ok){ await degrade(); return; }   // Gemini truly unreachable -> safe degrade
-
     let rounds=0;
     while(rounds<2){
       const cand=resp.data.candidates?.[0];
