@@ -2,12 +2,12 @@
 // - venuesOnly mode: direct Google Places search for the Discover feed (no Gemini).
 // - chat mode: Gemini decides (via function calling) WHEN to search venues.
 // CACHING: every Google Places lookup goes through searchVenues(), cached ~10 min.
-// HARDENED: origin allow-list + rate limiting via ../lib/guard.
-// UPGRADE: find_places now accepts an optional `area` (e.g. "Mayfair") which is
-//   geocoded so the search centres on that place, not the user's GPS.
+// HARDENED: origin allow-list + rate limiting via ./_guard.js.
+// UPGRADE: find_places accepts optional `area` (e.g. "Mayfair"), geocoded so the
+//   search centres on that place, not the user's GPS.
 import { GoogleAuth } from 'google-auth-library';
 import admin from 'firebase-admin';
-import { applyGuard } from '../lib/guard';
+import { applyGuard } from './_guard.js';
 const MODELS = (process.env.PANDA_MODEL
   ? [process.env.PANDA_MODEL]
   : ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']);
@@ -33,8 +33,6 @@ function db(){
   return _db;
 }
 function distMeters(aLat,aLng,bLat,bLng){const R=6371000,toRad=x=>x*Math.PI/180;const dLat=toRad(bLat-aLat),dLng=toRad(bLng-aLng);const s=Math.sin(dLat/2)**2+Math.cos(toRad(aLat))*Math.cos(toRad(bLat))*Math.sin(dLng/2)**2;return Math.round(2*R*Math.asin(Math.sqrt(s)));}
-// --- Geocode an area name ("Mayfair", "SW1", "Shoreditch") to coordinates.
-//     Cached in Firestore so we only pay Google once per area. Returns null on miss.
 async function geocodeArea(area){
   if(!area || !MAPS_KEY) return null;
   const clean = String(area).trim().toLowerCase();
@@ -128,8 +126,6 @@ async function searchVenues(query,lat,lng,pageToken,openNow){
   }
   return { venues: withDistances(fresh.venues, lat, lng), nextPageToken: fresh.nextPageToken||null, cached:false };
 }
-// Search that can re-centre on a named area. If `area` geocodes, we search there
-// and measure distances from there; otherwise we fall back to the user's GPS.
 async function searchVenuesSmart(query,userLat,userLng,area,openNow){
   let lat=userLat, lng=userLng;
   if(area){
@@ -187,8 +183,6 @@ async function gemini(token,projectId,body){
   }
   return last;
 }
-// find_places now takes an optional `area` so "French restaurants in Mayfair"
-// centres the search on Mayfair. Leave area empty for "near me" searches.
 const FIND_PLACES_TOOL={functionDeclarations:[{
   name:'find_places',
   description:"Search real venues for ANY going-out intent — restaurants, bars, wine bars, pubs, cafes; lunch/brunch/dinner; cheap eats and budget spots; date-night; specific cuisines or drinks; places to WATCH FOOTBALL or sport; live music; rooftops. Call it whenever the user wants somewhere to go, eat, drink, or something to do out. Do NOT call it for pure greetings, thanks or small talk. If the user names a SPECIFIC venue, pass that exact name as the query. If the user names a NEIGHBOURHOOD, area, postcode or place (e.g. 'in Mayfair', 'near London Bridge', 'SW1'), pass it in `area`. If the user refers to a saved place like 'near my work' or 'near home' and coordinates for it were provided in the conversation, you may pass that area name too.",
@@ -198,17 +192,6 @@ const FIND_PLACES_TOOL={functionDeclarations:[{
   },required:['query']}
 }]};
 export default async function handler(req,res){
-  // --- Force CORS Headers ---
-  res.setHeader('Access-Control-Allow-Origin', 'https://duncann38-sys.github.io');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
-  res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
-
-  if (req.method === 'OPTIONS') {
-    res.status(200).end();
-    return;
-  }
-  // -------------------------
-
   if(applyGuard(req,res,{methods:['POST','OPTIONS'],limit:true})) return;
   try{
     const body=req.body||{};
