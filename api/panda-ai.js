@@ -1,3 +1,4 @@
+
 // Panda AI proxy — Vercel serverless function.
 // - venuesOnly mode: direct Google Places search for the Discover feed (no Gemini).
 // - chat mode: Gemini decides (via function calling) WHEN to search venues.
@@ -16,7 +17,7 @@ const MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY;
 const DEFAULT_LAT = 51.5074, DEFAULT_LNG = -0.1278;
 const PRICE = {PRICE_LEVEL_INEXPENSIVE:'\u00a3',PRICE_LEVEL_MODERATE:'\u00a3\u00a3',PRICE_LEVEL_EXPENSIVE:'\u00a3\u00a3\u00a3',PRICE_LEVEL_VERY_EXPENSIVE:'\u00a3\u00a3\u00a3\u00a3'};
 const CACHE_TTL_MS   = 10 * 60 * 1000;
-const CACHE_GRID     = 100;
+const CACHE_GRID     = 1000;
 const CACHE_COLLECTION = 'places_cache';
 const GEO_COLLECTION = 'geocode_cache';
 let _db = null, _dbTried = false;
