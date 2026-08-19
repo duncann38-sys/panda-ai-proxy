@@ -1,4 +1,3 @@
-
 // Panda AI proxy — Vercel serverless function.
 // - venuesOnly mode: direct Google Places search for the Discover feed (no Gemini).
 // - chat mode: Gemini decides (via function calling) WHEN to search venues, so
@@ -11,7 +10,7 @@
 // unavailable for any reason, we silently fall back to calling Google (never breaks).
 import { GoogleAuth } from 'google-auth-library';
 import admin from 'firebase-admin';
-
+import { applyGuard } from './_guard';
 // Try these models in order until one responds (guards against a bad model env).
 const MODELS = (process.env.PANDA_MODEL
   ? [process.env.PANDA_MODEL]
@@ -20,12 +19,10 @@ const LOCATION = process.env.PANDA_LOCATION || 'us-central1';
 const MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY;
 const DEFAULT_LAT = 51.5074, DEFAULT_LNG = -0.1278;
 const PRICE = {PRICE_LEVEL_INEXPENSIVE:'\u00a3',PRICE_LEVEL_MODERATE:'\u00a3\u00a3',PRICE_LEVEL_EXPENSIVE:'\u00a3\u00a3\u00a3',PRICE_LEVEL_VERY_EXPENSIVE:'\u00a3\u00a3\u00a3\u00a3'};
-
 // ---- Cache config ----
 const CACHE_TTL_MS   = 10 * 60 * 1000;   // 10 minutes
 const CACHE_GRID     = 100;              // round lat/lng to 2 dp (~1.1km grid) so nearby users share a key
 const CACHE_COLLECTION = 'places_cache';
-
 // Lazy Firestore init — safe if the env var is missing (cache just no-ops).
 let _db = null, _dbTried = false;
 function db(){
@@ -40,9 +37,7 @@ function db(){
   }catch(e){ _db = null; }
   return _db;
 }
-
 function distMeters(aLat,aLng,bLat,bLng){const R=6371000,toRad=x=>x*Math.PI/180;const dLat=toRad(bLat-aLat),dLng=toRad(bLng-aLng);const s=Math.sin(dLat/2)**2+Math.cos(toRad(aLat))*Math.cos(toRad(bLat))*Math.sin(dLng/2)**2;return Math.round(2*R*Math.asin(Math.sqrt(s)));}
-
 // Build a stable cache key from the query + coarse grid + flags.
 function cacheKey(query,lat,lng,openNow,pageToken){
   const gLat=Math.round(lat*CACHE_GRID)/CACHE_GRID;
@@ -51,7 +46,6 @@ function cacheKey(query,lat,lng,openNow,pageToken){
   // Firestore doc IDs can't contain '/', so base64-encode the key.
   return Buffer.from(raw).toString('base64').replace(/\//g,'_').slice(0,480);
 }
-
 // Given RAW cached venues (no distance), recompute distances for THIS caller.
 function withDistances(rawVenues,lat,lng){
   return (rawVenues||[]).map(v=>({
@@ -59,7 +53,6 @@ function withDistances(rawVenues,lat,lng){
     distanceMeters: (v.lat!=null && v.lng!=null) ? distMeters(lat,lng,v.lat,v.lng) : null
   })).sort((a,b)=>(a.distanceMeters??9e9)-(b.distanceMeters??9e9));
 }
-
 // The raw Google Places call (unchanged logic; returns venues WITHOUT distance so
 // they can be cached and re-used for any nearby caller).
 async function googleSearch(query,lat,lng,pageToken,openNow){
@@ -91,13 +84,11 @@ async function googleSearch(query,lat,lng,pageToken,openNow){
     return {venues,nextPageToken:data.nextPageToken||null};
   }catch{return {venues:[],nextPageToken:null}}
 }
-
 // Cache-aware wrapper. Same signature the rest of the file already uses.
 async function searchVenues(query,lat,lng,pageToken,openNow){
   if(!MAPS_KEY||!query) return {venues:[],nextPageToken:null};
   const store=db();
   const key = store ? cacheKey(query,lat,lng,openNow,pageToken) : null;
-
   // 1) Try cache
   if(store && key){
     try{
@@ -111,10 +102,8 @@ async function searchVenues(query,lat,lng,pageToken,openNow){
       }
     }catch(e){ /* ignore cache read errors, fall through to Google */ }
   }
-
   // 2) MISS — call Google
   const fresh=await googleSearch(query,lat,lng,pageToken,openNow);
-
   // 3) Save to cache (best-effort; never blocks the response on failure)
   if(store && key && fresh.venues.length){
     try{
@@ -126,10 +115,8 @@ async function searchVenues(query,lat,lng,pageToken,openNow){
       });
     }catch(e){ /* ignore cache write errors */ }
   }
-
   return { venues: withDistances(fresh.venues, lat, lng), nextPageToken: fresh.nextPageToken||null, cached:false };
 }
-
 function fmtDist(m){return m==null?'':(m<1000?`${m} m`:`${(m/1000).toFixed(1)} km`);}
 function venuesToText(v){if(!v.length)return 'No matching venues found nearby.';return v.slice(0,15).map((x,i)=>{const bits=[x.type,fmtDist(x.distanceMeters),x.rating?`${x.rating}\u2605`:'',x.price,x.openNow===true?'open now':x.openNow===false?'closed':''].filter(Boolean).join(' \u00b7 ');return `${i+1}. ${x.name}${bits?' \u2014 '+bits:''}`;}).join('\n');}
 function latestUserText(contents){if(!Array.isArray(contents))return '';for(let i=contents.length-1;i>=0;i--){const c=contents[i];if(c?.role==='user'&&Array.isArray(c.parts)){const t=c.parts.map(p=>p.text||'').join(' ').trim();if(t)return t;}}return '';}
@@ -191,11 +178,7 @@ const FIND_PLACES_TOOL={functionDeclarations:[{
   parameters:{type:'object',properties:{query:{type:'string',description:"A concise Google Places query capturing the intent, e.g. 'affordable lunch restaurants', 'rose wine bars', 'sports bars showing football', 'romantic dinner', 'rooftop cocktail bars', 'live music venues'."}},required:['query']}
 }]};
 export default async function handler(req,res){
-  res.setHeader('Access-Control-Allow-Origin',process.env.ALLOWED_ORIGIN||'*');
-  res.setHeader('Access-Control-Allow-Methods','POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers','Content-Type');
-  if(req.method==='OPTIONS'){res.status(204).end();return;}
-  if(req.method!=='POST'){res.status(405).json({error:'POST only'});return;}
+  if(applyGuard(req,res,{methods:['POST','OPTIONS'],limit:true})) return;
   try{
     const body=req.body||{};
     const {systemInstruction,contents,generationConfig,location}=body;
