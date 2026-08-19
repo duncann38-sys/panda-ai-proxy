@@ -1,14 +1,12 @@
-// Place photo proxy — Vercel serverless function. (for our Launch)
+// Place photo proxy — Vercel serverless function.
 // Streams a real Google Places (New) photo without ever exposing the API key
 // to the browser. The app calls: /api/place-photo?name=places/XXX/photos/YYY&max=800
-// HARDENED: origin allow-list via _guard.js (GET). Rate limit OFF (images cache).
-import { applyGuard } from './_guard';
+// HARDENED: origin allow-list via ../lib/guard (GET). Rate limit OFF (images cache).
+import { applyGuard } from '../lib/guard';
 
 const MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY;
 
 export default async function handler(req, res) {
-  // GET only. limit:false — photos are cached hard (below) and <img> tags can
-  // legitimately fire many at once, so a per-minute cap would break the feed.
   if (applyGuard(req, res, { methods: ['GET', 'OPTIONS'], limit: false })) return;
 
   const name = req.query.name || '';
