@@ -3,6 +3,8 @@
 // - chat mode: Gemini decides (via function calling) WHEN to search venues.
 // CACHING: every Google Places lookup goes through searchVenues(), cached ~10 min.
 // HARDENED: origin allow-list + rate limiting via ../lib/guard.
+// UPGRADE: find_places now accepts an optional `area` (e.g. "Mayfair") which is
+//   geocoded so the search centres on that place, not the user's GPS.
 import { GoogleAuth } from 'google-auth-library';
 import admin from 'firebase-admin';
 import { applyGuard } from '../lib/guard';
@@ -16,6 +18,7 @@ const PRICE = {PRICE_LEVEL_INEXPENSIVE:'\u00a3',PRICE_LEVEL_MODERATE:'\u00a3\u00
 const CACHE_TTL_MS   = 10 * 60 * 1000;
 const CACHE_GRID     = 100;
 const CACHE_COLLECTION = 'places_cache';
+const GEO_COLLECTION = 'geocode_cache';
 let _db = null, _dbTried = false;
 function db(){
   if(_dbTried) return _db;
@@ -30,6 +33,32 @@ function db(){
   return _db;
 }
 function distMeters(aLat,aLng,bLat,bLng){const R=6371000,toRad=x=>x*Math.PI/180;const dLat=toRad(bLat-aLat),dLng=toRad(bLng-aLng);const s=Math.sin(dLat/2)**2+Math.cos(toRad(aLat))*Math.cos(toRad(bLat))*Math.sin(dLng/2)**2;return Math.round(2*R*Math.asin(Math.sqrt(s)));}
+// --- Geocode an area name ("Mayfair", "SW1", "Shoreditch") to coordinates.
+//     Cached in Firestore so we only pay Google once per area. Returns null on miss.
+async function geocodeArea(area){
+  if(!area || !MAPS_KEY) return null;
+  const clean = String(area).trim().toLowerCase();
+  if(!clean || clean.length > 80) return null;
+  const store = db();
+  const id = Buffer.from(clean).toString('base64').replace(/\//g,'_').slice(0,480);
+  if(store){
+    try{
+      const snap = await store.collection(GEO_COLLECTION).doc(id).get();
+      if(snap.exists){ const d = snap.data(); if(d && d.lat!=null) return {lat:d.lat, lng:d.lng}; }
+    }catch(e){}
+  }
+  try{
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(area)}&key=${MAPS_KEY}`;
+    const r = await fetch(url);
+    if(!r.ok) return null;
+    const data = await r.json();
+    const loc = data.results?.[0]?.geometry?.location;
+    if(!loc) return null;
+    const out = {lat:loc.lat, lng:loc.lng};
+    if(store){ try{ await store.collection(GEO_COLLECTION).doc(id).set({...out, area:clean, ts:Date.now()}); }catch(e){} }
+    return out;
+  }catch(e){ return null; }
+}
 function cacheKey(query,lat,lng,openNow,pageToken){
   const gLat=Math.round(lat*CACHE_GRID)/CACHE_GRID;
   const gLng=Math.round(lng*CACHE_GRID)/CACHE_GRID;
@@ -99,6 +128,16 @@ async function searchVenues(query,lat,lng,pageToken,openNow){
   }
   return { venues: withDistances(fresh.venues, lat, lng), nextPageToken: fresh.nextPageToken||null, cached:false };
 }
+// Search that can re-centre on a named area. If `area` geocodes, we search there
+// and measure distances from there; otherwise we fall back to the user's GPS.
+async function searchVenuesSmart(query,userLat,userLng,area,openNow){
+  let lat=userLat, lng=userLng;
+  if(area){
+    const geo = await geocodeArea(area);
+    if(geo){ lat=geo.lat; lng=geo.lng; }
+  }
+  return searchVenues(query,lat,lng,null,openNow);
+}
 function fmtDist(m){return m==null?'':(m<1000?`${m} m`:`${(m/1000).toFixed(1)} km`);}
 function venuesToText(v){if(!v.length)return 'No matching venues found nearby.';return v.slice(0,15).map((x,i)=>{const bits=[x.type,fmtDist(x.distanceMeters),x.rating?`${x.rating}\u2605`:'',x.price,x.openNow===true?'open now':x.openNow===false?'closed':''].filter(Boolean).join(' \u00b7 ');return `${i+1}. ${x.name}${bits?' \u2014 '+bits:''}`;}).join('\n');}
 function latestUserText(contents){if(!Array.isArray(contents))return '';for(let i=contents.length-1;i>=0;i--){const c=contents[i];if(c?.role==='user'&&Array.isArray(c.parts)){const t=c.parts.map(p=>p.text||'').join(' ').trim();if(t)return t;}}return '';}
@@ -124,7 +163,7 @@ function fallbackQuery(text){
 function pick(a){return a[Math.floor(Math.random()*a.length)];}
 const GREET_LINES=[
   "Hey hey \uD83D\uDC3C what are we feeling — food, drinks, or full send?",
-  "Well hello. Hungry, thirsty, or just being polite? Tell me the vibe.",
+  "Well hello bestie. Hungry, thirsty, or just being polite? Tell me the vibe.",
   "Yo! I\u2019m all ears (and paws). What\u2019s the mission — lunch, drinks, big night?",
   "Hiya \uD83D\uDC3C give me a craving and I\u2019ll give you a plan.",
   "Alright legend \u2014 what are we hunting? Cheap eats? A fancy pants dinner? Say the word."
@@ -148,10 +187,15 @@ async function gemini(token,projectId,body){
   }
   return last;
 }
+// find_places now takes an optional `area` so "French restaurants in Mayfair"
+// centres the search on Mayfair. Leave area empty for "near me" searches.
 const FIND_PLACES_TOOL={functionDeclarations:[{
   name:'find_places',
-  description:"Search real venues near the user for ANY going-out intent — restaurants, bars, wine bars, pubs, cafes; lunch/brunch/dinner; cheap eats and budget spots; date-night; specific cuisines or drinks (rose wine, natural wine, cocktails); places to WATCH FOOTBALL or sport; live music; rooftops. Call it whenever the user wants somewhere to go, eat, drink, or something to do out. Do NOT call it for pure greetings, thanks or small talk. Also call it when the user names a SPECIFIC venue - pass that exact name as the query. Craft the query to match the intent precisely so results stay on-subject.",
-  parameters:{type:'object',properties:{query:{type:'string',description:"A concise Google Places query capturing the intent, e.g. 'affordable lunch restaurants', 'rose wine bars', 'sports bars showing football', 'romantic dinner', 'rooftop cocktail bars', 'live music venues'."}},required:['query']}
+  description:"Search real venues for ANY going-out intent — restaurants, bars, wine bars, pubs, cafes; lunch/brunch/dinner; cheap eats and budget spots; date-night; specific cuisines or drinks; places to WATCH FOOTBALL or sport; live music; rooftops. Call it whenever the user wants somewhere to go, eat, drink, or something to do out. Do NOT call it for pure greetings, thanks or small talk. If the user names a SPECIFIC venue, pass that exact name as the query. If the user names a NEIGHBOURHOOD, area, postcode or place (e.g. 'in Mayfair', 'near London Bridge', 'SW1'), pass it in `area`. If the user refers to a saved place like 'near my work' or 'near home' and coordinates for it were provided in the conversation, you may pass that area name too.",
+  parameters:{type:'object',properties:{
+    query:{type:'string',description:"A concise Google Places query capturing the food/drink intent, e.g. 'french restaurants', 'affordable lunch', 'rooftop cocktail bars', 'sports bars showing football'."},
+    area:{type:'string',description:"Optional. A neighbourhood, area, postcode or landmark to centre the search on, e.g. 'Mayfair', 'Shoreditch', 'SW1A', 'near Borough Market'. Omit entirely for 'near me' searches."}
+  },required:['query']}
 }]};
 export default async function handler(req,res){
   if(applyGuard(req,res,{methods:['POST','OPTIONS'],limit:true})) return;
@@ -192,10 +236,12 @@ export default async function handler(req,res){
       const parts=cand?.content?.parts||[];
       const fc=parts.find(p=>p.functionCall);
       if(!fc) break;
-      const q=fc.functionCall.args?.query||userText;
+      const args=fc.functionCall.args||{};
+      const q=args.query||userText;
+      const area=args.area||'';
       const wantOpen=/\bopen\b/i.test(q)||/\bopen\b/i.test(userText);
-      let found=(await searchVenues(q,lat,lng,null,wantOpen)).venues;
-      if(!found.length){const broad=(userText||q).split(' ').slice(0,4).join(' ')+' restaurants bars';found=(await searchVenues(broad,lat,lng)).venues;}
+      let found=(await searchVenuesSmart(q,lat,lng,area,wantOpen)).venues;
+      if(!found.length){const broad=(userText||q).split(' ').slice(0,4).join(' ')+' restaurants bars';found=(await searchVenuesSmart(broad,lat,lng,area,false)).venues;}
       if(found.length) venues=found;
       convo.push(cand.content);
       convo.push({role:'user',parts:[{functionResponse:{name:'find_places',response:{venues:venuesToText(found)}}}]});
