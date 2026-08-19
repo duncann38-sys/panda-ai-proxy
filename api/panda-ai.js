@@ -1,4 +1,3 @@
-
 // Panda AI proxy — Vercel serverless function.
 // - venuesOnly mode: direct Google Places search for the Discover feed (no Gemini).
 // - chat mode: Gemini decides (via function calling) WHEN to search venues.
@@ -47,7 +46,12 @@ async function geocodeArea(area){
     }catch(e){}
   }
   try{
-    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(area)}&key=${MAPS_KEY}`;
+    // Bias to the UK so short area names ("Mayfair", "Soho") resolve in London,
+    // not a same-named place elsewhere. Also nudge with ", London" when the area
+    // is a bare word (no comma / no postcode-looking token).
+    const bare = !/[,]/.test(area) && !/\d/.test(area);
+    const q = bare ? `${area}, London, UK` : area;
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(q)}&region=uk&components=country:GB&key=${MAPS_KEY}`;
     const r = await fetch(url);
     if(!r.ok) return null;
     const data = await r.json();
@@ -131,7 +135,19 @@ async function searchVenuesSmart(query,userLat,userLng,area,openNow){
   let lat=userLat, lng=userLng;
   if(area){
     const geo = await geocodeArea(area);
-    if(geo){ lat=geo.lat; lng=geo.lng; }
+    if(geo){
+      // Geocoding worked: centre the search on the area's coordinates.
+      lat=geo.lat; lng=geo.lng;
+    } else {
+      // Geocoding failed (e.g. API disabled). Fall back to a TEXT-based area
+      // search so we still search the named area, NOT the user's GPS. We append
+      // the area to the query and widen the bias radius so Places finds it.
+      const q2 = `${query} in ${area}`;
+      const viaText = await searchVenues(q2, userLat, userLng, null, openNow);
+      if(viaText.venues && viaText.venues.length) return viaText;
+      // last resort: text search without location weighting removed — still area-tagged
+      return searchVenues(`${query} ${area}`, userLat, userLng, null, openNow);
+    }
   }
   return searchVenues(query,lat,lng,null,openNow);
 }
