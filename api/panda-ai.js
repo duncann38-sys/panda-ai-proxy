@@ -137,6 +137,30 @@ async function searchVenues(query,lat,lng,pageToken,openNow){
   }
   return { venues: withDistances(fresh.venues, lat, lng), nextPageToken: fresh.nextPageToken||null, cached:false };
 }
+const STRICT_LOCATION_RULES={
+  chelsea:['chelsea','sw3','sw10'],
+  battersea:['battersea','sw11','sw8'],
+  mayfair:['mayfair','w1j','w1k','w1s'],
+  soho:['soho','w1d','w1f'],
+  shoreditch:['shoreditch','e1','ec2a'],
+  kensington:['kensington','w8','sw5','sw7'],
+  camden:['camden','nw1'],
+  brixton:['brixton','sw2','sw9']
+};
+function strictRequestedArea(value){
+  const text=String(value||'').toLowerCase();
+  return Object.keys(STRICT_LOCATION_RULES).find(area=>new RegExp(`\\b${area}\\b`,'i').test(text))||'';
+}
+function strictLocationResult(result,requestedArea){
+  const target=strictRequestedArea(requestedArea);
+  if(!target)return result;
+  const rules=STRICT_LOCATION_RULES[target];
+  const venues=(result?.venues||[]).filter(venue=>{
+    const text=[venue?.name,venue?.address,venue?.fullAddress,venue?.area].filter(Boolean).join(' ').toLowerCase();
+    return rules.some(rule=>new RegExp(`\\b${rule}\\b`,'i').test(text));
+  });
+  return {...result,venues,strictArea:target};
+}
 async function searchVenuesSmart(query,userLat,userLng,area,openNow){
   let lat=userLat, lng=userLng;
   if(area){
@@ -149,13 +173,13 @@ async function searchVenuesSmart(query,userLat,userLng,area,openNow){
       // search so we still search the named area, NOT the user's GPS. We append
       // the area to the query and widen the bias radius so Places finds it.
       const q2 = `${query} in ${area}`;
-      const viaText = await searchVenues(q2, userLat, userLng, null, openNow);
+      const viaText = strictLocationResult(await searchVenues(q2, userLat, userLng, null, openNow),area);
       if(viaText.venues && viaText.venues.length) return viaText;
       // last resort: text search without location weighting removed — still area-tagged
-      return searchVenues(`${query} ${area}`, userLat, userLng, null, openNow);
+      return strictLocationResult(await searchVenues(`${query} ${area}`, userLat, userLng, null, openNow),area);
     }
   }
-  return searchVenues(query,lat,lng,null,openNow);
+  return strictLocationResult(await searchVenues(query,lat,lng,null,openNow),area);
 }
 function fmtDist(m){return m==null?'':(m<1000?`${m} m`:`${(m/1000).toFixed(1)} km`);}
 function dayHours(v){
@@ -349,7 +373,7 @@ export default async function handler(req,res){
       if(!fc) break;
       const args=fc.functionCall.args||{};
       const q=args.query||userText;
-      const area=args.area||'';
+      const area=extractArea(userText)||args.area||'';
       const wantOpen=/\bopen\b/i.test(q)||/\bopen\b/i.test(userText);
       let found=(await searchVenuesSmart(q,lat,lng,area,wantOpen)).venues;
       if(!found.length){const broad=(userText||q).split(' ').slice(0,4).join(' ')+' restaurants bars';found=(await searchVenuesSmart(broad,lat,lng,area,false)).venues;}
@@ -364,6 +388,11 @@ export default async function handler(req,res){
       rounds++;
     }
     let text=(resp.data?.candidates?.[0]?.content?.parts||[]).map(p=>p.text||'').join('').trim();
+    if(!venues.length&&wantsPlaces(userText)&&!isGreeting(userText)){
+      const fallbackArea=extractArea(userText);
+      const found=(await searchVenuesSmart(fallbackQuery(userText),lat,lng,fallbackArea,false)).venues;
+      venues=limitChatVenues(found,userText,userText);
+    }
     if(!text) text=venues.length?"Here's what I dug up near you \uD83D\uDC3C":pick(NORESULT_LINES);
     venues=limitChatVenues(venues,userText,userText);
     res.status(200).json({text,venues,richMetadata:true});
