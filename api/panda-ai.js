@@ -17,8 +17,8 @@ const DEFAULT_LAT = 51.5074, DEFAULT_LNG = -0.1278;
 const PRICE = {PRICE_LEVEL_INEXPENSIVE:'\u00a3',PRICE_LEVEL_MODERATE:'\u00a3\u00a3',PRICE_LEVEL_EXPENSIVE:'\u00a3\u00a3\u00a3',PRICE_LEVEL_VERY_EXPENSIVE:'\u00a3\u00a3\u00a3\u00a3'};
 const CACHE_TTL_MS   = 10 * 60 * 1000;
 const CACHE_GRID     = 1000;
-const CACHE_COLLECTION = 'places_cache';
-const GEO_COLLECTION = 'geocode_cache';
+const CACHE_COLLECTION = 'places_cache_v2';
+const GEO_COLLECTION = 'geocode_cache_v2';
 let _db = null, _dbTried = false;
 function db(){
   if(_dbTried) return _db;
@@ -46,12 +46,10 @@ async function geocodeArea(area){
     }catch(e){}
   }
   try{
-    // Bias to the UK so short area names ("Mayfair", "Soho") resolve in London,
-    // not a same-named place elsewhere. Also nudge with ", London" when the area
-    // is a bare word (no comma / no postcode-looking token).
-    const bare = !/[,]/.test(area) && !/\d/.test(area);
-    const q = bare ? `${area}, London, UK` : area;
-    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(q)}&region=uk&components=country:GB&key=${MAPS_KEY}`;
+    // Do not bias or restrict geocoding to the UK. Panda AI accepts named
+    // cities, neighbourhoods, landmarks and postcodes worldwide.
+    const q = area;
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(q)}&key=${MAPS_KEY}`;
     const r = await fetch(url);
     if(!r.ok) return null;
     const data = await r.json();
@@ -83,7 +81,7 @@ async function googleSearch(query,lat,lng,pageToken,openNow){
     const r=await fetch('https://places.googleapis.com/v1/places:searchText',{
       method:'POST',
       headers:{'Content-Type':'application/json','X-Goog-Api-Key':MAPS_KEY,
-        'X-Goog-FieldMask':['places.id','places.displayName','places.formattedAddress','places.shortFormattedAddress','places.location','places.rating','places.userRatingCount','places.priceLevel','places.primaryTypeDisplayName','places.googleMapsUri','places.websiteUri','places.nationalPhoneNumber','places.currentOpeningHours.openNow','places.photos','nextPageToken'].join(',')},
+        'X-Goog-FieldMask':['places.id','places.displayName','places.formattedAddress','places.shortFormattedAddress','places.location','places.rating','places.userRatingCount','places.priceLevel','places.priceRange','places.primaryTypeDisplayName','places.types','places.googleMapsUri','places.websiteUri','places.nationalPhoneNumber','places.currentOpeningHours.openNow','places.currentOpeningHours.weekdayDescriptions','places.regularOpeningHours.weekdayDescriptions','places.businessStatus','places.photos','nextPageToken'].join(',')},
       body:JSON.stringify(reqBody)
     });
     if(!r.ok) return {venues:[],nextPageToken:null};
@@ -92,12 +90,20 @@ async function googleSearch(query,lat,lng,pageToken,openNow){
     const venues=places.map(p=>{
       const loc=p.location||{};const photo=(p.photos&&p.photos[0])||null;
       const attr=photo&&photo.authorAttributions&&photo.authorAttributions[0]?photo.authorAttributions[0].displayName:'';
-      return {id:p.id,name:p.displayName?.text||'Unknown',type:p.primaryTypeDisplayName?.text||'',
+      const musicIntent=/\b(live music|dj|music|pub crawl)\b/i.test(query||'');
+      const typeText=p.primaryTypeDisplayName?.text||'';
+      const typeMusic=/\b(night ?club|music|karaoke|concert)\b/i.test(`${typeText} ${(p.types||[]).join(' ')}`);
+      const musicBadge=(musicIntent||typeMusic)?'🎵 Live Music / DJ':'';
+      return {id:p.id,name:p.displayName?.text||'Unknown',type:typeText,
         address:p.shortFormattedAddress||p.formattedAddress||'',fullAddress:p.formattedAddress||'',
         rating:p.rating||null,ratingCount:p.userRatingCount||null,price:PRICE[p.priceLevel]||'',
+        priceRange:p.priceRange||null,
         openNow:(p.currentOpeningHours&&typeof p.currentOpeningHours.openNow==='boolean')?p.currentOpeningHours.openNow:null,
+        openingHours:p.regularOpeningHours?.weekdayDescriptions||p.currentOpeningHours?.weekdayDescriptions||[],
+        businessStatus:p.businessStatus||'',hasMusic:!!musicBadge,musicBadge,
         lat:loc.latitude??null,lng:loc.longitude??null,
-        phone:p.nationalPhoneNumber||'',website:p.websiteUri||'',mapsUri:p.googleMapsUri||'',
+        phone:p.nationalPhoneNumber||'',website:p.websiteUri||'',menuLink:p.websiteUri||'',
+        mapsUri:p.googleMapsUri||'',directionsLink:p.googleMapsUri||'',
         photoName:photo?photo.name:'',photoAttribution:attr};
     });
     return {venues,nextPageToken:data.nextPageToken||null};
@@ -152,15 +158,25 @@ async function searchVenuesSmart(query,userLat,userLng,area,openNow){
   return searchVenues(query,lat,lng,null,openNow);
 }
 function fmtDist(m){return m==null?'':(m<1000?`${m} m`:`${(m/1000).toFixed(1)} km`);}
-function venuesToText(v){if(!v.length)return 'No matching venues found nearby.';return v.slice(0,15).map((x,i)=>{const bits=[x.type,fmtDist(x.distanceMeters),x.rating?`${x.rating}\u2605`:'',x.price,x.openNow===true?'open now':x.openNow===false?'closed':''].filter(Boolean).join(' \u00b7 ');return `${i+1}. ${x.name}${bits?' \u2014 '+bits:''}`;}).join('\n');}
+function venuesToText(v){if(!v.length)return 'No matching venues found nearby.';return v.slice(0,15).map((x,i)=>{const bits=[x.type,fmtDist(x.distanceMeters),x.rating?`${x.rating}\u2605`:'',x.price,x.openNow===true?'open now':x.openNow===false?'closed':'',x.hasMusic?'live music/DJ':''].filter(Boolean).join(' \u00b7 ');return `${i+1}. ${x.name}${bits?' \u2014 '+bits:''}`;}).join('\n');}
+function extractArea(text){
+  const match=String(text||'').match(/\b(?:in|near|around|at)\s+(.+?)(?:\s+(?:tonight|today|tomorrow|please|for me))?\s*$/i);
+  const area=match?.[1]?.trim().replace(/[,.!?]+$/,'')||'';
+  return /^(me|here)$/i.test(area)?'':area;
+}
+function isThemedRequest(text){return /\b(pub crawl|crawl|cozy|cosy|cheap|expensive|christmas|theme|live music|dj|music)\b/i.test(String(text||''));}
+function limitChatVenues(venues,userText,query){return isThemedRequest(`${userText||''} ${query||''}`)?(venues||[]).slice(0,6):(venues||[]);}
 function latestUserText(contents){if(!Array.isArray(contents))return '';for(let i=contents.length-1;i>=0;i--){const c=contents[i];if(c?.role==='user'&&Array.isArray(c.parts)){const t=c.parts.map(p=>p.text||'').join(' ').trim();if(t)return t;}}return '';}
 const GREET_RE=/^\s*(hi+|hey+|hello+|yo+|sup|hiya|howdy|heya|good\s?(morning|afternoon|evening|day)|thanks|thank\s?you|cheers|ta|nice one|ok(ay)?|cool|nice|lol|haha|hah| | | )\s*[!.?]*\s*$/i;
-const PLACE_RE=/\b(eat|food|lunch|dinner|breakfast|brunch|coffee|drink|drinks|bar|pub|wine|beer|cocktail|restaurant|cafe|takeaway|book|table|rooftop|club|night|date|hungry|thirsty|steak|pizza|sushi|burger|ramen|curry|tapas|brunch|football|match|watch|near|nearby|around|open|cheap|budget|fancy|vegan|halal|£|\$)\b/i;
+const PLACE_RE=/\b(eat|food|lunch|dinner|breakfast|brunch|coffee|drink|drinks|bar|pub|wine|beer|cocktail|restaurant|cafe|takeaway|book|table|rooftop|club|night|date|hungry|thirsty|steak|meat|pizza|sushi|burger|ramen|curry|tapas|football|match|watch|near|nearby|around|open|cheap|budget|fancy|vegan|halal|music|dj|crawl|cozy|cosy|christmas|theme|£|\$)\b/i;
 function isGreeting(t){return GREET_RE.test((t||'').trim());}
 function wantsPlaces(t){return PLACE_RE.test(t||'');}
 function fallbackQuery(text){
   const t=(text||'').toLowerCase();
   const map=[
+    [/\b(live music|dj|music)\b/,'live music venues and bars'],
+    [/\b(pub crawl|crawl)\b/,'pubs and bars'],
+    [/\b(meat|steak)\b/,'steak and meat restaurants'],
     [/\b(club|clubbing|night ?out|big night|rave|party|dance)\b/,'nightclubs and bars'],
     [/\b(cocktail|drinks?|pub|wine|beer|booze)\b/,'bars and pubs'],
     [/\b(coffee|cafe|espresso|flat white)\b/,'coffee shops'],
@@ -202,7 +218,7 @@ async function gemini(token,projectId,body){
 }
 const FIND_PLACES_TOOL={functionDeclarations:[{
   name:'find_places',
-  description:"Search real venues for ANY going-out intent — restaurants, bars, wine bars, pubs, cafes; lunch/brunch/dinner; cheap eats and budget spots; date-night; specific cuisines or drinks; places to WATCH FOOTBALL or sport; live music; rooftops. Call it whenever the user wants somewhere to go, eat, drink, or something to do out. Do NOT call it for pure greetings, thanks or small talk. If the user names a SPECIFIC venue, pass that exact name as the query. If the user names a NEIGHBOURHOOD, area, postcode or place (e.g. 'in Mayfair', 'near London Bridge', 'SW1'), pass it in `area`. If the user refers to a saved place like 'near my work' or 'near home' and coordinates for it were provided in the conversation, you may pass that area name too.",
+  description:"Search real venues for ANY going-out intent — restaurants, bars, wine bars, pubs, cafes; lunch/brunch/dinner; cheap eats and budget spots; date-night; specific cuisines or drinks; places to WATCH FOOTBALL or sport; live music; rooftops; themed nights; pub crawls. Call it whenever the user wants somewhere to go, eat, drink, or something to do out. Do NOT call it for pure greetings, thanks or small talk. If the user names a SPECIFIC venue, pass that exact name as the query. If the user names a CITY, COUNTRY, NEIGHBOURHOOD, area, postcode or place (e.g. 'in Manchester', 'in New York', 'near London Bridge', 'SW1'), pass it in `area`. Area searches are worldwide; never assume the UK. For themed or pub-crawl requests, return the best six venues and include live music/DJ matches where relevant. If the user refers to a saved place like 'near my work' or 'near home' and coordinates for it were provided in the conversation, you may pass that area name too.",
   parameters:{type:'object',properties:{
     query:{type:'string',description:"A concise Google Places query capturing the food/drink intent, e.g. 'french restaurants', 'affordable lunch', 'rooftop cocktail bars', 'sports bars showing football'."},
     area:{type:'string',description:"Optional. A neighbourhood, area, postcode or landmark to centre the search on, e.g. 'Mayfair', 'Shoreditch', 'SW1A', 'near Borough Market'. Omit entirely for 'near me' searches."}
@@ -222,10 +238,11 @@ export default async function handler(req,res){
         return;
       }
       const wantOpen=/\bopen\b/i.test(userText);
-      const q=fallbackQuery(userText);
-      let found=(await searchVenues(q,lat,lng,null,wantOpen)).venues;
-      if(!found.length){found=(await searchVenues('restaurants and bars',lat,lng)).venues;}
-      res.status(200).json({text:found.length?"Grabbed a few spots near you \uD83D\uDC3C":pick(NORESULT_LINES),venues:found});
+      const q=fallbackQuery(userText),area=extractArea(userText);
+      let found=(await searchVenuesSmart(q,lat,lng,area,wantOpen)).venues;
+      if(!found.length){found=(await searchVenuesSmart('restaurants and bars',lat,lng,area,false)).venues;}
+      found=limitChatVenues(found,userText,q);
+      res.status(200).json({text:found.length?"Grabbed a few spots near you \uD83D\uDC3C":pick(NORESULT_LINES),venues:found,richMetadata:true});
     }
     let credentials;
     try{ credentials=JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT); }
@@ -253,7 +270,7 @@ export default async function handler(req,res){
       const wantOpen=/\bopen\b/i.test(q)||/\bopen\b/i.test(userText);
       let found=(await searchVenuesSmart(q,lat,lng,area,wantOpen)).venues;
       if(!found.length){const broad=(userText||q).split(' ').slice(0,4).join(' ')+' restaurants bars';found=(await searchVenuesSmart(broad,lat,lng,area,false)).venues;}
-      if(found.length) venues=found;
+      if(found.length) venues=limitChatVenues(found,userText,q);
       convo.push(cand.content);
       convo.push({role:'user',parts:[{functionResponse:{name:'find_places',response:{venues:venuesToText(found)}}}]});
       const nextBody={contents:convo,tools:[FIND_PLACES_TOOL]};
@@ -265,14 +282,15 @@ export default async function handler(req,res){
     }
     let text=(resp.data?.candidates?.[0]?.content?.parts||[]).map(p=>p.text||'').join('').trim();
     if(!text) text=venues.length?"Here's what I dug up near you \uD83D\uDC3C":pick(NORESULT_LINES);
-    res.status(200).json({text,venues});
+    venues=limitChatVenues(venues,userText,userText);
+    res.status(200).json({text,venues,richMetadata:true});
   }catch(err){
     try{
       const b=req.body||{};const loc=b.location||{};const lat=loc.lat??DEFAULT_LAT,lng=loc.lng??DEFAULT_LNG;
       const ut=latestUserText(b.contents);
       if(isGreeting(ut)||!wantsPlaces(ut)){res.status(200).json({text:pick(GREET_LINES),venues:[]});return;}
-      const found=(await searchVenues(fallbackQuery(ut),lat,lng)).venues;
-      res.status(200).json({text:found.length?"Here are some nearby spots \uD83D\uDC3C":pick(NORESULT_LINES),venues:found});
+      const found=limitChatVenues((await searchVenuesSmart(fallbackQuery(ut),lat,lng,extractArea(ut))).venues,ut,ut);
+      res.status(200).json({text:found.length?"Here are some nearby spots \uD83D\uDC3C":pick(NORESULT_LINES),venues:found,richMetadata:true});
     }
     catch(e){res.status(200).json({text:"I glitched for a second \u2014 give that another go.",venues:[]});}
   }
