@@ -207,7 +207,7 @@ function isThemedRequest(text){return /\b(pub crawl|crawl|cozy|cosy|cheap|expens
 function limitChatVenues(venues,userText,query){return isThemedRequest(`${userText||''} ${query||''}`)?(venues||[]).slice(0,6):(venues||[]);}
 function latestUserText(contents){if(!Array.isArray(contents))return '';for(let i=contents.length-1;i>=0;i--){const c=contents[i];if(c?.role==='user'&&Array.isArray(c.parts)){const t=c.parts.map(p=>p.text||'').join(' ').trim();if(t)return t;}}return '';}
 function isPubCrawlRequest(text){return /\b(?:pub|bar|drinks?)?\s*crawl\b/i.test(String(text||''));}
-function pubCrawlLimit(now=new Date()){return now.getHours()<12?8:6;}
+function pubCrawlLimit(){return 8;}
 function pubCrawlThemes(text){
   const query=String(text||'').toLowerCase();
   return {
@@ -229,7 +229,7 @@ function pubCrawlThemeMatch(venue,themes){
 }
 function pubCrawlQueries(themes){
   const preferred=themes.music?'live music pubs and bars':themes.cozy?'cosy pubs':themes.cheap?'inexpensive pubs and bars':themes.expensive?'upmarket pubs and cocktail bars':'pubs and bars';
-  return [...new Set([preferred,'pubs','bars'])];
+  return [...new Set([preferred,'pubs','bars','gastropubs','cocktail bars','traditional pubs'])];
 }
 function orderPubCrawl(venues,limit){
   const remaining=venues.slice();
@@ -259,7 +259,8 @@ async function buildCustomPubCrawl(userText,lat,lng){
   }));
   const all=[...unique.values()];
   const themed=all.filter(venue=>pubCrawlThemeMatch(venue,themes));
-  const pool=themed.length?themed:all;
+  const themedIds=new Set(themed.map(venue=>venue.id));
+  const pool=[...themed,...all.filter(venue=>!themedIds.has(venue.id))];
   const selected=orderPubCrawl(pool,limit).map((venue,index)=>{
     const address=venue.fullAddress||venue.address||area||'';
     const directionsLink=venue.directionsLink||venue.mapsUri||`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${venue.name} ${address}`)}`;
