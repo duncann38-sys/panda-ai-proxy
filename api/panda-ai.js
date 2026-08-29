@@ -158,7 +158,22 @@ async function searchVenuesSmart(query,userLat,userLng,area,openNow){
   return searchVenues(query,lat,lng,null,openNow);
 }
 function fmtDist(m){return m==null?'':(m<1000?`${m} m`:`${(m/1000).toFixed(1)} km`);}
-function venuesToText(v){if(!v.length)return 'No matching venues found nearby.';return v.slice(0,15).map((x,i)=>{const bits=[x.type,fmtDist(x.distanceMeters),x.rating?`${x.rating}\u2605`:'',x.price,x.openNow===true?'open now':x.openNow===false?'closed':'',x.hasMusic?'live music/DJ':''].filter(Boolean).join(' \u00b7 ');return `${i+1}. ${x.name}${bits?' \u2014 '+bits:''}`;}).join('\n');}
+function dayHours(v){
+  const list=Array.isArray(v&&v.openingHours)?v.openingHours:[];
+  if(!list.length)return '';
+  const index=(new Date().getDay()+6)%7;
+  return String(list[index]||list[0]||'').replace(/^[^:]+:\s*/,'').trim();
+}
+function dayClosing(v){
+  const hours=dayHours(v);
+  if(!hours)return '';
+  if(/closed/i.test(hours))return 'closed today';
+  if(/24\s*hours/i.test(hours))return 'open 24 hours';
+  const match=hours.match(/(?:–|—|-)\s*(.+)$/);
+  return match?`closes ${match[1]} today`:hours;
+}
+function asksClosingTime(text){return /\b(when|what time|time)\b[^.!?]{0,70}\b(close|closes|closing|shut|last orders)\b|\b(close|closes|closing|shut|last orders)\b/i.test(String(text||''));}
+function venuesToText(v,context){if(!v.length)return 'No matching venues found nearby.';const includeClosing=asksClosingTime(context);return v.slice(0,15).map((x,i)=>{const bits=[x.type,fmtDist(x.distanceMeters),x.rating?`${x.rating}\u2605`:'',x.price,x.openNow===true?'open now':x.openNow===false?'closed':'',x.hasMusic?'live music/DJ':'',includeClosing?dayClosing(x):''].filter(Boolean).join(' \u00b7 ');return `${i+1}. ${x.name}${bits?' \u2014 '+bits:''}`;}).join('\n');}
 function extractArea(text){
   const match=String(text||'').match(/\b(?:in|near|around|at)\s+(.+?)(?:\s+(?:tonight|today|tomorrow|please|for me))?\s*$/i);
   const area=match?.[1]?.trim().replace(/[,.!?]+$/,'')||'';
@@ -218,7 +233,7 @@ async function gemini(token,projectId,body){
 }
 const FIND_PLACES_TOOL={functionDeclarations:[{
   name:'find_places',
-  description:"Search real venues for ANY going-out intent — restaurants, bars, wine bars, pubs, cafes; lunch/brunch/dinner; cheap eats and budget spots; date-night; specific cuisines or drinks; places to WATCH FOOTBALL or sport; live music; rooftops; themed nights; pub crawls. Call it whenever the user wants somewhere to go, eat, drink, or something to do out. Do NOT call it for pure greetings, thanks or small talk. If the user names a SPECIFIC venue, pass that exact name as the query. If the user names a CITY, COUNTRY, NEIGHBOURHOOD, area, postcode or place (e.g. 'in Manchester', 'in New York', 'near London Bridge', 'SW1'), pass it in `area`. Area searches are worldwide; never assume the UK. For themed or pub-crawl requests, return the best six venues and include live music/DJ matches where relevant. If the user refers to a saved place like 'near my work' or 'near home' and coordinates for it were provided in the conversation, you may pass that area name too.",
+  description:"Search real venues for ANY going-out intent — restaurants, bars, wine bars, pubs, cafes; lunch/brunch/dinner; cheap eats and budget spots; date-night; specific cuisines or drinks; places to WATCH FOOTBALL or sport; live music; rooftops; themed nights; pub crawls. Call it whenever the user wants somewhere to go, eat, drink, or something to do out. Do NOT call it for pure greetings, thanks or small talk. If the user names a SPECIFIC venue, pass that exact name as the query. If the user names a CITY, COUNTRY, NEIGHBOURHOOD, area, postcode or place (e.g. 'in Manchester', 'in New York', 'near London Bridge', 'SW1'), pass it in `area`. Area searches are worldwide; never assume the UK. For themed or pub-crawl requests, return the best six venues and include live music/DJ matches where relevant. If the user asks when a specific venue closes, answer with that venue's closing time for today; do not recite the weekly schedule unless explicitly requested. If the user refers to a saved place like 'near my work' or 'near home' and coordinates for it were provided in the conversation, you may pass that area name too.",
   parameters:{type:'object',properties:{
     query:{type:'string',description:"A concise Google Places query capturing the food/drink intent, e.g. 'french restaurants', 'affordable lunch', 'rooftop cocktail bars', 'sports bars showing football'."},
     area:{type:'string',description:"Optional. A neighbourhood, area, postcode or landmark to centre the search on, e.g. 'Mayfair', 'Shoreditch', 'SW1A', 'near Borough Market'. Omit entirely for 'near me' searches."}
@@ -272,7 +287,7 @@ export default async function handler(req,res){
       if(!found.length){const broad=(userText||q).split(' ').slice(0,4).join(' ')+' restaurants bars';found=(await searchVenuesSmart(broad,lat,lng,area,false)).venues;}
       if(found.length) venues=limitChatVenues(found,userText,q);
       convo.push(cand.content);
-      convo.push({role:'user',parts:[{functionResponse:{name:'find_places',response:{venues:venuesToText(found)}}}]});
+      convo.push({role:'user',parts:[{functionResponse:{name:'find_places',response:{venues:venuesToText(found,userText)}}}]});
       const nextBody={contents:convo,tools:[FIND_PLACES_TOOL]};
       if(baseBody.systemInstruction)nextBody.systemInstruction=baseBody.systemInstruction;
       if(generationConfig)nextBody.generationConfig=generationConfig;
