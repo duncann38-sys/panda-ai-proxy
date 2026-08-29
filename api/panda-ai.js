@@ -90,7 +90,7 @@ async function googleSearch(query,lat,lng,pageToken,openNow){
     const venues=places.map(p=>{
       const loc=p.location||{};const photo=(p.photos&&p.photos[0])||null;
       const attr=photo&&photo.authorAttributions&&photo.authorAttributions[0]?photo.authorAttributions[0].displayName:'';
-      const musicIntent=/\b(live music|dj|music|pub crawl)\b/i.test(query||'');
+      const musicIntent=/\b(live music|dj|music)\b/i.test(query||'');
       const typeText=p.primaryTypeDisplayName?.text||'';
       const typeMusic=/\b(night ?club|music|karaoke|concert)\b/i.test(`${typeText} ${(p.types||[]).join(' ')}`);
       const musicBadge=(musicIntent||typeMusic)?'🎵 Live Music / DJ':'';
@@ -100,7 +100,7 @@ async function googleSearch(query,lat,lng,pageToken,openNow){
         priceRange:p.priceRange||null,
         openNow:(p.currentOpeningHours&&typeof p.currentOpeningHours.openNow==='boolean')?p.currentOpeningHours.openNow:null,
         openingHours:p.regularOpeningHours?.weekdayDescriptions||p.currentOpeningHours?.weekdayDescriptions||[],
-        businessStatus:p.businessStatus||'',hasMusic:!!musicBadge,musicBadge,
+        businessStatus:p.businessStatus||'',types:p.types||[],hasMusic:!!musicBadge,musicBadge,
         lat:loc.latitude??null,lng:loc.longitude??null,
         phone:p.nationalPhoneNumber||'',website:p.websiteUri||'',menuLink:p.websiteUri||'',
         mapsUri:p.googleMapsUri||'',directionsLink:p.googleMapsUri||'',
@@ -182,6 +182,73 @@ function extractArea(text){
 function isThemedRequest(text){return /\b(pub crawl|crawl|cozy|cosy|cheap|expensive|christmas|theme|live music|dj|music)\b/i.test(String(text||''));}
 function limitChatVenues(venues,userText,query){return isThemedRequest(`${userText||''} ${query||''}`)?(venues||[]).slice(0,6):(venues||[]);}
 function latestUserText(contents){if(!Array.isArray(contents))return '';for(let i=contents.length-1;i>=0;i--){const c=contents[i];if(c?.role==='user'&&Array.isArray(c.parts)){const t=c.parts.map(p=>p.text||'').join(' ').trim();if(t)return t;}}return '';}
+function isPubCrawlRequest(text){return /\b(?:pub|bar|drinks?)?\s*crawl\b/i.test(String(text||''));}
+function pubCrawlLimit(now=new Date()){return now.getHours()<12?8:6;}
+function pubCrawlThemes(text){
+  const query=String(text||'').toLowerCase();
+  return {
+    cheap:/\bcheap|budget|inexpensive\b|(?:^|\s)£(?:\s|$)/i.test(query),
+    expensive:/\bexpensive|fancy|upmarket|premium\b|£££/i.test(query),
+    cozy:/\bcozy|cosy\b/i.test(query),
+    music:/\blive music|dj|band|music\b/i.test(query)
+  };
+}
+function isPubBarVenue(venue){
+  const typeText=[venue?.type,...(Array.isArray(venue?.types)?venue.types:[])].filter(Boolean).join(' ');
+  return /\b(pub|bar|tavern|brewery|beer|taproom|night club|nightclub)\b/i.test(typeText);
+}
+function pubCrawlThemeMatch(venue,themes){
+  if(themes.cheap && venue.price!=='£')return false;
+  if(themes.expensive && venue.price!=='£££' && venue.price!=='££££')return false;
+  if(themes.music && !venue.hasMusic)return false;
+  return true;
+}
+function pubCrawlQueries(themes){
+  const preferred=themes.music?'live music pubs and bars':themes.cozy?'cosy pubs':themes.cheap?'inexpensive pubs and bars':themes.expensive?'upmarket pubs and cocktail bars':'pubs and bars';
+  return [...new Set([preferred,'pubs','bars'])];
+}
+function orderPubCrawl(venues,limit){
+  const remaining=venues.slice();
+  const ordered=[];
+  while(remaining.length&&ordered.length<limit){
+    if(!ordered.length){ordered.push(remaining.shift());continue;}
+    const previous=ordered[ordered.length-1];
+    let bestIndex=0,bestDistance=Infinity;
+    remaining.forEach((venue,index)=>{
+      const distance=(previous.lat!=null&&previous.lng!=null&&venue.lat!=null&&venue.lng!=null)
+        ?distMeters(previous.lat,previous.lng,venue.lat,venue.lng)
+        :(venue.distanceMeters??Infinity);
+      if(distance<bestDistance){bestDistance=distance;bestIndex=index;}
+    });
+    ordered.push(remaining.splice(bestIndex,1)[0]);
+  }
+  return ordered;
+}
+async function buildCustomPubCrawl(userText,lat,lng){
+  const area=extractArea(userText);
+  const themes=pubCrawlThemes(userText);
+  const limit=pubCrawlLimit();
+  const batches=await Promise.all(pubCrawlQueries(themes).map(query=>searchVenuesSmart(query,lat,lng,area,false)));
+  const unique=new Map();
+  batches.forEach(batch=>(batch.venues||[]).forEach(venue=>{
+    if(venue?.id&&!unique.has(venue.id)&&isPubBarVenue(venue))unique.set(venue.id,venue);
+  }));
+  const all=[...unique.values()];
+  const themed=all.filter(venue=>pubCrawlThemeMatch(venue,themes));
+  const pool=themed.length?themed:all;
+  const selected=orderPubCrawl(pool,limit).map((venue,index)=>{
+    const address=venue.fullAddress||venue.address||area||'';
+    const directionsLink=venue.directionsLink||venue.mapsUri||`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${venue.name} ${address}`)}`;
+    const menuLink=venue.menuLink||venue.website||`https://www.google.com/search?q=${encodeURIComponent(`${venue.name} menu`)}`;
+    return {...venue,stopLabel:`Stop ${index+1} of ${Math.min(limit,pool.length)}`,directionsLink,menuLink};
+  });
+  const place=area||'your area';
+  const theme=themes.music?'live-music ':themes.cozy?'cosy ':themes.cheap?'budget ':themes.expensive?'premium ':'';
+  const text=selected.length
+    ?`Absolutely — I built you a ${selected.length}-stop ${theme}pub crawl in ${place}. Start at Stop 1 and follow the route from there.`
+    :`I couldn't find enough real pubs in ${place} to build a crawl just yet. Try a nearby area and I'll map one out.`;
+  return {text,venues:selected,richMetadata:true,customPubCrawl:true};
+}
 const GREET_RE=/^\s*(hi+|hey+|hello+|yo+|sup|hiya|howdy|heya|good\s?(morning|afternoon|evening|day)|thanks|thank\s?you|cheers|ta|nice one|ok(ay)?|cool|nice|lol|haha|hah| | | )\s*[!.?]*\s*$/i;
 const PLACE_RE=/\b(eat|food|lunch|dinner|breakfast|brunch|coffee|drink|drinks|bar|pub|wine|beer|cocktail|restaurant|cafe|takeaway|book|table|rooftop|club|night|date|hungry|thirsty|steak|meat|pizza|sushi|burger|ramen|curry|tapas|football|match|watch|near|nearby|around|open|cheap|budget|fancy|vegan|halal|music|dj|crawl|cozy|cosy|christmas|theme|£|\$)\b/i;
 function isGreeting(t){return GREET_RE.test((t||'').trim());}
@@ -247,6 +314,7 @@ export default async function handler(req,res){
     const lat=location?.lat??DEFAULT_LAT, lng=location?.lng??DEFAULT_LNG;
     if(body.venuesOnly){const {venues,nextPageToken}=await searchVenues(body.query,lat,lng,body.pageToken);res.status(200).json({venues,nextPageToken});return;}
     const userText=latestUserText(contents);
+    if(isPubCrawlRequest(userText)){res.status(200).json(await buildCustomPubCrawl(userText,lat,lng));return;}
     async function degrade(){
       if(isGreeting(userText) || !wantsPlaces(userText)){
         res.status(200).json({text:pick(GREET_LINES),venues:[]});
@@ -303,6 +371,7 @@ export default async function handler(req,res){
     try{
       const b=req.body||{};const loc=b.location||{};const lat=loc.lat??DEFAULT_LAT,lng=loc.lng??DEFAULT_LNG;
       const ut=latestUserText(b.contents);
+      if(isPubCrawlRequest(ut)){res.status(200).json(await buildCustomPubCrawl(ut,lat,lng));return;}
       if(isGreeting(ut)||!wantsPlaces(ut)){res.status(200).json({text:pick(GREET_LINES),venues:[]});return;}
       const found=limitChatVenues((await searchVenuesSmart(fallbackQuery(ut),lat,lng,extractArea(ut))).venues,ut,ut);
       res.status(200).json({text:found.length?"Here are some nearby spots \uD83D\uDC3C":pick(NORESULT_LINES),venues:found,richMetadata:true});
