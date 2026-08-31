@@ -1,6 +1,7 @@
 // Panda — shared request guard: origin allow-list (CORS) + rate limiting. (ESM)
 const ALLOWED_ORIGINS = [
   'https://duncann38-sys.github.io',
+  'https://bbfb166e-b180-43a7-a542-83c501c07b45-00-2u9xn7rdnqdst.archer.replit.dev',
   'https://pandaindustry.co',
   'https://www.pandaindustry.co',
   'https://shariah.pandaindustry.co',
