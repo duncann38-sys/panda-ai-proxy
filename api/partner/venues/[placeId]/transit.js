@@ -2,6 +2,7 @@ import {
   applyVenueGuard,
   findNearestTransitStation,
   getVenueProfile,
+  getTransitRoute,
   getWalkingRoute,
   isValidPlaceId,
   readCoordinates,
@@ -38,18 +39,39 @@ export default async function handler(req, res) {
       return;
     }
 
-    const venueWalk = await getWalkingRoute(
-      {
-        latitude: destinationStation.latitude,
-        longitude: destinationStation.longitude,
-      },
-      { latitude: venue.latitude, longitude: venue.longitude },
-    ).catch(() => null);
+    const [originWalk, transitRoute, venueWalk] = await Promise.all([
+      getWalkingRoute(
+        { latitude: location.latitude, longitude: location.longitude },
+        {
+          latitude: originStation.latitude,
+          longitude: originStation.longitude,
+        },
+      ).catch(() => null),
+      getTransitRoute(
+        {
+          latitude: originStation.latitude,
+          longitude: originStation.longitude,
+        },
+        {
+          latitude: destinationStation.latitude,
+          longitude: destinationStation.longitude,
+        },
+      ).catch(() => null),
+      getWalkingRoute(
+        {
+          latitude: destinationStation.latitude,
+          longitude: destinationStation.longitude,
+        },
+        { latitude: venue.latitude, longitude: venue.longitude },
+      ).catch(() => null),
+    ]);
 
     res.setHeader('Cache-Control', 'private, max-age=120');
     res.status(200).json({
       originStation,
       destinationStation,
+      originWalk,
+      transitRoute,
       venueWalk,
       source: 'google_places',
     });

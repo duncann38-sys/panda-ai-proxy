@@ -328,3 +328,95 @@ export async function getWalkingRoute(origin, destination) {
     source: 'google_routes',
   };
 }
+
+export async function getTransitRoute(origin, destination) {
+  let payload;
+  try {
+    payload = await googleJson(
+      GOOGLE_ROUTES_URL,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': apiKey(),
+          'X-Goog-FieldMask': [
+            'routes.distanceMeters',
+            'routes.duration',
+            'routes.legs.steps.distanceMeters',
+            'routes.legs.steps.staticDuration',
+            'routes.legs.steps.travelMode',
+            'routes.legs.steps.navigationInstruction.instructions',
+            'routes.legs.steps.transitDetails.stopDetails',
+            'routes.legs.steps.transitDetails.headsign',
+            'routes.legs.steps.transitDetails.transitLine.name',
+            'routes.legs.steps.transitDetails.transitLine.nameShort',
+          ].join(','),
+        },
+        body: JSON.stringify({
+          origin: { location: { latLng: origin } },
+          destination: { location: { latLng: destination } },
+          travelMode: 'TRANSIT',
+          departureTime: new Date().toISOString(),
+          languageCode: 'en-GB',
+          units: 'METRIC',
+        }),
+      },
+      'Google public transport directions are unavailable right now.',
+    );
+  } catch (error) {
+    if (error?.status === 403 || error?.status === 404) return null;
+    throw error;
+  }
+
+  const route = payload.routes?.[0];
+  const seconds = Number.parseFloat(String(route?.duration || '').replace(/s$/, ''));
+  if (typeof route?.distanceMeters !== 'number' || !Number.isFinite(seconds)) return null;
+
+  const steps = (route.legs || []).flatMap((leg) =>
+    (leg.steps || []).flatMap((step) => {
+      const mode = step.travelMode === 'TRANSIT'
+        ? 'TRANSIT'
+        : step.travelMode === 'WALK'
+          ? 'WALK'
+          : null;
+      if (!mode || typeof step.distanceMeters !== 'number') return [];
+      const stepSeconds = Number.parseFloat(String(step.staticDuration || '').replace(/s$/, ''));
+      if (!Number.isFinite(stepSeconds)) return [];
+
+      const transit = step.transitDetails;
+      const lineName =
+        transit?.transitLine?.nameShort
+        || transit?.transitLine?.name
+        || null;
+      const departureStop = transit?.stopDetails?.departureStop?.name || null;
+      const arrivalStop = transit?.stopDetails?.arrivalStop?.name || null;
+      const instruction = mode === 'TRANSIT'
+        ? [
+            lineName ? `Take ${lineName}` : 'Take public transport',
+            transit?.headsign ? `towards ${transit.headsign}` : '',
+            departureStop && arrivalStop ? `from ${departureStop} to ${arrivalStop}` : '',
+          ].filter(Boolean).join(' ')
+        : step.navigationInstruction?.instructions || 'Walk to the next stop';
+
+      return [{
+        mode,
+        instruction,
+        durationMinutes: Math.max(1, Math.round(stepSeconds / 60)),
+        distanceMeters: step.distanceMeters,
+        lineName,
+        headsign: transit?.headsign || null,
+        departureStop,
+        arrivalStop,
+      }];
+    }),
+  );
+
+  return steps.length
+    ? {
+        durationMinutes: Math.max(1, Math.round(seconds / 60)),
+        distanceMeters: route.distanceMeters,
+        steps,
+        source: 'google_routes',
+      }
+    : null;
+}
