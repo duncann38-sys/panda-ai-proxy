@@ -124,8 +124,12 @@ export function sendVenueError(res, error, fallbackMessage) {
   res.status(status).json({ error: error?.message || fallbackMessage });
 }
 
-export async function searchVenueListings(query) {
-  const normalized = query.trim().toLocaleLowerCase('en-GB');
+export async function searchVenueListings(query, locationBias = null) {
+  const normalized = [
+    query.trim().toLocaleLowerCase('en-GB'),
+    locationBias?.latitude?.toFixed(3) || '',
+    locationBias?.longitude?.toFixed(3) || '',
+  ].join(':');
   const cached = searchCache.get(normalized);
   if (cached && cached.expiresAt > Date.now()) return cached.results;
 
@@ -148,6 +152,16 @@ export async function searchVenueListings(query) {
         regionCode: 'GB',
         languageCode: 'en-GB',
         pageSize: 20,
+        ...(locationBias
+          ? {
+              locationBias: {
+                circle: {
+                  center: locationBias,
+                  radius: 8000,
+                },
+              },
+            }
+          : {}),
       }),
     },
     'Google venue search is unavailable right now.',
