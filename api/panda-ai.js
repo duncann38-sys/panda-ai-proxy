@@ -88,7 +88,7 @@ async function googleSearch(query,lat,lng,pageToken,openNow){
     const data=await r.json();
     const places=data.places||[];
     const venues=places.map(p=>{
-      const loc=p.location||{};const photo=(p.photos&&p.photos[0])||null;
+      const loc=p.location||{};const placePhotos=Array.isArray(p.photos)?p.photos:[];const photo=placePhotos[0]||null;
       const attr=photo&&photo.authorAttributions&&photo.authorAttributions[0]?photo.authorAttributions[0].displayName:'';
       const musicIntent=/\b(live music|dj|music)\b/i.test(query||'');
       const typeText=p.primaryTypeDisplayName?.text||'';
@@ -104,7 +104,7 @@ async function googleSearch(query,lat,lng,pageToken,openNow){
         lat:loc.latitude??null,lng:loc.longitude??null,
         phone:p.nationalPhoneNumber||'',website:p.websiteUri||'',menuLink:p.websiteUri||'',
         mapsUri:p.googleMapsUri||'',directionsLink:p.googleMapsUri||'',
-        photoName:photo?photo.name:'',photoAttribution:attr};
+         photoName:photo?photo.name:'',photoAttribution:attr,photoCount:Math.min(10,placePhotos.length)};
     });
     return {venues,nextPageToken:data.nextPageToken||null};
   }catch{return {venues:[],nextPageToken:null}}
