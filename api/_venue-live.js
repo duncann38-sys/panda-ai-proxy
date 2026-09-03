@@ -61,6 +61,10 @@ function formatPlaceType(value) {
     .join(' ');
 }
 
+function isHospitalityType(value) {
+  return /restaurant|cafe|bar|pub|night_club|food_court|meal_takeaway/i.test(String(value || ''));
+}
+
 function formatPriceLevel(value) {
   return {
     PRICE_LEVEL_FREE: 'Free',
@@ -165,7 +169,7 @@ export async function searchVenueListings(query, locationBias = null) {
       'Google nearby venue search is unavailable right now.',
     );
     const nearbyResults = (nearbyPayload.places || []).flatMap((place) =>
-      place?.id && place?.displayName?.text && place?.formattedAddress
+      place?.id && place?.displayName?.text && place?.formattedAddress && isHospitalityType(place.primaryType)
         ? [{
             id: place.id,
             name: place.displayName.text,
@@ -215,7 +219,7 @@ export async function searchVenueListings(query, locationBias = null) {
   );
 
   const results = (payload.places || []).flatMap((place) =>
-    place?.id && place?.displayName?.text && place?.formattedAddress
+    place?.id && place?.displayName?.text && place?.formattedAddress && isHospitalityType(place.primaryType)
       ? [{
           id: place.id,
           name: place.displayName.text,
