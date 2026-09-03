@@ -74,11 +74,15 @@ function withDistances(rawVenues,lat,lng){
 }
 function googleCategoryTags(place,query){
   const types=new Set((place.types||[]).map(type=>String(type).toLowerCase()));
+  const primaryType=String(place.primaryType||place.types?.[0]||'').toLowerCase();
   const text=`${place.displayName?.text||''} ${place.primaryTypeDisplayName?.text||''}`.toLowerCase();
   const hospitality=new Set(['bar','breakfast_restaurant','brunch_restaurant','cafe','coffee_shop','dessert_restaurant','fast_food_restaurant','fine_dining_restaurant','food_court','hamburger_restaurant','meal_delivery','meal_takeaway','night_club','pub','restaurant','wine_bar']);
   const shops=new Set(['candy_store','convenience_store','dessert_shop','grocery_store','ice_cream_shop','liquor_store','market','shopping_mall','store','supermarket','wine_store']);
   const interests=new Set(['amusement_center','amusement_park','aquarium','art_gallery','botanical_garden','cultural_landmark','garden','historical_landmark','historical_place','marina','monument','museum','national_park','observation_deck','park','plaza','tourist_attraction','visitor_center','zoo']);
   const hasHospitality=[...types].some(type=>hospitality.has(type))||/(restaurant|cafe|coffee|bar|pub|night club|food court|takeaway)/.test(String(place.primaryTypeDisplayName?.text||'').toLowerCase());
+  const primaryHospitality=hospitality.has(primaryType)||/(restaurant|cafe|coffee|bar|pub|night club|food court|takeaway)/.test(String(place.primaryTypeDisplayName?.text||'').toLowerCase());
+  if(!primaryHospitality&&interests.has(primaryType))return ['Places of Interest'];
+  if(!primaryHospitality&&(shops.has(primaryType)||primaryType==='bakery'))return ['Shops'];
   if(!hasHospitality){
     if([...types].some(type=>interests.has(type)))return ['Places of Interest'];
     if([...types].some(type=>shops.has(type))||types.has('bakery'))return ['Shops'];
@@ -122,7 +126,7 @@ async function googleSearch(query,lat,lng,pageToken,openNow){
     const r=await fetch('https://places.googleapis.com/v1/places:searchText',{
       method:'POST',
       headers:{'Content-Type':'application/json','X-Goog-Api-Key':MAPS_KEY,
-        'X-Goog-FieldMask':['places.id','places.displayName','places.formattedAddress','places.shortFormattedAddress','places.location','places.rating','places.userRatingCount','places.priceLevel','places.priceRange','places.primaryTypeDisplayName','places.types','places.googleMapsUri','places.websiteUri','places.nationalPhoneNumber','places.currentOpeningHours.openNow','places.currentOpeningHours.weekdayDescriptions','places.regularOpeningHours.weekdayDescriptions','places.businessStatus','places.photos','nextPageToken'].join(',')},
+        'X-Goog-FieldMask':['places.id','places.displayName','places.formattedAddress','places.shortFormattedAddress','places.location','places.rating','places.userRatingCount','places.priceLevel','places.priceRange','places.primaryType','places.primaryTypeDisplayName','places.types','places.googleMapsUri','places.websiteUri','places.nationalPhoneNumber','places.currentOpeningHours.openNow','places.currentOpeningHours.weekdayDescriptions','places.regularOpeningHours.weekdayDescriptions','places.businessStatus','places.photos','nextPageToken'].join(',')},
       body:JSON.stringify(reqBody)
     });
     if(!r.ok) return {venues:[],nextPageToken:null};
@@ -135,7 +139,7 @@ async function googleSearch(query,lat,lng,pageToken,openNow){
       const typeText=p.primaryTypeDisplayName?.text||'';
       const typeMusic=/\b(night ?club|music|karaoke|concert)\b/i.test(`${typeText} ${(p.types||[]).join(' ')}`);
       const musicBadge=(musicIntent||typeMusic)?'🎵 Live Music / DJ':'';
-      return {id:p.id,name:p.displayName?.text||'Unknown',type:typeText,
+      return {id:p.id,name:p.displayName?.text||'Unknown',type:typeText,primaryType:p.primaryType||'',
         address:p.shortFormattedAddress||p.formattedAddress||'',fullAddress:p.formattedAddress||'',
         rating:p.rating||null,ratingCount:p.userRatingCount||null,price:PRICE[p.priceLevel]||'',
         priceRange:p.priceRange||null,
