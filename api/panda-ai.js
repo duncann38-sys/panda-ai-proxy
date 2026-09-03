@@ -15,10 +15,13 @@ const LOCATION = process.env.PANDA_LOCATION || 'us-central1';
 const MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY;
 const DEFAULT_LAT = 51.5074, DEFAULT_LNG = -0.1278;
 const PRICE = {PRICE_LEVEL_INEXPENSIVE:'\u00a3',PRICE_LEVEL_MODERATE:'\u00a3\u00a3',PRICE_LEVEL_EXPENSIVE:'\u00a3\u00a3\u00a3',PRICE_LEVEL_VERY_EXPENSIVE:'\u00a3\u00a3\u00a3\u00a3'};
-const CACHE_TTL_MS   = 10 * 60 * 1000;
+const CACHE_TTL_MS   = 30 * 60 * 1000;
 const CACHE_GRID     = 1000;
 const CACHE_COLLECTION = 'places_cache_v2';
 const GEO_COLLECTION = 'geocode_cache_v2';
+const MEMORY_CACHE_LIMIT = 250;
+const memoryCache = new Map();
+const inFlightSearches = new Map();
 let _db = null, _dbTried = false;
 function db(){
   if(_dbTried) return _db;
@@ -72,6 +75,17 @@ function withDistances(rawVenues,lat,lng){
     distanceMeters: (v.lat!=null && v.lng!=null) ? distMeters(lat,lng,v.lat,v.lng) : null
   })).sort((a,b)=>(a.distanceMeters??9e9)-(b.distanceMeters??9e9));
 }
+function readMemoryCache(key,lat,lng){
+  const cached=memoryCache.get(key);
+  if(!cached||Date.now()-cached.ts>=CACHE_TTL_MS){if(cached)memoryCache.delete(key);return null;}
+  memoryCache.delete(key);memoryCache.set(key,cached);
+  return {venues:withDistances(cached.venues,lat,lng),nextPageToken:cached.nextPageToken||null,cached:true};
+}
+function writeMemoryCache(key,result){
+  memoryCache.delete(key);
+  memoryCache.set(key,{ts:Date.now(),venues:result.venues,nextPageToken:result.nextPageToken||null});
+  while(memoryCache.size>MEMORY_CACHE_LIMIT)memoryCache.delete(memoryCache.keys().next().value);
+}
 function googleCategoryTags(place,query){
   const types=new Set((place.types||[]).map(type=>String(type).toLowerCase()));
   const primaryType=String(place.primaryType||place.types?.[0]||'').toLowerCase();
@@ -92,9 +106,9 @@ function googleCategoryTags(place,query){
   const q=String(query||'').toLowerCase();
   const cuisine=[['Indian','indian_restaurant'],['Italian','italian_restaurant'],['Chinese','chinese_restaurant'],['Spanish','spanish_restaurant'],['French','french_restaurant'],['British','british_restaurant'],['Japanese','japanese_restaurant'],['Mexican','mexican_restaurant'],['Turkish','turkish_restaurant'],['American','american_restaurant'],['Lebanese','lebanese_restaurant'],['Thai','thai_restaurant'],['Pizza','pizza_restaurant'],['Burgers','hamburger_restaurant']];
   cuisine.forEach(([tag,type])=>add(tag,types.has(type)));
-  [['Indian','indian'],['Italian','italian'],['Chinese','chinese'],['Spanish','spanish|tapas'],['French','french'],['British','british'],['Japanese','japanese|sushi'],['Mexican','mexican'],['Turkish','turkish'],['American','american|diner'],['Lebanese','lebanese|middle eastern'],['Thai','thai']].forEach(([tag,pattern])=>add(tag,hasHospitality&&new RegExp(`\\b(${pattern})\\b`).test(q)));
+  [['Indian','indian'],['Italian','italian'],['Chinese','chinese'],['Spanish','spanish|tapas'],['French','french'],['British','british'],['Japanese','japanese|sushi'],['Mexican','mexican'],['Turkish','turkish'],['American','american|diner|burger'],['Lebanese','lebanese|middle eastern|levantine'],['Thai','thai']].forEach(([tag,pattern])=>add(tag,hasHospitality&&new RegExp(`\\b(${pattern})\\b`).test(q)));
   add('Meat',types.has('steak_house')||/\b(steak|grill|barbecue|bbq|churrasco|roast)\b/.test(text)||hasHospitality&&/\b(meat|steak|grill)\b/.test(q));
-  add('Chicken',types.has('chicken_restaurant')||/\b(fried chicken|chicken shop)\b/.test(text)||hasHospitality&&/\bchicken\b/.test(q));
+  add('Chicken',types.has('chicken_restaurant')||/\b((fried|grilled|roast)\s+)?chicken\b/.test(text)||hasHospitality&&/\bchicken\b/.test(q));
   add('Pizza',types.has('pizza_restaurant')||/\bpizza\b/.test(text)||hasHospitality&&/\bpizza\b/.test(q));
   add('Burgers',types.has('hamburger_restaurant')||/\bburger\b/.test(text)||hasHospitality&&/\bburgers?\b/.test(q));
   const coffee=types.has('cafe')||types.has('coffee_shop')||/\b(cafe|coffee)\b/.test(String(place.primaryTypeDisplayName?.text||'').toLowerCase());
@@ -105,11 +119,11 @@ function googleCategoryTags(place,query){
   add('Pubs',pub);
   add('Bar',bar||hasHospitality&&/\b(cocktail|wine bar|bars?)\b/.test(q));
   add('Drinks',bar||pub||types.has('night_club')||hasHospitality&&/\b(cocktail|drinks?|wine bar)\b/.test(q));
-  add('Nightlife',types.has('night_club')||hasHospitality&&/\b(nightlife|clubs?)\b/.test(q));
+  add('Nightlife',types.has('night_club')||types.has('dance_hall')||types.has('event_venue')||types.has('performing_arts_theater')||hasHospitality&&/\b(nightlife|clubs?|live music|sports bars?|entertainment)\b/.test(q));
   add('Live Music',place.hasMusic===true||/\b(live music|music venue|concert|karaoke)\b/.test(text)||hasHospitality&&/\b(live music|dj)\b/.test(q));
   add('Sports',/\b(sports bar|football bar)\b/.test(text)||hasHospitality&&/\b(sports?|football)\b/.test(q));
-  add('Dessert',types.has('dessert_restaurant')||hasHospitality&&/\bdessert\b/.test(q));
-  add('Breakfast',hasHospitality&&(/\bbreakfast\b/.test(q)||types.has('breakfast_restaurant')));
+  add('Dessert',types.has('dessert_restaurant')||types.has('dessert_shop')||types.has('ice_cream_shop')||types.has('bakery')||(hasHospitality||types.has('bakery'))&&/\b(dessert|cake|ice cream|patisserie)\b/.test(q));
+  add('Breakfast',(hasHospitality||coffee)&&(/\b(breakfast|morning food)\b/.test(q)||types.has('breakfast_restaurant')));
   add('Brunch',hasHospitality&&(/\bbrunch\b/.test(q)||types.has('brunch_restaurant')));
   add('Bottomless',hasHospitality&&(/\bbottomless\b/.test(q)||/\bbottomless\b/.test(text)));
   add('Lunch',restaurant||coffee||pub||/\blunch\b/.test(q));
@@ -158,18 +172,26 @@ async function searchVenues(query,lat,lng,pageToken,openNow){
   if(!MAPS_KEY||!query) return {venues:[],nextPageToken:null};
   const store=db();
   const key = store ? cacheKey(query,lat,lng,openNow,pageToken) : null;
+  const memoryKey=cacheKey(query,lat,lng,openNow,pageToken);
+  const warm=readMemoryCache(memoryKey,lat,lng);
+  if(warm)return warm;
+  if(inFlightSearches.has(memoryKey))return inFlightSearches.get(memoryKey);
+  const searchPromise=(async()=>{
   if(store && key){
     try{
       const snap=await store.collection(CACHE_COLLECTION).doc(key).get();
       if(snap.exists){
         const d=snap.data();
         if(d && (Date.now()-d.ts) < CACHE_TTL_MS){
-          return { venues: withDistances(d.venues, lat, lng), nextPageToken: d.nextPageToken||null, cached:true };
+          const result={venues:withDistances(d.venues,lat,lng),nextPageToken:d.nextPageToken||null,cached:true};
+          writeMemoryCache(memoryKey,result);
+          return result;
         }
       }
     }catch(e){ }
   }
   const fresh=await googleSearch(query,lat,lng,pageToken,openNow);
+  writeMemoryCache(memoryKey,fresh);
   if(store && key && fresh.venues.length){
     try{
       await store.collection(CACHE_COLLECTION).doc(key).set({
@@ -181,6 +203,9 @@ async function searchVenues(query,lat,lng,pageToken,openNow){
     }catch(e){ }
   }
   return { venues: withDistances(fresh.venues, lat, lng), nextPageToken: fresh.nextPageToken||null, cached:false };
+  })();
+  inFlightSearches.set(memoryKey,searchPromise);
+  try{return await searchPromise;}finally{inFlightSearches.delete(memoryKey);}
 }
 function expansionCenters(lat,lng,radiusKm){
   const centers=[],dLat=radiusKm/111,dLng=radiusKm/(111*Math.cos(lat*Math.PI/180));
