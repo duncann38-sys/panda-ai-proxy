@@ -133,6 +133,53 @@ export async function searchVenueListings(query, locationBias = null) {
   const cached = searchCache.get(normalized);
   if (cached && cached.expiresAt > Date.now()) return cached.results;
 
+  if (locationBias && /\bnear me\b/i.test(query)) {
+    const nearbyPayload = await googleJson(
+      GOOGLE_NEARBY_URL,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': apiKey(),
+          'X-Goog-FieldMask': [
+            'places.id',
+            'places.displayName',
+            'places.formattedAddress',
+            'places.primaryType',
+          ].join(','),
+        },
+        body: JSON.stringify({
+          includedTypes: ['restaurant', 'cafe', 'bar', 'pub'],
+          maxResultCount: 20,
+          rankPreference: 'DISTANCE',
+          languageCode: 'en-GB',
+          regionCode: 'GB',
+          locationRestriction: {
+            circle: {
+              center: locationBias,
+              radius: 5000,
+            },
+          },
+        }),
+      },
+      'Google nearby venue search is unavailable right now.',
+    );
+    const nearbyResults = (nearbyPayload.places || []).flatMap((place) =>
+      place?.id && place?.displayName?.text && place?.formattedAddress
+        ? [{
+            id: place.id,
+            name: place.displayName.text,
+            address: place.formattedAddress,
+            category: formatPlaceType(place.primaryType),
+          }]
+        : [],
+    );
+    if (nearbyResults.length) {
+      searchCache.set(normalized, { results: nearbyResults, expiresAt: Date.now() + CACHE_TTL_MS });
+      return nearbyResults;
+    }
+  }
+
   const payload = await googleJson(
     GOOGLE_SEARCH_URL,
     {
