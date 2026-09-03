@@ -439,7 +439,7 @@ export default async function handler(req,res){
     const lat=location?.lat??DEFAULT_LAT, lng=location?.lng??DEFAULT_LNG;
     if(body.venuesOnly){
       const ringKm=Number(body.expansionRingKm);
-      if(Number.isFinite(ringKm)&&ringKm>=0.1&&ringKm<=4){
+      if(Number.isFinite(ringKm)&&ringKm>=0.1&&ringKm<=20){
         const venues=await searchVenueRing(body.query,lat,lng,ringKm);
         res.status(200).json({venues,nextPageToken:null,expansionRingKm:ringKm});
         return;
