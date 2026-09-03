@@ -1,5 +1,6 @@
 import {
   applyVenueGuard,
+  readCoordinates,
   searchVenueListings,
   sendVenueError,
 } from '../_venue-live.js';
@@ -13,8 +14,10 @@ export default async function handler(req, res) {
     return;
   }
 
+  const locationBias = readCoordinates(req.query);
+
   try {
-    const results = await searchVenueListings(query);
+    const results = await searchVenueListings(query, locationBias);
     res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=900, stale-while-revalidate=3600');
     res.status(200).json({ query, results });
   } catch (error) {
