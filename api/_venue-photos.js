@@ -2,7 +2,7 @@ import { applyGuard } from './_guard.js';
 
 const GOOGLE_DETAILS_URL = 'https://places.googleapis.com/v1/places';
 const GOOGLE_PHOTO_FIELD_MASK = 'photos.name,photos.authorAttributions';
-const MAX_VENUE_PHOTOS = 5;
+const MAX_VENUE_PHOTOS = 10;
 const VALID_PLACE_ID = /^[A-Za-z0-9_-]{8,256}$/;
 const CACHE_TTL_MS = 15 * 60 * 1000;
 const photoCache = new Map();

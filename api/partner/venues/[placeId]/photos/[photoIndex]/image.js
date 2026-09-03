@@ -5,7 +5,7 @@ import {
   sendVenuePhotoError,
 } from '../../../../../_venue-photos.js';
 
-const MAX_VENUE_PHOTOS = 5;
+const MAX_VENUE_PHOTOS = 10;
 
 export default async function handler(req, res) {
   if (applyVenuePhotoGuard(req, res)) return;
