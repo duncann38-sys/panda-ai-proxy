@@ -182,6 +182,36 @@ async function searchVenues(query,lat,lng,pageToken,openNow){
   }
   return { venues: withDistances(fresh.venues, lat, lng), nextPageToken: fresh.nextPageToken||null, cached:false };
 }
+function expansionCenters(lat,lng,radiusKm){
+  const centers=[],dLat=radiusKm/111,dLng=radiusKm/(111*Math.cos(lat*Math.PI/180));
+  for(let angle=0;angle<360;angle+=60){
+    const radians=angle*Math.PI/180;
+    centers.push({lat:lat+dLat*Math.sin(radians),lng:lng+dLng*Math.cos(radians)});
+  }
+  return centers;
+}
+async function searchVenueRing(query,lat,lng,radiusKm){
+  const batches=await Promise.all(expansionCenters(lat,lng,radiusKm).map(async center=>{
+    const venues=[];let pageToken;
+    for(let page=0;page<3;page+=1){
+      const result=await searchVenues(query,center.lat,center.lng,pageToken);
+      venues.push(...result.venues);
+      pageToken=result.nextPageToken;
+      if(!pageToken)break;
+    }
+    return venues;
+  }));
+  const merged=new Map();
+  batches.flat().forEach(venue=>{
+    if(!venue?.id)return;
+    const existing=merged.get(venue.id);
+    merged.set(venue.id,existing?{
+      ...existing,...venue,
+      categories:[...new Set([...(existing.categories||[]),...(venue.categories||[])])]
+    }:venue);
+  });
+  return withDistances([...merged.values()],lat,lng);
+}
 const STRICT_LOCATION_RULES={
   chelsea:['chelsea','sw3','sw10'],
   battersea:['battersea','sw11','sw8'],
@@ -382,7 +412,17 @@ export default async function handler(req,res){
     const body=req.body||{};
     const {systemInstruction,contents,generationConfig,location}=body;
     const lat=location?.lat??DEFAULT_LAT, lng=location?.lng??DEFAULT_LNG;
-    if(body.venuesOnly){const {venues,nextPageToken}=await searchVenues(body.query,lat,lng,body.pageToken);res.status(200).json({venues,nextPageToken});return;}
+    if(body.venuesOnly){
+      const ringKm=Number(body.expansionRingKm);
+      if(Number.isFinite(ringKm)&&ringKm>=0.1&&ringKm<=4){
+        const venues=await searchVenueRing(body.query,lat,lng,ringKm);
+        res.status(200).json({venues,nextPageToken:null,expansionRingKm:ringKm});
+        return;
+      }
+      const {venues,nextPageToken}=await searchVenues(body.query,lat,lng,body.pageToken);
+      res.status(200).json({venues,nextPageToken});
+      return;
+    }
     const userText=latestUserText(contents);
     if(isPubCrawlRequest(userText)){res.status(200).json(await buildCustomPubCrawl(userText,lat,lng));return;}
     async function degrade(){
