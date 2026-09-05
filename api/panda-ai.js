@@ -354,7 +354,27 @@ function extractArea(text){
   return /^(me|here)$/i.test(area)?'':area;
 }
 function isThemedRequest(text){return /\b(pub crawl|crawl|cozy|cosy|cheap|expensive|christmas|theme|live music|dj|music)\b/i.test(String(text||''));}
-function limitChatVenues(venues,userText,query){return isThemedRequest(`${userText||''} ${query||''}`)?(venues||[]).slice(0,6):(venues||[]);}
+const CHAT_CARD_LIMIT=20;
+const CHAT_MAX_DISTANCE_METERS=60000;
+function nearbyChatVenues(venues){
+  const unique=new Map();
+  for(const venue of venues||[]){
+    if(!venue?.id||!venue.photoName||Number(venue.photoCount)<5)continue;
+    if(!Number.isFinite(venue.distanceMeters)||venue.distanceMeters<0||venue.distanceMeters>CHAT_MAX_DISTANCE_METERS)continue;
+    if(!unique.has(venue.id))unique.set(venue.id,venue);
+  }
+  return [...unique.values()].sort((a,b)=>a.distanceMeters-b.distanceMeters).slice(0,CHAT_CARD_LIMIT);
+}
+async function searchChatVenues(query,lat,lng,area,openNow){
+  const first=await searchVenuesSmart(query,lat,lng,area,openNow);
+  let venues=nearbyChatVenues(first.venues);
+  if(venues.length<15&&first.nextPageToken&&!area){
+    const second=await searchVenues(query,lat,lng,first.nextPageToken,openNow);
+    venues=nearbyChatVenues([...(first.venues||[]),...(second.venues||[])]);
+  }
+  return venues;
+}
+function limitChatVenues(venues,userText,query){return (venues||[]).slice(0,15);}
 function latestUserText(contents){if(!Array.isArray(contents))return '';for(let i=contents.length-1;i>=0;i--){const c=contents[i];if(c?.role==='user'&&Array.isArray(c.parts)){const t=c.parts.map(p=>p.text||'').join(' ').trim();if(t)return t;}}return '';}
 function isPubCrawlRequest(text){return /\b(?:pub|bar|drinks?)?\s*crawl\b/i.test(String(text||''));}
 function pubCrawlLimit(){return 8;}
@@ -441,6 +461,7 @@ function fallbackQuery(text){
     .replace(/^(?:i(?:'d| would) like|i want|looking for)\s+/i,'')
     .replace(/[,.!?]+$/g,'')
     .trim();
+  if(/^(?:what(?:'s| is) open(?: now)?|open now)$/i.test(specific)) return 'restaurants bars cafes';
   if(specific.length>=2 && specific.length<=120) return specific;
   return 'restaurants and bars';
 }
@@ -510,8 +531,8 @@ export default async function handler(req,res){
       }
       const wantOpen=/\bopen\b/i.test(userText);
       const q=fallbackQuery(userText),area=extractArea(userText);
-      let found=(await searchVenuesSmart(q,lat,lng,area,wantOpen)).venues;
-      if(!found.length){found=(await searchVenuesSmart('restaurants and bars',lat,lng,area,false)).venues;}
+      let found=await searchChatVenues(q,lat,lng,area,wantOpen);
+      if(!found.length){found=await searchChatVenues('restaurants and bars',lat,lng,area,false);}
       found=limitChatVenues(found,userText,q);
       res.status(200).json({text:found.length?"Grabbed a few spots near you \uD83D\uDC3C":pick(NORESULT_LINES),venues:found,richMetadata:true,aiMode:'fallback',aiFallbackReason:reason});
     }
@@ -539,8 +560,8 @@ export default async function handler(req,res){
       const q=args.query||userText;
       const area=extractArea(userText)||args.area||'';
       const wantOpen=/\bopen\b/i.test(q)||/\bopen\b/i.test(userText);
-      let found=(await searchVenuesSmart(q,lat,lng,area,wantOpen)).venues;
-      if(!found.length){const broad=(userText||q).split(' ').slice(0,4).join(' ')+' restaurants bars';found=(await searchVenuesSmart(broad,lat,lng,area,false)).venues;}
+      let found=await searchChatVenues(q,lat,lng,area,wantOpen);
+      if(!found.length){const broad=(userText||q).split(' ').slice(0,4).join(' ')+' restaurants bars';found=await searchChatVenues(broad,lat,lng,area,false);}
       if(found.length) venues=limitChatVenues(found,userText,q);
       convo.push(cand.content);
       convo.push({role:'user',parts:[{functionResponse:{name:'find_places',response:{venues:venuesToText(found,userText)}}}]});
@@ -554,7 +575,7 @@ export default async function handler(req,res){
     let text=(resp.data?.candidates?.[0]?.content?.parts||[]).map(p=>p.text||'').join('').trim();
     if(!venues.length&&wantsPlaces(userText)&&!isGreeting(userText)){
       const fallbackArea=extractArea(userText);
-      const found=(await searchVenuesSmart(fallbackQuery(userText),lat,lng,fallbackArea,false)).venues;
+      const found=await searchChatVenues(fallbackQuery(userText),lat,lng,fallbackArea,false);
       venues=limitChatVenues(found,userText,userText);
     }
     if(!text) text=venues.length?"Here's what I dug up near you \uD83D\uDC3C":pick(NORESULT_LINES);
