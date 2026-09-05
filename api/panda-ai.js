@@ -214,6 +214,23 @@ async function mapLimited(values,limit,callback){
   }));
   return output;
 }
+function compactBatchVenue(venue){
+  const todayIndex=(new Date().getUTCDay()+6)%7;
+  const openingHours=Array.isArray(venue.openingHours)
+    ? venue.openingHours.map((value,index)=>index===todayIndex?value:'')
+    : undefined;
+  return {
+    id:venue.id,name:venue.name,type:venue.type,primaryType:venue.primaryType,
+    address:venue.address,fullAddress:venue.fullAddress,rating:venue.rating,
+    ratingCount:venue.ratingCount,price:venue.price,openNow:venue.openNow,
+    openingHours,lat:venue.lat,lng:venue.lng,phone:venue.phone,
+    website:venue.website||venue.menuLink,mapsUri:venue.directionsLink||venue.mapsUri,
+    photoName:venue.photoName,photoAttribution:venue.photoAttribution,
+    photoCount:venue.photoCount,types:venue.types,hasMusic:venue.hasMusic,
+    categories:venue.categories,distanceMeters:venue.distanceMeters,
+    sourceQueries:venue.sourceQueries
+  };
+}
 async function searchVenueBatch(queries,lat,lng){
   const normalized=[...new Set((Array.isArray(queries)?queries:[])
     .map(value=>String(value||'').trim())
@@ -235,7 +252,7 @@ async function searchVenueBatch(queries,lat,lng){
       sourceQueries:[...new Set([...(existing.sourceQueries||[]),...(venue.sourceQueries||[])])]
     }:venue);
   });
-  return withDistances([...merged.values()],lat,lng);
+  return withDistances([...merged.values()],lat,lng).slice(0,160).map(compactBatchVenue);
 }
 function expansionCenters(lat,lng,radiusKm){
   const centers=[],dLat=radiusKm/111,dLng=radiusKm/(111*Math.cos(lat*Math.PI/180));
