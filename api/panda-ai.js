@@ -424,23 +424,21 @@ async function buildCustomPubCrawl(userText,lat,lng){
 const GREET_RE=/^\s*(hi+|hey+|hello+|yo+|sup|hiya|howdy|heya|good\s?(morning|afternoon|evening|day)|thanks|thank\s?you|cheers|ta|nice one|ok(ay)?|cool|nice|lol|haha|hah| | | )\s*[!.?]*\s*$/i;
 const PLACE_RE=/\b(eat|food|lunch|dinner|breakfast|brunch|coffee|drink|drinks|bar|pub|wine|beer|cocktail|restaurant|cafe|takeaway|book|table|rooftop|club|night|date|hungry|thirsty|steak|meat|pizza|sushi|burger|ramen|curry|tapas|football|match|watch|near|nearby|around|open|cheap|budget|fancy|vegan|halal|music|dj|crawl|cozy|cosy|christmas|theme|£|\$)\b/i;
 function isGreeting(t){return GREET_RE.test((t||'').trim());}
-function wantsPlaces(t){return PLACE_RE.test(t||'');}
+const SMALL_TALK_RE=/^(?:thanks|thank you|cheers|nice one|how are you|who are you|what can you do|help)[!.?\s]*$/i;
+function wantsPlaces(t){
+  const value=String(t||'').trim();
+  return PLACE_RE.test(value) || (value.length>=3 && !isGreeting(value) && !SMALL_TALK_RE.test(value));
+}
 function fallbackQuery(text){
-  const t=(text||'').toLowerCase();
-  const map=[
-    [/\b(live music|dj|music)\b/,'live music venues and bars'],
-    [/\b(pub crawl|crawl)\b/,'pubs and bars'],
-    [/\b(meat|steak)\b/,'steak and meat restaurants'],
-    [/\b(club|clubbing|night ?out|big night|rave|party|dance)\b/,'nightclubs and bars'],
-    [/\b(cocktail|drinks?|pub|wine|beer|booze)\b/,'bars and pubs'],
-    [/\b(coffee|cafe|espresso|flat white)\b/,'coffee shops'],
-    [/\b(breakfast|brunch)\b/,'brunch and breakfast'],
-    [/\b(lunch)\b/,'lunch restaurants'],
-    [/\b(football|match|sport|game)\b/,'sports bars showing football'],
-    [/\b(date|romantic|anniversary)\b/,'romantic restaurants'],
-    [/\b(dinner|eat|food|hungry|restaurant|meal|takeaway)\b/,'restaurants'],
-  ];
-  for(const [re,q] of map){ if(re.test(t)) return q; }
+  const raw=String(text||'').trim();
+  const withoutArea=raw.replace(/\b(?:in|near|around|at)\s+(.+?)(?:\s+(?:tonight|today|tomorrow|please|for me))?\s*[,.!?]*$/i,'').trim();
+  const specific=withoutArea
+    .replace(/^(?:can you|could you|would you|please)\s+/i,'')
+    .replace(/^(?:find|show|recommend)(?:\s+me)?\s+/i,'')
+    .replace(/^(?:i(?:'d| would) like|i want|looking for)\s+/i,'')
+    .replace(/[,.!?]+$/g,'')
+    .trim();
+  if(specific.length>=2 && specific.length<=120) return specific;
   return 'restaurants and bars';
 }
 function pick(a){return a[Math.floor(Math.random()*a.length)];}
