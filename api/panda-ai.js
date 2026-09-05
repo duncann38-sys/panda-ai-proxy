@@ -207,6 +207,36 @@ async function searchVenues(query,lat,lng,pageToken,openNow){
   inFlightSearches.set(memoryKey,searchPromise);
   try{return await searchPromise;}finally{inFlightSearches.delete(memoryKey);}
 }
+async function mapLimited(values,limit,callback){
+  const output=new Array(values.length);let nextIndex=0;
+  await Promise.all(Array.from({length:Math.min(limit,values.length)},async()=>{
+    while(nextIndex<values.length){const index=nextIndex;nextIndex+=1;output[index]=await callback(values[index]);}
+  }));
+  return output;
+}
+async function searchVenueBatch(queries,lat,lng){
+  const normalized=[...new Set((Array.isArray(queries)?queries:[])
+    .map(value=>String(value||'').trim())
+    .filter(Boolean))].slice(0,14);
+  const batches=await mapLimited(normalized,4,async query=>{
+    const result=await searchVenues(query,lat,lng);
+    return result.venues.map(venue=>({
+      ...venue,
+      sourceQueries:[...new Set([...(venue.sourceQueries||[]),query])]
+    }));
+  });
+  const merged=new Map();
+  batches.flat().forEach(venue=>{
+    if(!venue?.id)return;
+    const existing=merged.get(venue.id);
+    merged.set(venue.id,existing?{
+      ...existing,...venue,
+      categories:[...new Set([...(existing.categories||[]),...(venue.categories||[])])],
+      sourceQueries:[...new Set([...(existing.sourceQueries||[]),...(venue.sourceQueries||[])])]
+    }:venue);
+  });
+  return withDistances([...merged.values()],lat,lng);
+}
 function expansionCenters(lat,lng,radiusKm){
   const centers=[],dLat=radiusKm/111,dLng=radiusKm/(111*Math.cos(lat*Math.PI/180));
   for(let angle=0;angle<360;angle+=60){
@@ -438,6 +468,11 @@ export default async function handler(req,res){
     const {systemInstruction,contents,generationConfig,location}=body;
     const lat=location?.lat??DEFAULT_LAT, lng=location?.lng??DEFAULT_LNG;
     if(body.venuesOnly){
+      if(Array.isArray(body.queries)){
+        const venues=await searchVenueBatch(body.queries,lat,lng);
+        res.status(200).json({venues,nextPageToken:null,batched:true,queryCount:Math.min(body.queries.length,14)});
+        return;
+      }
       const ringKm=Number(body.expansionRingKm);
       if(Number.isFinite(ringKm)&&ringKm>=0.1&&ringKm<=20){
         const venues=await searchVenueRing(body.query,lat,lng,ringKm);
