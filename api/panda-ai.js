@@ -8,9 +8,12 @@
 import { GoogleAuth } from 'google-auth-library';
 import admin from 'firebase-admin';
 import { applyGuard } from './_guard.js';
-const MODELS = (process.env.PANDA_MODEL
-  ? [process.env.PANDA_MODEL]
-  : ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']);
+const MODELS = [...new Set([
+  process.env.PANDA_MODEL,
+  'gemini-2.5-flash',
+  'gemini-2.0-flash',
+  'gemini-1.5-flash',
+].filter(Boolean))];
 const LOCATION = process.env.PANDA_LOCATION || 'us-central1';
 const MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY;
 const DEFAULT_LAT = 51.5074, DEFAULT_LNG = -0.1278;
