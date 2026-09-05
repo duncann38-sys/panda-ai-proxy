@@ -503,9 +503,9 @@ export default async function handler(req,res){
     }
     const userText=latestUserText(contents);
     if(isPubCrawlRequest(userText)){res.status(200).json(await buildCustomPubCrawl(userText,lat,lng));return;}
-    async function degrade(){
+    async function degrade(reason='unknown'){
       if(isGreeting(userText) || !wantsPlaces(userText)){
-        res.status(200).json({text:pick(GREET_LINES),venues:[]});
+        res.status(200).json({text:pick(GREET_LINES),venues:[],aiMode:'fallback',aiFallbackReason:reason});
         return;
       }
       const wantOpen=/\bopen\b/i.test(userText);
@@ -517,7 +517,7 @@ export default async function handler(req,res){
     }
     let credentials;
     try{ credentials=JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT); }
-    catch(e){ await degrade(); return; }
+    catch(e){ await degrade('credentials-config'); return; }
     const auth=new GoogleAuth({credentials,scopes:['https://www.googleapis.com/auth/cloud-platform']});
     const client=await auth.getClient();
     const {token}=await client.getAccessToken();
@@ -528,7 +528,7 @@ export default async function handler(req,res){
     if(generationConfig)baseBody.generationConfig=generationConfig;
     let venues=[];
     let resp=await gemini(token,projectId,baseBody);
-    if(!resp.ok){ await degrade(); return; }
+    if(!resp.ok){ await degrade(`vertex-${resp.status||'network'}`); return; }
     let rounds=0;
     while(rounds<2){
       const cand=resp.data.candidates?.[0];
