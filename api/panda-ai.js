@@ -513,7 +513,7 @@ export default async function handler(req,res){
       let found=(await searchVenuesSmart(q,lat,lng,area,wantOpen)).venues;
       if(!found.length){found=(await searchVenuesSmart('restaurants and bars',lat,lng,area,false)).venues;}
       found=limitChatVenues(found,userText,q);
-      res.status(200).json({text:found.length?"Grabbed a few spots near you \uD83D\uDC3C":pick(NORESULT_LINES),venues:found,richMetadata:true});
+      res.status(200).json({text:found.length?"Grabbed a few spots near you \uD83D\uDC3C":pick(NORESULT_LINES),venues:found,richMetadata:true,aiMode:'fallback',aiFallbackReason:reason});
     }
     let credentials;
     try{ credentials=JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT); }
