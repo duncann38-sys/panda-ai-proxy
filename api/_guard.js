@@ -1,4 +1,7 @@
 // Panda — shared request guard: origin allow-list (CORS) + rate limiting. (ESM)
+const NATIVE_APP_ORIGINS = new Set(['null', 'capacitor://localhost', 'ionic://localhost']);
+const LOCAL_APP_ORIGIN = /^http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?$/i;
+
 const ALLOWED_ORIGINS = [
   'https://duncann38-sys.github.io',
   'https://bbfb166e-b180-43a7-a542-83c501c07b45-00-2u9xn7rdnqdst.archer.replit.dev',
@@ -29,7 +32,13 @@ function rateLimited(req) {
 
 export function applyGuard(req, res, { methods = ['POST', 'OPTIONS'], limit = true } = {}) {
   const origin = req.headers.origin || '';
-  const isAllowed = ALLOWED_ORIGINS.includes(origin);
+  // Installed mobile bundles can identify their local JS runtime as null or localhost.
+  // These endpoints are public and separately rate-limited; admit those app origins
+  // while continuing to reject unrelated web origins.
+  const isAllowed =
+    ALLOWED_ORIGINS.includes(origin) ||
+    NATIVE_APP_ORIGINS.has(origin) ||
+    LOCAL_APP_ORIGIN.test(origin);
 
   if (isAllowed) {
     res.setHeader('Access-Control-Allow-Origin', origin);
