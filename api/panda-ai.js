@@ -8,6 +8,11 @@
 import { GoogleAuth } from 'google-auth-library';
 import admin from 'firebase-admin';
 import { applyGuard } from './_guard.js';
+import {
+  compactConversation,
+  consumeDailyBudget,
+  requestFingerprint,
+} from './_cost-controls.js';
 const MODELS = [...new Set([
   process.env.PANDA_MODEL,
   'gemini-2.5-flash',
@@ -25,6 +30,10 @@ const GEO_COLLECTION = 'geocode_cache_v2';
 const MEMORY_CACHE_LIMIT = 250;
 const memoryCache = new Map();
 const inFlightSearches = new Map();
+const inFlightGemini = new Map();
+const recentGemini = new Map();
+const GEMINI_RETRY_CACHE_MS = 15 * 1000;
+const GEMINI_CACHE_LIMIT = 100;
 let _db = null, _dbTried = false;
 function db(){
   if(_dbTried) return _db;
@@ -137,6 +146,8 @@ function googleCategoryTags(place,query){
 async function googleSearch(query,lat,lng,pageToken,openNow){
   if(!MAPS_KEY||!query) return {venues:[],nextPageToken:null};
   try{
+    const budget=await consumeDailyBudget(db(),'places',process.env.PANDA_DAILY_PLACES_LIMIT);
+    if(!budget.allowed)return {venues:[],nextPageToken:null,budgetExceeded:true};
     const reqBody={textQuery:query,maxResultCount:20,rankPreference:'DISTANCE',locationBias:{circle:{center:{latitude:lat,longitude:lng},radius:6000.0}}};
     if(openNow===true) reqBody.openNow=true;
     if(pageToken) reqBody.pageToken=pageToken;
@@ -194,6 +205,9 @@ async function searchVenues(query,lat,lng,pageToken,openNow){
     }catch(e){ }
   }
   const fresh=await googleSearch(query,lat,lng,pageToken,openNow);
+  if(fresh.budgetExceeded){
+    return {venues:[],nextPageToken:null,cached:false,budgetExceeded:true};
+  }
   writeMemoryCache(memoryKey,fresh);
   if(store && key && fresh.venues.length){
     try{
@@ -479,6 +493,14 @@ const NORESULT_LINES=[
   "That one\u2019s playing hard to get \u2014 rephrase it and I\u2019ll have another go \uD83D\uDC3C"
 ];
 async function gemini(token,projectId,body){
+  const key=requestFingerprint(body);
+  const cached=recentGemini.get(key);
+  if(cached&&cached.expiresAt>Date.now())return cached.result;
+  if(cached)recentGemini.delete(key);
+  if(inFlightGemini.has(key))return inFlightGemini.get(key);
+  const request=(async()=>{
+  const budget=await consumeDailyBudget(db(),'gemini',process.env.PANDA_DAILY_GEMINI_LIMIT);
+  if(!budget.allowed)return {ok:false,status:429,data:{},budgetExceeded:true};
   let last={ok:false,status:0,data:{}};
   for(const model of MODELS){
     try{
@@ -491,6 +513,17 @@ async function gemini(token,projectId,body){
     }catch(e){ last={ok:false,status:500,data:{error:String(e)}}; }
   }
   return last;
+  })();
+  inFlightGemini.set(key,request);
+  try{
+    const result=await request;
+    if(result.ok){
+      recentGemini.delete(key);
+      recentGemini.set(key,{result,expiresAt:Date.now()+GEMINI_RETRY_CACHE_MS});
+      while(recentGemini.size>GEMINI_CACHE_LIMIT)recentGemini.delete(recentGemini.keys().next().value);
+    }
+    return result;
+  }finally{inFlightGemini.delete(key);}
 }
 const FIND_PLACES_TOOL={functionDeclarations:[{
   name:'find_places',
@@ -543,13 +576,15 @@ export default async function handler(req,res){
     const client=await auth.getClient();
     const {token}=await client.getAccessToken();
     const projectId=credentials.project_id;
-    const convo=Array.isArray(contents)?contents.slice():[];
+    const convo=process.env.PANDA_COMPACT_CONVERSATION==='true'
+      ?compactConversation(contents)
+      :(Array.isArray(contents)?contents.slice():[]);
     const baseBody={contents:convo,tools:[FIND_PLACES_TOOL]};
     if(systemInstruction)baseBody.systemInstruction=systemInstruction.parts?systemInstruction:{parts:[{text:String(systemInstruction)}]};
     if(generationConfig)baseBody.generationConfig=generationConfig;
     let venues=[];
     let resp=await gemini(token,projectId,baseBody);
-    if(!resp.ok){ await degrade(`vertex-${resp.status||'network'}`); return; }
+    if(!resp.ok){ await degrade(resp.budgetExceeded?'gemini-daily-budget':`vertex-${resp.status||'network'}`); return; }
     let rounds=0;
     while(rounds<2){
       const cand=resp.data.candidates?.[0];
