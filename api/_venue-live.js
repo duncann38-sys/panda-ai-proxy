@@ -1,13 +1,69 @@
 import { applyGuard } from './_guard.js';
+import { createHash } from 'node:crypto';
+import admin from 'firebase-admin';
+import { boundedCacheExpiry } from './_cost-controls.js';
 
 const GOOGLE_DETAILS_URL = 'https://places.googleapis.com/v1/places';
 const GOOGLE_NEARBY_URL = 'https://places.googleapis.com/v1/places:searchNearby';
 const GOOGLE_ROUTES_URL = 'https://routes.googleapis.com/directions/v2:computeRoutes';
 const GOOGLE_SEARCH_URL = 'https://places.googleapis.com/v1/places:searchText';
 const CACHE_TTL_MS = 15 * 60 * 1000;
+const SEARCH_CACHE_TTL_MS = 30 * 60 * 1000;
 const VALID_PLACE_ID = /^[A-Za-z0-9_-]{8,256}$/;
 const searchCache = new Map();
 const profileCache = new Map();
+const inFlightSearches = new Map();
+const inFlightProfiles = new Map();
+let _db = null;
+let _dbTried = false;
+
+function db() {
+  if (_dbTried) return _db;
+  _dbTried = true;
+  try {
+    if (!process.env.FIREBASE_SERVICE_ACCOUNT) return (_db = null);
+    if (!admin.apps.length) {
+      admin.initializeApp({
+        credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
+      });
+    }
+    _db = admin.firestore();
+  } catch {
+    _db = null;
+  }
+  return _db;
+}
+
+function sharedCacheId(value) {
+  return createHash('sha256').update(value).digest('base64url');
+}
+
+async function readSharedCache(collection, key, ttlMs) {
+  const store = db();
+  if (!store) return null;
+  try {
+    const snapshot = await store.collection(collection).doc(sharedCacheId(key)).get();
+    if (!snapshot.exists) return null;
+    const data = snapshot.data();
+    if (!data || Date.now() - Number(data.ts || 0) >= ttlMs) return null;
+    return { value: data.value ?? null, ts: Number(data.ts) };
+  } catch {
+    return null;
+  }
+}
+
+async function writeSharedCache(collection, key, value) {
+  const store = db();
+  if (!store) return;
+  try {
+    await store.collection(collection).doc(sharedCacheId(key)).set({
+      ts: Date.now(),
+      value,
+    });
+  } catch {
+    // Live venue delivery must not depend on Firestore availability.
+  }
+}
 
 const PROFILE_FIELD_MASK = [
   'id',
@@ -136,6 +192,21 @@ export async function searchVenueListings(query, locationBias = null) {
   ].join(':');
   const cached = searchCache.get(normalized);
   if (cached && cached.expiresAt > Date.now()) return cached.results;
+  const shared = await readSharedCache('venue_search_cache_v1', normalized, SEARCH_CACHE_TTL_MS);
+  if (Array.isArray(shared?.value)) {
+    searchCache.set(normalized, {
+      results: shared.value,
+      expiresAt: boundedCacheExpiry(
+        Date.now(),
+        CACHE_TTL_MS,
+        shared.ts,
+        SEARCH_CACHE_TTL_MS,
+      ),
+    });
+    return shared.value;
+  }
+  if (inFlightSearches.has(normalized)) return inFlightSearches.get(normalized);
+  const request = (async () => {
 
   if (locationBias && /\bnear me\b/i.test(query)) {
     const nearbyPayload = await googleJson(
@@ -180,6 +251,7 @@ export async function searchVenueListings(query, locationBias = null) {
     );
     if (nearbyResults.length) {
       searchCache.set(normalized, { results: nearbyResults, expiresAt: Date.now() + CACHE_TTL_MS });
+      await writeSharedCache('venue_search_cache_v1', normalized, nearbyResults);
       return nearbyResults;
     }
   }
@@ -229,12 +301,30 @@ export async function searchVenueListings(query, locationBias = null) {
       : [],
   );
   searchCache.set(normalized, { results, expiresAt: Date.now() + CACHE_TTL_MS });
+  await writeSharedCache('venue_search_cache_v1', normalized, results);
   return results;
+  })();
+  inFlightSearches.set(normalized, request);
+  try {
+    return await request;
+  } finally {
+    inFlightSearches.delete(normalized);
+  }
 }
 
 export async function getVenueProfile(placeId) {
   const cached = profileCache.get(placeId);
   if (cached && cached.expiresAt > Date.now()) return cached.profile;
+  const shared = await readSharedCache('venue_profile_cache_v1', placeId, CACHE_TTL_MS);
+  if (shared?.value && typeof shared.value === 'object') {
+    profileCache.set(placeId, {
+      profile: shared.value,
+      expiresAt: boundedCacheExpiry(Date.now(), CACHE_TTL_MS, shared.ts, CACHE_TTL_MS),
+    });
+    return shared.value;
+  }
+  if (inFlightProfiles.has(placeId)) return inFlightProfiles.get(placeId);
+  const request = (async () => {
 
   let place;
   try {
@@ -300,7 +390,15 @@ export async function getVenueProfile(placeId) {
   };
 
   profileCache.set(placeId, { profile, expiresAt: Date.now() + CACHE_TTL_MS });
+  await writeSharedCache('venue_profile_cache_v1', placeId, profile);
   return profile;
+  })();
+  inFlightProfiles.set(placeId, request);
+  try {
+    return await request;
+  } finally {
+    inFlightProfiles.delete(placeId);
+  }
 }
 
 export async function findNearestTransitStation(latitude, longitude) {
