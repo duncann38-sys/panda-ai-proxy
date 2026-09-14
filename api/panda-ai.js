@@ -597,7 +597,16 @@ export default async function handler(req,res){
       :(Array.isArray(contents)?contents.slice():[]);
     const baseBody={contents:convo,tools:[FIND_PLACES_TOOL]};
     if(systemInstruction)baseBody.systemInstruction=systemInstruction.parts?systemInstruction:{parts:[{text:String(systemInstruction)}]};
-    if(generationConfig)baseBody.generationConfig=generationConfig;
+    const maxOutputTokens=boundedInteger(process.env.PANDA_MAX_OUTPUT_TOKENS,0,0,4096);
+    if(generationConfig||maxOutputTokens){
+      baseBody.generationConfig={...(generationConfig||{})};
+      if(maxOutputTokens){
+        const requested=Number(baseBody.generationConfig.maxOutputTokens);
+        baseBody.generationConfig.maxOutputTokens=Number.isFinite(requested)
+          ?Math.min(requested,maxOutputTokens)
+          :maxOutputTokens;
+      }
+    }
     let venues=[];
     const cacheLocation={
       lat:Math.round(lat*10000)/10000,
@@ -624,7 +633,7 @@ export default async function handler(req,res){
       convo.push({role:'user',parts:[{functionResponse:{name:'find_places',response:{venues:venuesToText(found,userText)}}}]});
       const nextBody={contents:convo,tools:[FIND_PLACES_TOOL]};
       if(baseBody.systemInstruction)nextBody.systemInstruction=baseBody.systemInstruction;
-      if(generationConfig)nextBody.generationConfig=generationConfig;
+      if(baseBody.generationConfig)nextBody.generationConfig=baseBody.generationConfig;
       resp=await gemini(token,projectId,nextBody,{...cacheLocation,stage:`tool-${rounds+1}`});
       if(!resp.ok) break;
       rounds++;
