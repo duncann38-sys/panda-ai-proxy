@@ -1,10 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  boundedCacheExpiry,
+  boundedInteger,
+  cacheableGeminiFunctionCall,
   compactConversation,
   consumeDailyBudget,
   configuredDailyLimit,
+  readSharedGeminiCall,
   requestFingerprint,
+  writeSharedGeminiCall,
 } from '../api/_cost-controls.js';
 
 test('conversation compaction preserves the newest context and order', () => {
@@ -78,4 +83,78 @@ test('daily budgets reject calls after the configured shared limit', async () =>
   const blocked = await consumeDailyBudget(store, 'gemini', '2');
   assert.equal(blocked.allowed, false);
   assert.equal(blocked.current, 2);
+});
+
+test('bounded integers preserve defaults and clamp configured tool rounds', () => {
+  assert.equal(boundedInteger(undefined, 2, 0, 2), 2);
+  assert.equal(boundedInteger('0', 2, 0, 2), 0);
+  assert.equal(boundedInteger('20', 2, 0, 2), 2);
+});
+
+test('shared cache promotion never extends the authoritative source lifetime', () => {
+  const minute = 60_000;
+  const sourceTimestamp = 1_000_000;
+  const now = sourceTimestamp + 14 * minute;
+  assert.equal(
+    boundedCacheExpiry(now, 15 * minute, sourceTimestamp, 15 * minute),
+    sourceTimestamp + 15 * minute,
+  );
+  assert.equal(
+    boundedCacheExpiry(now, 5 * minute, sourceTimestamp, 30 * minute),
+    now + 5 * minute,
+  );
+});
+
+test('only function-call-only Gemini responses qualify for shared caching', () => {
+  const functionCall = {
+    ok: true,
+    data: { candidates: [{ content: { parts: [{ functionCall: { name: 'find_places' } }] } }] },
+  };
+  const finalText = {
+    ok: true,
+    data: { candidates: [{ content: { parts: [{ text: 'Try this place.' }] } }] },
+  };
+  assert.equal(cacheableGeminiFunctionCall(functionCall), true);
+  assert.equal(cacheableGeminiFunctionCall(finalText), false);
+  assert.equal(cacheableGeminiFunctionCall({ ...functionCall, ok: false }), false);
+});
+
+test('shared Gemini cache reads fresh function calls and rejects expired entries', async () => {
+  const docs = new Map();
+  const store = {
+    collection() {
+      return {
+        doc(key) {
+          return {
+            async get() {
+              return {
+                exists: docs.has(key),
+                data: () => docs.get(key),
+              };
+            },
+            async set(value) {
+              docs.set(key, value);
+            },
+          };
+        },
+      };
+    },
+  };
+  const result = {
+    ok: true,
+    status: 200,
+    data: { candidates: [{ content: { parts: [{ functionCall: { name: 'find_places' } }] } }] },
+  };
+  assert.equal(await writeSharedGeminiCall(store, 'key', result, 1000), true);
+  assert.deepEqual(await readSharedGeminiCall(store, 'key', 5000, 2000), result);
+  assert.equal(await readSharedGeminiCall(store, 'key', 5000, 7000), null);
+
+  docs.set('text-key', {
+    ts: 1000,
+    result: {
+      ok: true,
+      data: { candidates: [{ content: { parts: [{ text: 'private final answer' }] } }] },
+    },
+  });
+  assert.equal(await readSharedGeminiCall(store, 'text-key', 5000, 2000), null);
 });
