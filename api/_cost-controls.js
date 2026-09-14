@@ -16,6 +16,12 @@ function contentSize(content) {
   }
 }
 
+function startsUserTurn(content) {
+  return content?.role === 'user'
+    && Array.isArray(content.parts)
+    && content.parts.some((part) => typeof part?.text === 'string');
+}
+
 export function compactConversation(
   contents,
   {
@@ -24,16 +30,26 @@ export function compactConversation(
   } = {},
 ) {
   if (!Array.isArray(contents)) return [];
-  const selected = [];
-  let chars = 0;
-  for (let index = contents.length - 1; index >= 0 && selected.length < maxItems; index -= 1) {
-    const item = contents[index];
-    const size = contentSize(item);
-    if (selected.length && chars + size > maxChars) break;
-    selected.unshift(item);
-    chars += size;
+  const turns = [];
+  for (const item of contents) {
+    if (startsUserTurn(item)) turns.push([item]);
+    else if (turns.length) turns[turns.length - 1].push(item);
   }
-  return selected;
+  if (!turns.length) return [];
+
+  const selectedTurns = [];
+  let itemCount = 0;
+  let chars = 0;
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index];
+    const turnChars = turn.reduce((sum, item) => sum + contentSize(item), 0);
+    const fits = itemCount + turn.length <= maxItems && chars + turnChars <= maxChars;
+    if (selectedTurns.length && !fits) break;
+    selectedTurns.unshift(turn);
+    itemCount += turn.length;
+    chars += turnChars;
+  }
+  return selectedTurns.flat();
 }
 
 export function requestFingerprint(value) {
