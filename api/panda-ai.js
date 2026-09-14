@@ -9,9 +9,13 @@ import { GoogleAuth } from 'google-auth-library';
 import admin from 'firebase-admin';
 import { applyGuard } from './_guard.js';
 import {
+  boundedInteger,
+  cacheableGeminiFunctionCall,
   compactConversation,
   consumeDailyBudget,
+  readSharedGeminiCall,
   requestFingerprint,
+  writeSharedGeminiCall,
 } from './_cost-controls.js';
 const MODELS = [...new Set([
   process.env.PANDA_MODEL,
@@ -34,6 +38,7 @@ const inFlightGemini = new Map();
 const recentGemini = new Map();
 const GEMINI_RETRY_CACHE_MS = 15 * 1000;
 const GEMINI_CACHE_LIMIT = 100;
+const SHARED_GEMINI_CACHE_MS = 5 * 60 * 1000;
 let _db = null, _dbTried = false;
 function db(){
   if(_dbTried) return _db;
@@ -492,13 +497,18 @@ const NORESULT_LINES=[
   "Nothing jumped out for that exact thing. Give me a cuisine or a budget and I\u2019ll dig again.",
   "That one\u2019s playing hard to get \u2014 rephrase it and I\u2019ll have another go \uD83D\uDC3C"
 ];
-async function gemini(token,projectId,body){
-  const key=requestFingerprint(body);
+async function gemini(token,projectId,body,cacheContext={}){
+  const key=requestFingerprint({body,cacheContext});
   const cached=recentGemini.get(key);
   if(cached&&cached.expiresAt>Date.now())return cached.result;
   if(cached)recentGemini.delete(key);
   if(inFlightGemini.has(key))return inFlightGemini.get(key);
   const request=(async()=>{
+  const sharedCacheEnabled=process.env.PANDA_SHARED_GEMINI_CACHE==='true';
+  if(sharedCacheEnabled){
+    const shared=await readSharedGeminiCall(db(),key,SHARED_GEMINI_CACHE_MS);
+    if(shared)return shared;
+  }
   const budget=await consumeDailyBudget(db(),'gemini',process.env.PANDA_DAILY_GEMINI_LIMIT);
   if(!budget.allowed)return {ok:false,status:429,data:{},budgetExceeded:true};
   let last={ok:false,status:0,data:{}};
@@ -507,7 +517,13 @@ async function gemini(token,projectId,body){
       const url=`https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${LOCATION}/publishers/google/models/${model}:generateContent`;
       const r=await fetch(url,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify(body)});
       const data=await r.json().catch(()=>({}));
-      if(r.ok) return {ok:true,status:r.status,data};
+      if(r.ok) {
+        const result={ok:true,status:r.status,data};
+        if(sharedCacheEnabled&&cacheableGeminiFunctionCall(result)){
+          await writeSharedGeminiCall(db(),key,result);
+        }
+        return result;
+      }
       last={ok:false,status:r.status,data};
       if(r.status!==404 && r.status!==400) return last;
     }catch(e){ last={ok:false,status:500,data:{error:String(e)}}; }
@@ -583,10 +599,16 @@ export default async function handler(req,res){
     if(systemInstruction)baseBody.systemInstruction=systemInstruction.parts?systemInstruction:{parts:[{text:String(systemInstruction)}]};
     if(generationConfig)baseBody.generationConfig=generationConfig;
     let venues=[];
-    let resp=await gemini(token,projectId,baseBody);
+    const cacheLocation={
+      lat:Math.round(lat*10000)/10000,
+      lng:Math.round(lng*10000)/10000,
+      stage:'initial',
+    };
+    let resp=await gemini(token,projectId,baseBody,cacheLocation);
     if(!resp.ok){ await degrade(resp.budgetExceeded?'gemini-daily-budget':`vertex-${resp.status||'network'}`); return; }
     let rounds=0;
-    while(rounds<2){
+    const maxToolRounds=boundedInteger(process.env.PANDA_MAX_TOOL_ROUNDS,2,0,2);
+    while(rounds<maxToolRounds){
       const cand=resp.data.candidates?.[0];
       const parts=cand?.content?.parts||[];
       const fc=parts.find(p=>p.functionCall);
@@ -603,7 +625,7 @@ export default async function handler(req,res){
       const nextBody={contents:convo,tools:[FIND_PLACES_TOOL]};
       if(baseBody.systemInstruction)nextBody.systemInstruction=baseBody.systemInstruction;
       if(generationConfig)nextBody.generationConfig=generationConfig;
-      resp=await gemini(token,projectId,nextBody);
+      resp=await gemini(token,projectId,nextBody,{...cacheLocation,stage:`tool-${rounds+1}`});
       if(!resp.ok) break;
       rounds++;
     }
