@@ -30,8 +30,9 @@ they contain current opening information. Photo metadata is cached for six hours
 memory and 24 hours in Firestore, with a seven-day stale copy available only when
 Google is unavailable. Image bytes continue to be served through Vercel CDN caching.
 
-Conversation compaction is opt-in. When `PANDA_COMPACT_CONVERSATION=true`, payloads
-retain the newest 24 content items up to 60,000 serialized characters. With the flag
+Conversation compaction is opt-in and preserves complete user-led turns. When
+`PANDA_COMPACT_CONVERSATION=true`, payloads retain the newest 24 content items up
+to 60,000 serialized characters. With the flag
 unset, Panda sends the full conversation exactly as before. This makes the initial
 rollout backwards-compatible while allowing token controls to be canary-tested later.
 
@@ -60,6 +61,7 @@ on Replit at runtime, and no mobile response contract is changed.
 | `PANDA_MAX_CONVERSATION_CHARS` *(optional)* | Maximum serialized conversation characters sent to Gemini (default 60000) | no |
 | `PANDA_SHARED_GEMINI_CACHE` *(optional)* | Set to `true` after canary testing to share function-call-only Gemini results across Vercel instances | no |
 | `PANDA_MAX_TOOL_ROUNDS` *(optional)* | Maximum Gemini tool rounds, clamped to 0–2; unset preserves the current value of 2 | no |
+| `PANDA_MAX_OUTPUT_TOKENS` *(optional)* | Optional server ceiling for Gemini output tokens; unset preserves the caller's current setting | no |
 
 ## Dependencies (`package.json`)
 ```json
