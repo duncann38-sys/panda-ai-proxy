@@ -40,6 +40,53 @@ export function requestFingerprint(value) {
   return createHash('sha256').update(JSON.stringify(value)).digest('base64url');
 }
 
+export function boundedInteger(value, fallback, min, max) {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+}
+
+export function boundedCacheExpiry(now, localTtlMs, sourceTimestamp, sourceTtlMs) {
+  return Math.min(now + localTtlMs, Number(sourceTimestamp) + sourceTtlMs);
+}
+
+export function cacheableGeminiFunctionCall(result) {
+  if (!result?.ok) return false;
+  const parts = result.data?.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts) || !parts.some((part) => part?.functionCall)) return false;
+  return !parts.some((part) => typeof part?.text === 'string' && part.text.trim());
+}
+
+export async function readSharedGeminiCall(store, key, ttlMs, now = Date.now()) {
+  if (!store) return null;
+  try {
+    const snapshot = await store.collection('gemini_function_cache_v1').doc(key).get();
+    if (!snapshot.exists) return null;
+    const data = snapshot.data();
+    if (
+      !data
+      || now - Number(data.ts || 0) >= ttlMs
+      || !cacheableGeminiFunctionCall(data.result)
+    ) return null;
+    return data.result;
+  } catch {
+    return null;
+  }
+}
+
+export async function writeSharedGeminiCall(store, key, result, now = Date.now()) {
+  if (!store || !cacheableGeminiFunctionCall(result)) return false;
+  try {
+    await store.collection('gemini_function_cache_v1').doc(key).set({
+      ts: now,
+      result,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function configuredDailyLimit(value) {
   const parsed = Number.parseInt(String(value ?? ''), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
