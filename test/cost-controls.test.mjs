@@ -34,6 +34,21 @@ test('conversation compaction applies a character budget without dropping the la
   assert.ok(compacted.length >= 1);
 });
 
+test('conversation compaction preserves complete user-led turns', () => {
+  const contents = [
+    { role: 'model', parts: [{ text: 'orphaned model preface' }] },
+    { role: 'user', parts: [{ text: 'first question' }] },
+    { role: 'model', parts: [{ functionCall: { name: 'find_places' } }] },
+    { role: 'user', parts: [{ functionResponse: { name: 'find_places', response: {} } }] },
+    { role: 'model', parts: [{ text: 'first answer' }] },
+    { role: 'user', parts: [{ text: 'latest question' }] },
+    { role: 'model', parts: [{ text: 'latest answer' }] },
+  ];
+  const compacted = compactConversation(contents, { maxItems: 3, maxChars: 10_000 });
+  assert.deepEqual(compacted, contents.slice(-2));
+  assert.equal(compacted[0].role, 'user');
+});
+
 test('request fingerprints are stable and distinguish different requests', () => {
   const request = { contents: [{ role: 'user', parts: [{ text: 'Find dinner' }] }] };
   assert.equal(requestFingerprint(request), requestFingerprint(request));
