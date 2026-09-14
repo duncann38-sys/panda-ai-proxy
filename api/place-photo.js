@@ -26,7 +26,7 @@ export default async function handler(req, res) {
     if (!r.ok) { res.status(r.status).end(); return; }
     const buf = Buffer.from(await r.arrayBuffer());
     res.setHeader('Content-Type', r.headers.get('content-type') || 'image/jpeg');
-    res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400');
+    res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=604800, stale-while-revalidate=2592000');
     res.status(200).send(buf);
   } catch (err) {
     res.status(500).json({ error: err.message });
