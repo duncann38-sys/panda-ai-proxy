@@ -1,12 +1,36 @@
 import { applyGuard } from './_guard.js';
+import admin from 'firebase-admin';
+import { boundedCacheExpiry } from './_cost-controls.js';
 
 const GOOGLE_DETAILS_URL = 'https://places.googleapis.com/v1/places';
 const GOOGLE_PHOTO_FIELD_MASK = 'photos.name,photos.authorAttributions';
 const MAX_VENUE_PHOTOS = 10;
 const VALID_PLACE_ID = /^[A-Za-z0-9_-]{8,256}$/;
-const CACHE_TTL_MS = 15 * 60 * 1000;
+const MEMORY_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const SHARED_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const STALE_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const SHARED_CACHE_COLLECTION = 'venue_photo_cache_v1';
 const photoCache = new Map();
 const inFlightPhotos = new Map();
+let _db = null;
+let _dbTried = false;
+
+function db() {
+  if (_dbTried) return _db;
+  _dbTried = true;
+  try {
+    if (!process.env.FIREBASE_SERVICE_ACCOUNT) return (_db = null);
+    if (!admin.apps.length) {
+      admin.initializeApp({
+        credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
+      });
+    }
+    _db = admin.firestore();
+  } catch {
+    _db = null;
+  }
+  return _db;
+}
 
 function requestError(message, status) {
   const error = new Error(message);
@@ -58,6 +82,48 @@ async function loadVenuePhotos(placeId) {
     .slice(0, MAX_VENUE_PHOTOS);
 }
 
+function cacheInMemory(
+  placeId,
+  photos,
+  sourceTimestamp = Date.now(),
+  sourceTtlMs = SHARED_CACHE_TTL_MS,
+) {
+  const now = Date.now();
+  photoCache.set(placeId, {
+    photos,
+    sourceTimestamp,
+    expiresAt: boundedCacheExpiry(now, MEMORY_CACHE_TTL_MS, sourceTimestamp, sourceTtlMs),
+  });
+}
+
+async function readSharedVenuePhotos(placeId) {
+  const store = db();
+  if (!store) return null;
+  try {
+    const snapshot = await store.collection(SHARED_CACHE_COLLECTION).doc(placeId).get();
+    if (!snapshot.exists) return null;
+    const data = snapshot.data();
+    if (!data || !Array.isArray(data.photos) || !Number.isFinite(Number(data.ts))) return null;
+    return { photos: data.photos.slice(0, MAX_VENUE_PHOTOS), ts: Number(data.ts) };
+  } catch {
+    return null;
+  }
+}
+
+async function writeSharedVenuePhotos(placeId, photos) {
+  const store = db();
+  if (!store) return;
+  try {
+    await store.collection(SHARED_CACHE_COLLECTION).doc(placeId).set({
+      placeId,
+      photos,
+      ts: Date.now(),
+    });
+  } catch {
+    // Photo delivery must not fail because the shared cache is unavailable.
+  }
+}
+
 export async function getVenuePhotos(placeId) {
   const cached = photoCache.get(placeId);
   if (cached && cached.expiresAt > Date.now()) return cached.photos;
@@ -65,11 +131,25 @@ export async function getVenuePhotos(placeId) {
   const active = inFlightPhotos.get(placeId);
   if (active) return active;
 
-  const request = loadVenuePhotos(placeId)
-    .then((photos) => {
-      photoCache.set(placeId, { photos, expiresAt: Date.now() + CACHE_TTL_MS });
-      return photos;
-    })
+  const request = (async () => {
+      const shared = await readSharedVenuePhotos(placeId);
+      if (shared && Date.now() - shared.ts < SHARED_CACHE_TTL_MS) {
+        cacheInMemory(placeId, shared.photos, shared.ts);
+        return shared.photos;
+      }
+      try {
+        const photos = await loadVenuePhotos(placeId);
+        cacheInMemory(placeId, photos);
+        await writeSharedVenuePhotos(placeId, photos);
+        return photos;
+      } catch (error) {
+        if (shared && Date.now() - shared.ts < STALE_CACHE_TTL_MS) {
+          cacheInMemory(placeId, shared.photos, shared.ts, STALE_CACHE_TTL_MS);
+          return shared.photos;
+        }
+        throw error;
+      }
+    })()
     .finally(() => inFlightPhotos.delete(placeId));
 
   inFlightPhotos.set(placeId, request);
