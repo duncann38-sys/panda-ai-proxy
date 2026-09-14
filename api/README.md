@@ -16,8 +16,19 @@ Covers both the Discover feed and Panda AI.
 
 Exact concurrent Gemini requests are coalesced, and successful raw Gemini responses
 are retained for 15 seconds to absorb double taps and immediate network retries.
-The cache key includes the complete compacted request, so different conversations,
+The cache key includes the complete request and rounded location context, so different conversations,
 locations, instructions, or generation settings do not share a response.
+
+An optional cross-instance Firestore cache stores only function-call-only Gemini
+responses for five minutes. It never stores Panda's final conversational text.
+This reduces repeated intent-routing calls without sharing personalised answers,
+changing personality, or making opening hours and directions stale.
+
+Venue listing and profile lookups now use shared Firestore caches as well as bounded
+in-process caches. Profiles retain the existing 15-minute freshness window because
+they contain current opening information. Photo metadata is cached for six hours in
+memory and 24 hours in Firestore, with a seven-day stale copy available only when
+Google is unavailable. Image bytes continue to be served through Vercel CDN caching.
 
 Conversation compaction is opt-in. When `PANDA_COMPACT_CONVERSATION=true`, payloads
 retain the newest 24 content items up to 60,000 serialized characters. With the flag
@@ -47,6 +58,8 @@ on Replit at runtime, and no mobile response contract is changed.
 | `PANDA_COMPACT_CONVERSATION` *(optional)* | Set to `true` only after canary testing to enable conversation bounds | no |
 | `PANDA_MAX_CONVERSATION_ITEMS` *(optional)* | Maximum recent conversation items sent to Gemini (default 24) | no |
 | `PANDA_MAX_CONVERSATION_CHARS` *(optional)* | Maximum serialized conversation characters sent to Gemini (default 60000) | no |
+| `PANDA_SHARED_GEMINI_CACHE` *(optional)* | Set to `true` after canary testing to share function-call-only Gemini results across Vercel instances | no |
+| `PANDA_MAX_TOOL_ROUNDS` *(optional)* | Maximum Gemini tool rounds, clamped to 0–2; unset preserves the current value of 2 | no |
 
 ## Dependencies (`package.json`)
 ```json
@@ -78,11 +91,15 @@ Once billing is restored, use a small canary:
 Firestore collections:
 
 - `places_cache_v2` — shared Places results.
+- `venue_search_cache_v1` — shared lightweight venue listings.
+- `venue_profile_cache_v1` — shared 15-minute venue profiles.
+- `venue_photo_cache_v1` — shared photo metadata with stale resilience.
+- `gemini_function_cache_v1` — optional function-call-only Gemini responses.
 - `panda_usage_budgets_v1` — UTC daily request counters.
 
 ## Rollout
 
-1. Deploy code with daily limits and conversation compaction unset. This enables exact duplicate-call protection without blocking or trimming traffic.
+1. Deploy code with daily limits, shared Gemini caching and conversation compaction unset. This enables exact in-process duplicate-call protection plus safe shared venue/photo caching without blocking or trimming traffic.
 2. Confirm the production endpoint response contract with a few canary requests after billing is restored.
 3. Set budgets below the matching Google Cloud quotas, leaving capacity for operational checks.
 4. Monitor cache-hit rate, fallback rate, Gemini calls per conversation, and Places calls per discovery session.
