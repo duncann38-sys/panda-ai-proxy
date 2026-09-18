@@ -19,30 +19,32 @@ let requestsSinceCleanup = 0;
 
 function pruneExpiredHits(now) {
   requestsSinceCleanup += 1;
-  if (hits.size <= MAX_TRACKED_CLIENTS && requestsSinceCleanup < 256) return;
+  if (hits.size < MAX_TRACKED_CLIENTS && requestsSinceCleanup < 256) return;
   requestsSinceCleanup = 0;
   for (const [ip, record] of hits) {
     if (now - record.start > WINDOW_MS) hits.delete(ip);
   }
-  while (hits.size > MAX_TRACKED_CLIENTS) {
-    hits.delete(hits.keys().next().value);
-  }
 }
 
-function rateLimited(req) {
+export function rateLimited(req, now = Date.now()) {
   const ip =
     (req.headers['x-forwarded-for'] || '').split(',')[0].trim() ||
     req.socket?.remoteAddress ||
     'unknown';
-  const now = Date.now();
   pruneExpiredHits(now);
   const rec = hits.get(ip);
   if (!rec || now - rec.start > WINDOW_MS) {
+    if (!rec && hits.size >= MAX_TRACKED_CLIENTS) return true;
     hits.set(ip, { start: now, count: 1 });
     return false;
   }
   rec.count++;
   return rec.count > MAX_PER_WINDOW;
+}
+
+export function resetRateLimitForTests() {
+  hits.clear();
+  requestsSinceCleanup = 0;
 }
 
 export function applyGuard(req, res, { methods = ['POST', 'OPTIONS'], limit = true } = {}) {
