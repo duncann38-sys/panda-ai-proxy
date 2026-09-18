@@ -42,6 +42,10 @@ venue-aware fallback and preserves the normal response shape. When the Places bu
 is reached, cached requests continue to work while new cache misses return no venues.
 Provider-side Google Cloud quotas should remain the final hard billing stop.
 
+The existing per-minute request guard retains its current behaviour but now prunes
+expired client records and caps its in-process map, preventing memory growth under
+high-cardinality launch traffic.
+
 These controls live in Panda's GitHub/Vercel backend. The Native app does not depend
 on Replit at runtime, and no mobile response contract is changed.
 
