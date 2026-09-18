@@ -1,6 +1,6 @@
 import { applyGuard } from './_guard.js';
 import admin from 'firebase-admin';
-import { boundedCacheExpiry } from './_cost-controls.js';
+import { boundedCacheExpiry, recordCostEvent } from './_cost-controls.js';
 
 const GOOGLE_DETAILS_URL = 'https://places.googleapis.com/v1/places';
 const GOOGLE_PHOTO_FIELD_MASK = 'photos.name,photos.authorAttributions';
@@ -58,6 +58,7 @@ export function sendVenuePhotoError(res, error) {
 }
 
 async function loadVenuePhotos(placeId) {
+  recordCostEvent('photo_metadata_provider_call');
   const response = await fetch(GOOGLE_DETAILS_URL + '/' + encodeURIComponent(placeId), {
     headers: {
       'X-Goog-Api-Key': apiKey(),
@@ -126,7 +127,10 @@ async function writeSharedVenuePhotos(placeId, photos) {
 
 export async function getVenuePhotos(placeId) {
   const cached = photoCache.get(placeId);
-  if (cached && cached.expiresAt > Date.now()) return cached.photos;
+  if (cached && cached.expiresAt > Date.now()) {
+    recordCostEvent('photo_metadata_cache_hit', { layer: 'memory' });
+    return cached.photos;
+  }
 
   const active = inFlightPhotos.get(placeId);
   if (active) return active;
@@ -135,6 +139,7 @@ export async function getVenuePhotos(placeId) {
       const shared = await readSharedVenuePhotos(placeId);
       if (shared && Date.now() - shared.ts < SHARED_CACHE_TTL_MS) {
         cacheInMemory(placeId, shared.photos, shared.ts);
+        recordCostEvent('photo_metadata_cache_hit', { layer: 'firestore' });
         return shared.photos;
       }
       try {
@@ -145,6 +150,7 @@ export async function getVenuePhotos(placeId) {
       } catch (error) {
         if (shared && Date.now() - shared.ts < STALE_CACHE_TTL_MS) {
           cacheInMemory(placeId, shared.photos, shared.ts, STALE_CACHE_TTL_MS);
+          recordCostEvent('photo_metadata_stale_hit', { layer: 'firestore' });
           return shared.photos;
         }
         throw error;
