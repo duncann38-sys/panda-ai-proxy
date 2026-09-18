@@ -11,8 +11,11 @@ import { applyGuard } from './_guard.js';
 import {
   boundedInteger,
   cacheableGeminiFunctionCall,
+  clientFingerprint,
   compactConversation,
+  consumeClientDailyBudget,
   consumeDailyBudget,
+  recordCostEvent,
   readSharedGeminiCall,
   requestFingerprint,
   writeSharedGeminiCall,
@@ -96,6 +99,7 @@ function readMemoryCache(key,lat,lng){
   const cached=memoryCache.get(key);
   if(!cached||Date.now()-cached.ts>=CACHE_TTL_MS){if(cached)memoryCache.delete(key);return null;}
   memoryCache.delete(key);memoryCache.set(key,cached);
+  recordCostEvent('places_cache_hit',{layer:'memory'});
   return {venues:withDistances(cached.venues,lat,lng),nextPageToken:cached.nextPageToken||null,cached:true};
 }
 function writeMemoryCache(key,result){
@@ -153,6 +157,7 @@ async function googleSearch(query,lat,lng,pageToken,openNow){
   try{
     const budget=await consumeDailyBudget(db(),'places',process.env.PANDA_DAILY_PLACES_LIMIT);
     if(!budget.allowed)return {venues:[],nextPageToken:null,budgetExceeded:true};
+    recordCostEvent('places_provider_call',{openNow:openNow===true,page:Boolean(pageToken)});
     const reqBody={textQuery:query,maxResultCount:20,rankPreference:'DISTANCE',locationBias:{circle:{center:{latitude:lat,longitude:lng},radius:6000.0}}};
     if(openNow===true) reqBody.openNow=true;
     if(pageToken) reqBody.pageToken=pageToken;
@@ -204,6 +209,7 @@ async function searchVenues(query,lat,lng,pageToken,openNow){
         if(d && (Date.now()-d.ts) < CACHE_TTL_MS){
           const result={venues:withDistances(d.venues,lat,lng),nextPageToken:d.nextPageToken||null,cached:true};
           writeMemoryCache(memoryKey,result);
+          recordCostEvent('places_cache_hit',{layer:'firestore'});
           return result;
         }
       }
@@ -500,17 +506,27 @@ const NORESULT_LINES=[
 async function gemini(token,projectId,body,cacheContext={}){
   const key=requestFingerprint({body,cacheContext});
   const cached=recentGemini.get(key);
-  if(cached&&cached.expiresAt>Date.now())return cached.result;
+  if(cached&&cached.expiresAt>Date.now()){
+    recordCostEvent('gemini_cache_hit',{layer:'memory'});
+    return cached.result;
+  }
   if(cached)recentGemini.delete(key);
-  if(inFlightGemini.has(key))return inFlightGemini.get(key);
+  if(inFlightGemini.has(key)){
+    recordCostEvent('gemini_coalesced',{layer:'memory'});
+    return inFlightGemini.get(key);
+  }
   const request=(async()=>{
   const sharedCacheEnabled=process.env.PANDA_SHARED_GEMINI_CACHE==='true';
   if(sharedCacheEnabled){
     const shared=await readSharedGeminiCall(db(),key,SHARED_GEMINI_CACHE_MS);
-    if(shared)return shared;
+    if(shared){
+      recordCostEvent('gemini_cache_hit',{layer:'firestore',responseType:'function_call'});
+      return shared;
+    }
   }
   const budget=await consumeDailyBudget(db(),'gemini',process.env.PANDA_DAILY_GEMINI_LIMIT);
   if(!budget.allowed)return {ok:false,status:429,data:{},budgetExceeded:true};
+  recordCostEvent('gemini_provider_call',{modelCount:MODELS.length});
   let last={ok:false,status:0,data:{}};
   for(const model of MODELS){
     try{
@@ -585,6 +601,12 @@ export default async function handler(req,res){
       found=limitChatVenues(found,userText,q);
       res.status(200).json({text:found.length?"Grabbed a few spots near you \uD83D\uDC3C":pick(NORESULT_LINES),venues:found,richMetadata:true,aiMode:'fallback',aiFallbackReason:reason});
     }
+    const clientBudget=await consumeClientDailyBudget(
+      db(),
+      clientFingerprint(req),
+      process.env.PANDA_DAILY_CLIENT_AI_LIMIT,
+    );
+    if(!clientBudget.allowed){await degrade('client-daily-budget');return;}
     let credentials;
     try{ credentials=JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT); }
     catch(e){ await degrade('credentials-config'); return; }
