@@ -4,7 +4,9 @@ import {
   boundedCacheExpiry,
   boundedInteger,
   cacheableGeminiFunctionCall,
+  clientFingerprint,
   compactConversation,
+  consumeClientDailyBudget,
   consumeDailyBudget,
   configuredDailyLimit,
   readSharedGeminiCall,
@@ -98,6 +100,52 @@ test('daily budgets reject calls after the configured shared limit', async () =>
   const blocked = await consumeDailyBudget(store, 'gemini', '2');
   assert.equal(blocked.allowed, false);
   assert.equal(blocked.current, 2);
+});
+
+test('client fingerprints are stable without retaining raw network identifiers', () => {
+  const req = {
+    headers: {
+      'x-forwarded-for': '192.0.2.20, 10.0.0.1',
+      'user-agent': 'Panda Test',
+    },
+  };
+  const fingerprint = clientFingerprint(req, 'test-salt');
+  assert.equal(fingerprint, clientFingerprint(req, 'test-salt'));
+  assert.equal(
+    fingerprint,
+    clientFingerprint({
+      headers: {
+        'x-forwarded-for': '192.0.2.20, 10.0.0.1',
+        'user-agent': 'Rotated User Agent',
+      },
+    }, 'test-salt'),
+  );
+  assert.equal(fingerprint.includes('192.0.2.20'), false);
+  assert.equal(clientFingerprint(req, ''), null);
+});
+
+test('per-client daily AI budgets reject only after the configured count', async () => {
+  let count = 0;
+  const store = {
+    collection() {
+      return { doc() { return {}; } };
+    },
+    async runTransaction(callback) {
+      return callback({
+        async get() {
+          return { data: () => ({ aiRequests: count }) };
+        },
+        set(_ref, value) {
+          count = value.aiRequests;
+        },
+      });
+    },
+  };
+  assert.equal((await consumeClientDailyBudget(store, 'client', '1')).allowed, true);
+  assert.equal((await consumeClientDailyBudget(store, 'client', '1')).allowed, false);
+  const missingSalt = await consumeClientDailyBudget(store, null, '1');
+  assert.equal(missingSalt.allowed, true);
+  assert.equal(missingSalt.misconfigured, true);
 });
 
 test('bounded integers preserve defaults and clamp configured tool rounds', () => {
