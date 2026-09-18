@@ -13,7 +13,21 @@ const ALLOWED_ORIGINS = [
 
 const WINDOW_MS = 60 * 1000;
 const MAX_PER_WINDOW = 15;
+const MAX_TRACKED_CLIENTS = 5000;
 const hits = new Map();
+let requestsSinceCleanup = 0;
+
+function pruneExpiredHits(now) {
+  requestsSinceCleanup += 1;
+  if (hits.size <= MAX_TRACKED_CLIENTS && requestsSinceCleanup < 256) return;
+  requestsSinceCleanup = 0;
+  for (const [ip, record] of hits) {
+    if (now - record.start > WINDOW_MS) hits.delete(ip);
+  }
+  while (hits.size > MAX_TRACKED_CLIENTS) {
+    hits.delete(hits.keys().next().value);
+  }
+}
 
 function rateLimited(req) {
   const ip =
@@ -21,6 +35,7 @@ function rateLimited(req) {
     req.socket?.remoteAddress ||
     'unknown';
   const now = Date.now();
+  pruneExpiredHits(now);
   const rec = hits.get(ip);
   if (!rec || now - rec.start > WINDOW_MS) {
     hits.set(ip, { start: now, count: 1 });
