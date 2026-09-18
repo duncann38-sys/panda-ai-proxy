@@ -56,6 +56,23 @@ export function requestFingerprint(value) {
   return createHash('sha256').update(JSON.stringify(value)).digest('base64url');
 }
 
+export function clientFingerprint(req, salt = process.env.PANDA_CLIENT_HASH_SALT || '') {
+  if (!salt) return null;
+  const forwarded = String(req?.headers?.['x-forwarded-for'] || '').split(',')[0].trim();
+  const address = forwarded || req?.socket?.remoteAddress || 'unknown';
+  return requestFingerprint({ address, salt });
+}
+
+export function recordCostEvent(event, fields = {}) {
+  if (process.env.PANDA_USAGE_METRICS !== 'true') return;
+  console.info(JSON.stringify({
+    type: 'panda_cost',
+    event,
+    timestamp: new Date().toISOString(),
+    ...fields,
+  }));
+}
+
 export function boundedInteger(value, fallback, min, max) {
   const parsed = Number.parseInt(String(value ?? ''), 10);
   if (!Number.isFinite(parsed)) return fallback;
@@ -131,6 +148,39 @@ export async function consumeDailyBudget(store, kind, configuredLimit, now = new
   } catch {
     // Availability wins if Firestore has a transient problem. Provider-side
     // quotas remain the final hard stop.
+    return { allowed: true, enabled: true, shared: false };
+  }
+}
+
+export async function consumeClientDailyBudget(
+  store,
+  clientKey,
+  configuredLimit,
+  now = new Date(),
+) {
+  const limit = configuredDailyLimit(configuredLimit);
+  if (!limit) return { allowed: true, enabled: false };
+  if (!clientKey) return { allowed: true, enabled: true, shared: false, misconfigured: true };
+  if (!store) return { allowed: true, enabled: true, shared: false };
+
+  const day = now.toISOString().slice(0, 10);
+  const ref = store.collection('panda_client_budgets_v1').doc(`${day}_${clientKey}`);
+  try {
+    return await store.runTransaction(async (transaction) => {
+      const snapshot = await transaction.get(ref);
+      const current = Number(snapshot.data()?.aiRequests || 0);
+      if (current >= limit) {
+        return { allowed: false, enabled: true, shared: true, current, limit };
+      }
+      const next = current + 1;
+      transaction.set(ref, {
+        day,
+        updatedAt: Date.now(),
+        aiRequests: next,
+      }, { merge: true });
+      return { allowed: true, enabled: true, shared: true, current: next, limit };
+    });
+  } catch {
     return { allowed: true, enabled: true, shared: false };
   }
 }
