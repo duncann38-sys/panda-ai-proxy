@@ -1,7 +1,7 @@
 import { applyGuard } from './_guard.js';
 import { createHash } from 'node:crypto';
 import admin from 'firebase-admin';
-import { boundedCacheExpiry } from './_cost-controls.js';
+import { boundedCacheExpiry, recordCostEvent } from './_cost-controls.js';
 
 const GOOGLE_DETAILS_URL = 'https://places.googleapis.com/v1/places';
 const GOOGLE_NEARBY_URL = 'https://places.googleapis.com/v1/places:searchNearby';
@@ -194,6 +194,7 @@ export async function searchVenueListings(query, locationBias = null) {
   if (cached && cached.expiresAt > Date.now()) return cached.results;
   const shared = await readSharedCache('venue_search_cache_v1', normalized, SEARCH_CACHE_TTL_MS);
   if (Array.isArray(shared?.value)) {
+    recordCostEvent('venue_search_cache_hit', { layer: 'firestore' });
     searchCache.set(normalized, {
       results: shared.value,
       expiresAt: boundedCacheExpiry(
@@ -317,6 +318,7 @@ export async function getVenueProfile(placeId) {
   if (cached && cached.expiresAt > Date.now()) return cached.profile;
   const shared = await readSharedCache('venue_profile_cache_v1', placeId, CACHE_TTL_MS);
   if (shared?.value && typeof shared.value === 'object') {
+    recordCostEvent('venue_profile_cache_hit', { layer: 'firestore' });
     profileCache.set(placeId, {
       profile: shared.value,
       expiresAt: boundedCacheExpiry(Date.now(), CACHE_TTL_MS, shared.ts, CACHE_TTL_MS),
