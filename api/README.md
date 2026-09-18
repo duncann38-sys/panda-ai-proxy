@@ -42,9 +42,10 @@ venue-aware fallback and preserves the normal response shape. When the Places bu
 is reached, cached requests continue to work while new cache misses return no venues.
 Provider-side Google Cloud quotas should remain the final hard billing stop.
 
-The existing per-minute request guard retains its current behaviour but now prunes
-expired client records and caps its in-process map, preventing memory growth under
-high-cardinality launch traffic.
+The existing per-minute request guard prunes expired client records. If a warm
+instance already has 5,000 active client windows, previously unseen clients are
+conservatively limited until a window expires; active allowances are never evicted
+or reset by high-cardinality traffic.
 
 These controls live in Panda's GitHub/Vercel backend. The Native app does not depend
 on Replit at runtime, and no mobile response contract is changed.
@@ -66,6 +67,9 @@ on Replit at runtime, and no mobile response contract is changed.
 | `PANDA_SHARED_GEMINI_CACHE` *(optional)* | Set to `true` after canary testing to share function-call-only Gemini results across Vercel instances | no |
 | `PANDA_MAX_TOOL_ROUNDS` *(optional)* | Maximum Gemini tool rounds, clamped to 0–2; unset preserves the current value of 2 | no |
 | `PANDA_MAX_OUTPUT_TOKENS` *(optional)* | Optional server ceiling for Gemini output tokens; unset preserves the caller's current setting | no |
+| `PANDA_DAILY_CLIENT_AI_LIMIT` *(optional)* | Emergency shared daily AI request allowance per hashed client; unset disables it | no |
+| `PANDA_CLIENT_HASH_SALT` *(required with client limits)* | Salt used before hashing the platform network identifier; raw values are never stored and the client allowance fails open if this is absent | yes |
+| `PANDA_USAGE_METRICS` *(optional)* | Set to `true` to emit structured cache/provider cost events to Vercel logs; no questions, coordinates or raw client identifiers are logged | no |
 
 ## Dependencies (`package.json`)
 ```json
@@ -102,6 +106,7 @@ Firestore collections:
 - `venue_photo_cache_v1` — shared photo metadata with stale resilience.
 - `gemini_function_cache_v1` — optional function-call-only Gemini responses.
 - `panda_usage_budgets_v1` — UTC daily request counters.
+- `panda_client_budgets_v1` — optional hashed-client daily AI counters.
 
 ## Rollout
 
