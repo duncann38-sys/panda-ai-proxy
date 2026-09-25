@@ -467,7 +467,7 @@ export async function getWalkingRoute(origin, destination) {
         headers: {
           'Content-Type': 'application/json',
           'X-Goog-Api-Key': apiKey(),
-          'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration',
+          'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline',
         },
         body: JSON.stringify({
           origin: { location: { latLng: origin } },
@@ -490,6 +490,7 @@ export async function getWalkingRoute(origin, destination) {
   return {
     distanceMeters: route.distanceMeters,
     durationMinutes: Math.max(1, Math.round(seconds / 60)),
+    ...(route.polyline?.encodedPolyline ? { polyline: route.polyline.encodedPolyline } : {}),
     source: 'google_routes',
   };
 }
@@ -507,6 +508,7 @@ export async function getTransitRoute(origin, destination) {
           'X-Goog-FieldMask': [
             'routes.distanceMeters',
             'routes.duration',
+            'routes.polyline.encodedPolyline',
             'routes.legs.steps.distanceMeters',
             'routes.legs.steps.staticDuration',
             'routes.legs.steps.travelMode',
@@ -581,6 +583,7 @@ export async function getTransitRoute(origin, destination) {
         durationMinutes: Math.max(1, Math.round(seconds / 60)),
         distanceMeters: route.distanceMeters,
         steps,
+        ...(route.polyline?.encodedPolyline ? { polyline: route.polyline.encodedPolyline } : {}),
         source: 'google_routes',
       }
     : null;
