@@ -14,6 +14,88 @@ const searchCache = new Map();
 const profileCache = new Map();
 const inFlightSearches = new Map();
 const inFlightProfiles = new Map();
+
+const TFL_CACHE_TTL_MS = 60_000;
+    const TFL_DEPARTURE_CACHE_LIMIT = 300;
+    const tflDepartureCache = new Map();
+    const inFlightTflDepartures = new Map();
+
+    function normalizeTransitLabel(value) {
+    return String(value || '')
+      .toLocaleLowerCase('en-GB')
+      .replace(/\b(underground|station|line)\b/g, '')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim()
+      .replace(/\s+/g, ' ');
+    }
+
+    async function fetchTflLiveDeparture(step) {
+    if (!step.departureStop || !step.lineName || !step.departureTime || (!step.headsign && !step.arrivalStop)) return null;
+    const stationSearchUrl = new URL('https://api.tfl.gov.uk/StopPoint/Search/' + encodeURIComponent(step.departureStop));
+    stationSearchUrl.searchParams.set('modes', 'tube,overground,elizabeth-line,dlr,rail');
+    stationSearchUrl.searchParams.set('maxResults', '5');
+    const stationResponse = await fetch(stationSearchUrl, { signal: AbortSignal.timeout(4_000) });
+    if (!stationResponse.ok) return null;
+    const stationPayload = await stationResponse.json().catch(() => null);
+    const modes = ['tube', 'overground', 'elizabeth-line', 'dlr', 'rail'];
+    const expectedStation = normalizeTransitLabel(step.departureStop);
+    const station = stationPayload?.matches?.find((match) =>
+      match.id && match.name && normalizeTransitLabel(match.name) === expectedStation
+      && match.modes?.some((mode) => modes.includes(mode)));
+    if (!station?.id) return null;
+
+    const arrivalsResponse = await fetch(
+      'https://api.tfl.gov.uk/StopPoint/' + encodeURIComponent(station.id) + '/Arrivals',
+      { signal: AbortSignal.timeout(4_000) },
+    );
+    if (!arrivalsResponse.ok) return null;
+    const arrivals = await arrivalsResponse.json().catch(() => null);
+    if (!Array.isArray(arrivals)) return null;
+
+    const expectedLine = normalizeTransitLabel(step.lineName);
+    const expectedDirections = [step.headsign, step.arrivalStop].filter(Boolean).map(normalizeTransitLabel);
+    const estimatedDeparture = Date.parse(step.departureTime);
+    if (!Number.isFinite(estimatedDeparture)) return null;
+    const now = Date.now();
+    const candidates = arrivals.flatMap((arrival) => {
+      if (!arrival.lineName || normalizeTransitLabel(arrival.lineName) !== expectedLine || !arrival.expectedArrival) return [];
+      const direction = normalizeTransitLabel(arrival.towards || arrival.destinationName || '');
+      if (!direction || !expectedDirections.includes(direction)) return [];
+      const expectedArrivalMs = Date.parse(arrival.expectedArrival);
+      if (!Number.isFinite(expectedArrivalMs) || expectedArrivalMs < now - 60_000
+        || Math.abs(expectedArrivalMs - estimatedDeparture) > 10 * 60_000) return [];
+      return [{ value: arrival.expectedArrival, distance: Math.abs(expectedArrivalMs - estimatedDeparture) }];
+    });
+    candidates.sort((a, b) => a.distance - b.distance);
+    return candidates[0] ? { departureTime: candidates[0].value, updatedAt: new Date().toISOString() } : null;
+    }
+
+    function getTflLiveDeparture(step) {
+    const key = [
+      normalizeTransitLabel(step.departureStop || ''),
+      normalizeTransitLabel(step.lineName || ''),
+      normalizeTransitLabel(step.headsign || step.arrivalStop || ''),
+      String(step.departureTime || '').slice(0, 16),
+    ].join('|');
+    const cached = tflDepartureCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.value);
+    const active = inFlightTflDepartures.get(key);
+    if (active) return active;
+    const request = fetchTflLiveDeparture(step)
+      .then((value) => {
+        if (tflDepartureCache.size >= TFL_DEPARTURE_CACHE_LIMIT) {
+          const oldestKey = tflDepartureCache.keys().next().value;
+          if (oldestKey) tflDepartureCache.delete(oldestKey);
+        }
+        tflDepartureCache.set(key, { expiresAt: Date.now() + TFL_CACHE_TTL_MS, value });
+        return value;
+      })
+      .catch(() => null)
+      .finally(() => inFlightTflDepartures.delete(key));
+    inFlightTflDepartures.set(key, request);
+    return request;
+    }
+
 let _db = null;
 let _dbTried = false;
 
@@ -458,133 +540,214 @@ export async function findNearestTransitStation(latitude, longitude) {
 }
 
 export async function getWalkingRoute(origin, destination) {
-  let payload;
-  try {
-    payload = await googleJson(
-      GOOGLE_ROUTES_URL,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Goog-Api-Key': apiKey(),
-          'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline',
+    let payload;
+    try {
+      payload = await googleJson(
+        GOOGLE_ROUTES_URL,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': apiKey(),
+            'X-Goog-FieldMask': [
+              'routes.distanceMeters',
+              'routes.duration',
+              'routes.polyline.encodedPolyline',
+              'routes.legs.steps.distanceMeters',
+              'routes.legs.steps.staticDuration',
+              'routes.legs.steps.travelMode',
+              'routes.legs.steps.navigationInstruction.instructions',
+              'routes.legs.steps.endLocation',
+              'routes.legs.steps.polyline.encodedPolyline',
+            ].join(','),
+          },
+          body: JSON.stringify({
+            origin: { location: { latLng: origin } },
+            destination: { location: { latLng: destination } },
+            travelMode: 'WALK',
+            languageCode: 'en-GB',
+            units: 'METRIC',
+          }),
         },
-        body: JSON.stringify({
-          origin: { location: { latLng: origin } },
-          destination: { location: { latLng: destination } },
-          travelMode: 'WALK',
-          languageCode: 'en-GB',
-          units: 'METRIC',
-        }),
-      },
-      'Google walking directions are unavailable right now.',
-    );
-  } catch (error) {
-    if (error?.status === 403 || error?.status === 404) return null;
-    throw error;
-  }
+        'Google walking directions are unavailable right now.',
+      );
+    } catch (error) {
+      if (error?.status === 403 || error?.status === 404) return null;
+      throw error;
+    }
 
-  const route = payload.routes?.[0];
-  const seconds = Number.parseFloat(String(route?.duration || '').replace(/s$/, ''));
-  if (typeof route?.distanceMeters !== 'number' || !Number.isFinite(seconds)) return null;
-  return {
-    distanceMeters: route.distanceMeters,
-    durationMinutes: Math.max(1, Math.round(seconds / 60)),
-    ...(route.polyline?.encodedPolyline ? { polyline: route.polyline.encodedPolyline } : {}),
-    source: 'google_routes',
-  };
-}
+    const route = payload.routes?.[0];
+    const seconds = Number.parseFloat(String(route?.duration || '').replace(/s$/, ''));
+    if (typeof route?.distanceMeters !== 'number' || !Number.isFinite(seconds)) return null;
+
+    const steps = (route.legs || []).flatMap((leg) =>
+      (leg.steps || []).flatMap((step) => {
+        const stepSeconds = Number.parseFloat(String(step.staticDuration || '').replace(/s$/, ''));
+        const endLocation = step.endLocation?.latLng;
+        const instruction = step.navigationInstruction?.instructions?.trim();
+        if (
+          step.travelMode !== 'WALK'
+          || typeof step.distanceMeters !== 'number'
+          || !Number.isFinite(stepSeconds)
+          || !instruction
+          || typeof endLocation?.latitude !== 'number'
+          || typeof endLocation.longitude !== 'number'
+        ) return [];
+        return [{
+          instruction,
+          distanceMeters: step.distanceMeters,
+          durationMinutes: Math.max(1, Math.round(stepSeconds / 60)),
+          endLocation: { latitude: endLocation.latitude, longitude: endLocation.longitude },
+          ...(step.polyline?.encodedPolyline ? { polyline: step.polyline.encodedPolyline } : {}),
+        }];
+      }),
+    );
+
+    return {
+      distanceMeters: route.distanceMeters,
+      durationMinutes: Math.max(1, Math.round(seconds / 60)),
+      endLocation: destination,
+      steps,
+      ...(route.polyline?.encodedPolyline ? { polyline: route.polyline.encodedPolyline } : {}),
+      source: 'google_routes',
+    };
+    }
+
+
 
 export async function getTransitRoute(origin, destination) {
-  let payload;
-  try {
-    payload = await googleJson(
-      GOOGLE_ROUTES_URL,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Goog-Api-Key': apiKey(),
-          'X-Goog-FieldMask': [
-            'routes.distanceMeters',
-            'routes.duration',
-            'routes.polyline.encodedPolyline',
-            'routes.legs.steps.distanceMeters',
-            'routes.legs.steps.staticDuration',
-            'routes.legs.steps.travelMode',
-            'routes.legs.steps.navigationInstruction.instructions',
-            'routes.legs.steps.transitDetails.stopDetails',
-            'routes.legs.steps.transitDetails.headsign',
-            'routes.legs.steps.transitDetails.transitLine.name',
-            'routes.legs.steps.transitDetails.transitLine.nameShort',
-          ].join(','),
+    const requestedDepartureTime = new Date().toISOString();
+    let payload;
+    try {
+      payload = await googleJson(
+        GOOGLE_ROUTES_URL,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': apiKey(),
+            'X-Goog-FieldMask': [
+              'routes.distanceMeters',
+              'routes.duration',
+              'routes.polyline.encodedPolyline',
+              'routes.legs.steps.distanceMeters',
+              'routes.legs.steps.staticDuration',
+              'routes.legs.steps.travelMode',
+              'routes.legs.steps.navigationInstruction.instructions',
+              'routes.legs.steps.endLocation',
+              'routes.legs.steps.polyline.encodedPolyline',
+              'routes.legs.steps.transitDetails.stopDetails.departureStop.name',
+              'routes.legs.steps.transitDetails.stopDetails.departureStop.location',
+              'routes.legs.steps.transitDetails.stopDetails.arrivalStop.name',
+              'routes.legs.steps.transitDetails.stopDetails.arrivalStop.location',
+              'routes.legs.steps.transitDetails.stopDetails.departureTime',
+              'routes.legs.steps.transitDetails.stopDetails.arrivalTime',
+              'routes.legs.steps.transitDetails.stopDetails.departurePlatform',
+              'routes.legs.steps.transitDetails.stopDetails.arrivalPlatform',
+              'routes.legs.steps.transitDetails.headsign',
+              'routes.legs.steps.transitDetails.transitLine.name',
+              'routes.legs.steps.transitDetails.transitLine.nameShort',
+            ].join(','),
+          },
+          body: JSON.stringify({
+            origin: { location: { latLng: origin } },
+            destination: { location: { latLng: destination } },
+            travelMode: 'TRANSIT',
+            departureTime: requestedDepartureTime,
+            computeAlternativeRoutes: true,
+            languageCode: 'en-GB',
+            units: 'METRIC',
+          }),
         },
-        body: JSON.stringify({
-          origin: { location: { latLng: origin } },
-          destination: { location: { latLng: destination } },
-          travelMode: 'TRANSIT',
-          departureTime: new Date().toISOString(),
-          languageCode: 'en-GB',
-          units: 'METRIC',
-        }),
-      },
-      'Google public transport directions are unavailable right now.',
+        'Google public transport directions are unavailable right now.',
+      );
+    } catch (error) {
+      if (error?.status === 403 || error?.status === 404) return null;
+      throw error;
+    }
+
+    const routes = (payload.routes || []).filter((candidate) => {
+      const duration = Number.parseFloat(String(candidate?.duration || '').replace(/s$/, ''));
+      return typeof candidate?.distanceMeters === 'number' && Number.isFinite(duration);
+    });
+    const route = routes.reduce((fastest, candidate) => {
+      if (!fastest) return candidate;
+      const candidateSeconds = Number.parseFloat(String(candidate.duration).replace(/s$/, ''));
+      const fastestSeconds = Number.parseFloat(String(fastest.duration).replace(/s$/, ''));
+      return candidateSeconds < fastestSeconds ? candidate : fastest;
+    }, null);
+    const seconds = Number.parseFloat(String(route?.duration || '').replace(/s$/, ''));
+    if (!route || !Number.isFinite(seconds)) return null;
+
+    let steps = (route.legs || []).flatMap((leg) =>
+      (leg.steps || []).flatMap((step) => {
+        const mode = step.travelMode === 'TRANSIT' ? 'TRANSIT' : step.travelMode === 'WALK' ? 'WALK' : null;
+        if (!mode || typeof step.distanceMeters !== 'number') return [];
+        const stepSeconds = Number.parseFloat(String(step.staticDuration || '').replace(/s$/, ''));
+        if (!Number.isFinite(stepSeconds)) return [];
+        const transit = step.transitDetails;
+        const stopDetails = transit?.stopDetails;
+        const lineName = transit?.transitLine?.nameShort || transit?.transitLine?.name || null;
+        const departureStop = stopDetails?.departureStop?.name || null;
+        const arrivalStop = stopDetails?.arrivalStop?.name || null;
+        const instruction = mode === 'TRANSIT'
+          ? [
+              lineName ? 'Take ' + lineName : 'Take public transport',
+              transit?.headsign ? 'towards ' + transit.headsign : '',
+              departureStop && arrivalStop ? 'from ' + departureStop + ' to ' + arrivalStop : '',
+            ].filter(Boolean).join(' ')
+          : step.navigationInstruction?.instructions || 'Walk to the next stop';
+        const departureCoordinates = stopDetails?.departureStop?.location?.latLng;
+        const arrivalCoordinates = stopDetails?.arrivalStop?.location?.latLng;
+        const endLocation = step.endLocation?.latLng;
+        return [{
+          mode,
+          instruction,
+          durationMinutes: Math.max(1, Math.round(stepSeconds / 60)),
+          distanceMeters: step.distanceMeters,
+          lineName,
+          headsign: transit?.headsign || null,
+          departureStop,
+          arrivalStop,
+          ...(stopDetails?.departurePlatform ? { departurePlatform: stopDetails.departurePlatform } : {}),
+          ...(stopDetails?.arrivalPlatform ? { arrivalPlatform: stopDetails.arrivalPlatform } : {}),
+          ...(stopDetails?.departureTime ? { departureTime: stopDetails.departureTime } : {}),
+          ...(stopDetails?.arrivalTime ? { arrivalTime: stopDetails.arrivalTime } : {}),
+          ...(typeof departureCoordinates?.latitude === 'number' && typeof departureCoordinates.longitude === 'number'
+            ? { departureLocation: { latitude: departureCoordinates.latitude, longitude: departureCoordinates.longitude } }
+            : {}),
+          ...(typeof arrivalCoordinates?.latitude === 'number' && typeof arrivalCoordinates.longitude === 'number'
+            ? { arrivalLocation: { latitude: arrivalCoordinates.latitude, longitude: arrivalCoordinates.longitude } }
+            : {}),
+          ...(typeof endLocation?.latitude === 'number' && typeof endLocation.longitude === 'number'
+            ? { endLocation: { latitude: endLocation.latitude, longitude: endLocation.longitude } }
+            : {}),
+          ...(step.polyline?.encodedPolyline ? { polyline: step.polyline.encodedPolyline } : {}),
+          timingSource: 'google_estimate',
+        }];
+      }),
     );
-  } catch (error) {
-    if (error?.status === 403 || error?.status === 404) return null;
-    throw error;
-  }
+    if (!steps.length || !steps.some((step) => step.mode === 'TRANSIT')) return null;
 
-  const route = payload.routes?.[0];
-  const seconds = Number.parseFloat(String(route?.duration || '').replace(/s$/, ''));
-  if (typeof route?.distanceMeters !== 'number' || !Number.isFinite(seconds)) return null;
-
-  const steps = (route.legs || []).flatMap((leg) =>
-    (leg.steps || []).flatMap((step) => {
-      const mode = step.travelMode === 'TRANSIT'
-        ? 'TRANSIT'
-        : step.travelMode === 'WALK'
-          ? 'WALK'
-          : null;
-      if (!mode || typeof step.distanceMeters !== 'number') return [];
-      const stepSeconds = Number.parseFloat(String(step.staticDuration || '').replace(/s$/, ''));
-      if (!Number.isFinite(stepSeconds)) return [];
-
-      const transit = step.transitDetails;
-      const lineName =
-        transit?.transitLine?.nameShort
-        || transit?.transitLine?.name
-        || null;
-      const departureStop = transit?.stopDetails?.departureStop?.name || null;
-      const arrivalStop = transit?.stopDetails?.arrivalStop?.name || null;
-      const instruction = mode === 'TRANSIT'
-        ? [
-            lineName ? `Take ${lineName}` : 'Take public transport',
-            transit?.headsign ? `towards ${transit.headsign}` : '',
-            departureStop && arrivalStop ? `from ${departureStop} to ${arrivalStop}` : '',
-          ].filter(Boolean).join(' ')
-        : step.navigationInstruction?.instructions || 'Walk to the next stop';
-
-      return [{
-        mode,
-        instruction,
-        durationMinutes: Math.max(1, Math.round(stepSeconds / 60)),
-        distanceMeters: step.distanceMeters,
-        lineName,
-        headsign: transit?.headsign || null,
-        departureStop,
-        arrivalStop,
-      }];
-    }),
-  );
-
-  return steps.length
-    ? {
-        durationMinutes: Math.max(1, Math.round(seconds / 60)),
-        distanceMeters: route.distanceMeters,
-        steps,
-        ...(route.polyline?.encodedPolyline ? { polyline: route.polyline.encodedPolyline } : {}),
-        source: 'google_routes',
+    let timingSource = 'google_estimate';
+    if (origin.latitude >= 51.25 && origin.latitude <= 51.75 && origin.longitude >= -0.6 && origin.longitude <= 0.35) {
+      const firstTransitIndex = steps.findIndex((step) => step.mode === 'TRANSIT');
+      const liveDeparture = await getTflLiveDeparture(steps[firstTransitIndex]).catch(() => null);
+      if (liveDeparture && Date.now() - Date.parse(liveDeparture.updatedAt) < TFL_CACHE_TTL_MS) {
+        steps = steps.map((step, index) => index === firstTransitIndex
+          ? { ...step, liveDepartureTime: liveDeparture.departureTime, liveUpdatedAt: liveDeparture.updatedAt }
+          : step);
+        timingSource = 'tfl_live';
       }
-    : null;
-}
+    }
+    const updatedAt = new Date().toISOString();
+    return {
+      durationMinutes: Math.max(1, Math.round(seconds / 60)),
+      distanceMeters: route.distanceMeters,
+      steps,
+      ...(route.polyline?.encodedPolyline ? { polyline: route.polyline.encodedPolyline } : {}),
+      updatedAt,
+      timingSource,
+      source: 'google_routes',
+    };
+    }
