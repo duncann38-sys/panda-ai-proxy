@@ -10,11 +10,13 @@ import admin from 'firebase-admin';
 import { applyGuard } from './_guard.js';
 import {
   boundedInteger,
+  cacheablePlacesResult,
   cacheableGeminiFunctionCall,
   clientFingerprint,
   compactConversation,
   consumeClientDailyBudget,
   consumeDailyBudget,
+  placesMemoryEntry,
   recordCostEvent,
   readSharedGeminiCall,
   requestFingerprint,
@@ -102,9 +104,9 @@ function readMemoryCache(key,lat,lng){
   recordCostEvent('places_cache_hit',{layer:'memory'});
   return {venues:withDistances(cached.venues,lat,lng),nextPageToken:cached.nextPageToken||null,cached:true};
 }
-function writeMemoryCache(key,result){
+function writeMemoryCache(key,result,sourceTimestamp=Date.now()){
   memoryCache.delete(key);
-  memoryCache.set(key,{ts:Date.now(),venues:result.venues,nextPageToken:result.nextPageToken||null});
+  memoryCache.set(key,placesMemoryEntry(result,sourceTimestamp));
   while(memoryCache.size>MEMORY_CACHE_LIMIT)memoryCache.delete(memoryCache.keys().next().value);
 }
 function googleCategoryTags(place,query){
@@ -167,7 +169,7 @@ async function googleSearch(query,lat,lng,pageToken,openNow){
         'X-Goog-FieldMask':['places.id','places.displayName','places.formattedAddress','places.shortFormattedAddress','places.location','places.rating','places.userRatingCount','places.priceLevel','places.priceRange','places.primaryType','places.primaryTypeDisplayName','places.types','places.googleMapsUri','places.websiteUri','places.nationalPhoneNumber','places.currentOpeningHours.openNow','places.currentOpeningHours.weekdayDescriptions','places.regularOpeningHours.weekdayDescriptions','places.businessStatus','places.photos','nextPageToken'].join(',')},
       body:JSON.stringify(reqBody)
     });
-    if(!r.ok) return {venues:[],nextPageToken:null};
+    if(!r.ok) return {venues:[],nextPageToken:null,providerFailed:true};
     const data=await r.json();
     const places=data.places||[];
     const venues=places.map(p=>{
@@ -190,7 +192,7 @@ async function googleSearch(query,lat,lng,pageToken,openNow){
          photoName:photo?photo.name:'',photoAttribution:attr,photoCount:Math.min(10,placePhotos.length),categories:googleCategoryTags({...p,hasMusic:!!musicBadge},query)};
     });
     return {venues,nextPageToken:data.nextPageToken||null};
-  }catch{return {venues:[],nextPageToken:null}}
+  }catch{return {venues:[],nextPageToken:null,providerFailed:true}}
 }
 async function searchVenues(query,lat,lng,pageToken,openNow){
   if(!MAPS_KEY||!query) return {venues:[],nextPageToken:null};
@@ -206,9 +208,11 @@ async function searchVenues(query,lat,lng,pageToken,openNow){
       const snap=await store.collection(CACHE_COLLECTION).doc(key).get();
       if(snap.exists){
         const d=snap.data();
-        if(d && (Date.now()-d.ts) < CACHE_TTL_MS){
+        const sourceTimestamp=Number(d?.ts);
+        const age=Date.now()-sourceTimestamp;
+        if(d && Number.isFinite(sourceTimestamp) && age>=0 && age<CACHE_TTL_MS){
           const result={venues:withDistances(d.venues,lat,lng),nextPageToken:d.nextPageToken||null,cached:true};
-          writeMemoryCache(memoryKey,result);
+          writeMemoryCache(memoryKey,result,sourceTimestamp);
           recordCostEvent('places_cache_hit',{layer:'firestore'});
           return result;
         }
@@ -216,14 +220,15 @@ async function searchVenues(query,lat,lng,pageToken,openNow){
     }catch(e){ }
   }
   const fresh=await googleSearch(query,lat,lng,pageToken,openNow);
-  if(fresh.budgetExceeded){
-    return {venues:[],nextPageToken:null,cached:false,budgetExceeded:true};
+  if(!cacheablePlacesResult(fresh)){
+    return {venues:[],nextPageToken:null,cached:false,...(fresh.budgetExceeded?{budgetExceeded:true}:{})};
   }
-  writeMemoryCache(memoryKey,fresh);
+  const fetchedAt=Date.now();
+  writeMemoryCache(memoryKey,fresh,fetchedAt);
   if(store && key && fresh.venues.length){
     try{
       await store.collection(CACHE_COLLECTION).doc(key).set({
-        ts: Date.now(),
+        ts: fetchedAt,
         venues: fresh.venues,
         nextPageToken: fresh.nextPageToken||null,
         q: (query||'').slice(0,120)

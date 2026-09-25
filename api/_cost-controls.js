@@ -83,6 +83,18 @@ export function boundedCacheExpiry(now, localTtlMs, sourceTimestamp, sourceTtlMs
   return Math.min(now + localTtlMs, Number(sourceTimestamp) + sourceTtlMs);
 }
 
+export function placesMemoryEntry(result, sourceTimestamp) {
+  return {
+    ts: sourceTimestamp,
+    venues: result.venues,
+    nextPageToken: result.nextPageToken || null,
+  };
+}
+
+export function cacheablePlacesResult(result) {
+  return !result.providerFailed && !result.budgetExceeded;
+}
+
 export function cacheableGeminiFunctionCall(result) {
   if (!result?.ok) return false;
   const parts = result.data?.candidates?.[0]?.content?.parts;

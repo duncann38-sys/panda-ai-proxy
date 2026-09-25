@@ -3,16 +3,34 @@ import assert from 'node:assert/strict';
 import {
   boundedCacheExpiry,
   boundedInteger,
+  cacheablePlacesResult,
   cacheableGeminiFunctionCall,
   clientFingerprint,
   compactConversation,
   consumeClientDailyBudget,
   consumeDailyBudget,
   configuredDailyLimit,
+  placesMemoryEntry,
   readSharedGeminiCall,
   requestFingerprint,
   writeSharedGeminiCall,
 } from '../api/_cost-controls.js';
+
+test('successful empty searches remain cacheable but provider failures and budget denials do not', () => {
+  assert.equal(cacheablePlacesResult({ venues: [], nextPageToken: null }), true);
+  assert.equal(cacheablePlacesResult({ venues: [], providerFailed: true }), false);
+  assert.equal(cacheablePlacesResult({ venues: [], budgetExceeded: true }), false);
+});
+
+test('Places memory entries preserve the provider or Firestore timestamp', () => {
+  const result = { venues: [{ id: 'a' }], nextPageToken: 'next' };
+  const sourceTimestamp = 1_000_000;
+  const entry = placesMemoryEntry(result, sourceTimestamp);
+  assert.equal(entry.ts, sourceTimestamp);
+  assert.equal(entry.venues, result.venues);
+  assert.equal(entry.nextPageToken, 'next');
+  assert.equal(boundedCacheExpiry(sourceTimestamp + 29 * 60_000, 30 * 60_000, entry.ts, 30 * 60_000), sourceTimestamp + 30 * 60_000);
+});
 
 test('conversation compaction preserves the newest context and order', () => {
   const contents = Array.from({ length: 8 }, (_, index) => ({
