@@ -32,12 +32,12 @@ const TFL_CACHE_TTL_MS = 60_000;
     async function fetchTflLiveDeparture(step) {
     if (!step.departureStop || !step.lineName || !step.departureTime || (!step.headsign && !step.arrivalStop)) return null;
     const stationSearchUrl = new URL('https://api.tfl.gov.uk/StopPoint/Search/' + encodeURIComponent(step.departureStop));
-    stationSearchUrl.searchParams.set('modes', 'tube,overground,elizabeth-line,dlr,rail');
+    stationSearchUrl.searchParams.set('modes', 'tube,overground,elizabeth-line,dlr,national-rail');
     stationSearchUrl.searchParams.set('maxResults', '5');
     const stationResponse = await fetch(stationSearchUrl, { signal: AbortSignal.timeout(4_000) });
     if (!stationResponse.ok) return null;
     const stationPayload = await stationResponse.json().catch(() => null);
-    const modes = ['tube', 'overground', 'elizabeth-line', 'dlr', 'rail'];
+    const modes = ['tube', 'overground', 'elizabeth-line', 'dlr', 'national-rail'];
     const expectedStation = normalizeTransitLabel(step.departureStop);
     const station = stationPayload?.matches?.find((match) =>
       match.id && match.name && normalizeTransitLabel(match.name) === expectedStation
