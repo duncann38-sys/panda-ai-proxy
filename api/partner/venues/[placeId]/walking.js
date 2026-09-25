@@ -8,7 +8,7 @@ import {
 } from '../../../_venue-live.js';
 
 export default async function handler(req, res) {
-  if (applyVenueGuard(req, res)) return;
+  if (applyVenueGuard(req, res, { limit: true })) return;
 
   const placeId = req.query.placeId;
   const location = readCoordinates(req.query);
