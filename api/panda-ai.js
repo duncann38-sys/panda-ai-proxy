@@ -33,12 +33,14 @@ const MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY;
 const DEFAULT_LAT = 51.5074, DEFAULT_LNG = -0.1278;
 const PRICE = {PRICE_LEVEL_INEXPENSIVE:'\u00a3',PRICE_LEVEL_MODERATE:'\u00a3\u00a3',PRICE_LEVEL_EXPENSIVE:'\u00a3\u00a3\u00a3',PRICE_LEVEL_VERY_EXPENSIVE:'\u00a3\u00a3\u00a3\u00a3'};
 const CACHE_TTL_MS   = 30 * 60 * 1000;
+const QUOTA_STALE_TTL_MS = 24 * 60 * 60 * 1000;
 const CACHE_GRID     = 1000;
 const CACHE_COLLECTION = 'places_cache_v2';
 const GEO_COLLECTION = 'geocode_cache_v2';
 const MEMORY_CACHE_LIMIT = 250;
 const memoryCache = new Map();
 const inFlightSearches = new Map();
+let placesQuotaBlockedUntil = 0;
 const inFlightGemini = new Map();
 const recentGemini = new Map();
 const GEMINI_RETRY_CACHE_MS = 15 * 1000;
@@ -157,6 +159,7 @@ function googleCategoryTags(place,query){
 async function googleSearch(query,lat,lng,pageToken,openNow){
   if(!MAPS_KEY||!query) return {venues:[],nextPageToken:null};
   try{
+    if(Date.now()<placesQuotaBlockedUntil)return {venues:[],nextPageToken:null,providerFailed:true,providerStatus:429};
     const budget=await consumeDailyBudget(db(),'places',process.env.PANDA_DAILY_PLACES_LIMIT);
     if(!budget.allowed)return {venues:[],nextPageToken:null,budgetExceeded:true};
     recordCostEvent('places_provider_call',{openNow:openNow===true,page:Boolean(pageToken)});
@@ -169,7 +172,11 @@ async function googleSearch(query,lat,lng,pageToken,openNow){
         'X-Goog-FieldMask':['places.id','places.displayName','places.formattedAddress','places.shortFormattedAddress','places.location','places.rating','places.userRatingCount','places.priceLevel','places.priceRange','places.primaryType','places.primaryTypeDisplayName','places.types','places.googleMapsUri','places.websiteUri','places.nationalPhoneNumber','places.currentOpeningHours.openNow','places.currentOpeningHours.weekdayDescriptions','places.regularOpeningHours.weekdayDescriptions','places.businessStatus','places.photos','nextPageToken'].join(',')},
       body:JSON.stringify(reqBody)
     });
-    if(!r.ok) return {venues:[],nextPageToken:null,providerFailed:true};
+    if(!r.ok){
+      if(r.status===429)placesQuotaBlockedUntil=Date.now()+5*60*1000;
+      recordCostEvent('places_provider_failure',{status:r.status});
+      return {venues:[],nextPageToken:null,providerFailed:true,providerStatus:r.status};
+    }
     const data=await r.json();
     const places=data.places||[];
     const venues=places.map(p=>{
@@ -203,6 +210,7 @@ async function searchVenues(query,lat,lng,pageToken,openNow){
   if(warm)return warm;
   if(inFlightSearches.has(memoryKey))return inFlightSearches.get(memoryKey);
   const searchPromise=(async()=>{
+  let staleResult=null;
   if(store && key){
     try{
       const snap=await store.collection(CACHE_COLLECTION).doc(key).get();
@@ -210,6 +218,10 @@ async function searchVenues(query,lat,lng,pageToken,openNow){
         const d=snap.data();
         const sourceTimestamp=Number(d?.ts);
         const age=Date.now()-sourceTimestamp;
+        if(d && Array.isArray(d.venues) && d.venues.length
+          && Number.isFinite(sourceTimestamp) && age>=0 && age<QUOTA_STALE_TTL_MS){
+          staleResult={venues:withDistances(d.venues,lat,lng),nextPageToken:null,cached:true,staleAt:sourceTimestamp};
+        }
         if(d && Number.isFinite(sourceTimestamp) && age>=0 && age<CACHE_TTL_MS){
           const result={venues:withDistances(d.venues,lat,lng),nextPageToken:d.nextPageToken||null,cached:true};
           writeMemoryCache(memoryKey,result,sourceTimestamp);
@@ -221,7 +233,13 @@ async function searchVenues(query,lat,lng,pageToken,openNow){
   }
   const fresh=await googleSearch(query,lat,lng,pageToken,openNow);
   if(!cacheablePlacesResult(fresh)){
-    return {venues:[],nextPageToken:null,cached:false,...(fresh.budgetExceeded?{budgetExceeded:true}:{})};
+    if((fresh.providerStatus===429||fresh.budgetExceeded)&&staleResult){
+      recordCostEvent('places_quota_stale_cache_hit');
+      return staleResult;
+    }
+    return {venues:[],nextPageToken:null,cached:false,
+      ...(fresh.budgetExceeded?{budgetExceeded:true}:{}),
+      ...(fresh.providerStatus?{providerStatus:fresh.providerStatus}:{})};
   }
   const fetchedAt=Date.now();
   writeMemoryCache(memoryKey,fresh,fetchedAt);
@@ -261,7 +279,7 @@ function compactBatchVenue(venue){
     photoName:venue.photoName,photoAttribution:venue.photoAttribution,
     photoCount:venue.photoCount,types:venue.types,hasMusic:venue.hasMusic,
     categories:venue.categories,distanceMeters:venue.distanceMeters,
-    sourceQueries:venue.sourceQueries
+    sourceQueries:venue.sourceQueries,cachedAt:venue.cachedAt
   };
 }
 async function searchVenueBatch(queries,lat,lng){
@@ -270,13 +288,17 @@ async function searchVenueBatch(queries,lat,lng){
     .filter(Boolean))].slice(0,14);
   const batches=await mapLimited(normalized,4,async query=>{
     const result=await searchVenues(query,lat,lng);
-    return result.venues.map(venue=>({
-      ...venue,
-      sourceQueries:[...new Set([...(venue.sourceQueries||[]),query])]
-    }));
+    return {
+      venues:result.venues.map(venue=>({
+        ...venue,
+        cachedAt:result.staleAt,
+        sourceQueries:[...new Set([...(venue.sourceQueries||[]),query])]
+      })),
+      quotaExceeded:result.providerStatus===429||result.budgetExceeded===true,
+    };
   });
   const merged=new Map();
-  batches.flat().forEach(venue=>{
+  batches.flatMap(batch=>batch.venues).forEach(venue=>{
     if(!venue?.id)return;
     const existing=merged.get(venue.id);
     merged.set(venue.id,existing?{
@@ -285,7 +307,11 @@ async function searchVenueBatch(queries,lat,lng){
       sourceQueries:[...new Set([...(existing.sourceQueries||[]),...(venue.sourceQueries||[])])]
     }:venue);
   });
-  return withDistances([...merged.values()],lat,lng).slice(0,160).map(compactBatchVenue);
+  return {
+    venues:withDistances([...merged.values()].filter(venue=>venue.photoName&&Number(venue.photoCount)>=5),lat,lng)
+      .slice(0,40).map(compactBatchVenue),
+    quotaExceeded:batches.length>0&&batches.every(batch=>batch.quotaExceeded),
+  };
 }
 function expansionCenters(lat,lng,radiusKm){
   const centers=[],dLat=radiusKm/111,dLng=radiusKm/(111*Math.cos(lat*Math.PI/180));
@@ -578,7 +604,11 @@ export default async function handler(req,res){
     const lat=location?.lat??DEFAULT_LAT, lng=location?.lng??DEFAULT_LNG;
     if(body.venuesOnly){
       if(Array.isArray(body.queries)){
-        const venues=await searchVenueBatch(body.queries,lat,lng);
+        const {venues,quotaExceeded}=await searchVenueBatch(body.queries,lat,lng);
+        if(!venues.length&&quotaExceeded){
+          res.status(503).json({error:'places_quota_exhausted'});
+          return;
+        }
         res.status(200).json({venues,nextPageToken:null,batched:true,queryCount:Math.min(body.queries.length,14)});
         return;
       }
