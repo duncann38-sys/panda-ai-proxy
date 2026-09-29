@@ -52,18 +52,28 @@ let _dbInitFailure = 'shared_storage_not_configured';
 function db(){
   if(_dbTried) return _db;
   _dbTried = true;
+  let stage='parse';
   try{
     if(!process.env.FIREBASE_SERVICE_ACCOUNT) return (_db=null);
-    if(!admin.apps.length){
-      admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
+    const account=JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    // Accept the common Vercel representation with literal escaped PEM newlines.
+    if(typeof account.private_key==='string' && account.private_key.includes('\\n')){
+      account.private_key=account.private_key.replace(/\\n/g,'\n');
     }
+    stage='credential';
+    if(!admin.apps.length){
+      const credential=admin.credential.cert(account);
+      stage='initialize';
+      admin.initializeApp({ credential });
+    }
+    stage='firestore';
     _db = admin.firestore();
   }catch(e){
     _db = null;
     // Only expose a failure class, never the credential or the exception text.
     _dbInitFailure = e instanceof SyntaxError
       ? 'shared_storage_invalid_configuration'
-      : 'shared_storage_init_failed';
+      : `shared_storage_${stage}_failed`;
   }
   return _db;
 }
