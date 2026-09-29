@@ -8,6 +8,7 @@
 import { GoogleAuth } from 'google-auth-library';
 import admin from 'firebase-admin';
 import { applyGuard } from './_guard.js';
+import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-directory.js';
 import {
   boundedInteger,
   cacheablePlacesResult,
@@ -603,6 +604,19 @@ export default async function handler(req,res){
     const {systemInstruction,contents,generationConfig,location}=body;
     const lat=location?.lat??DEFAULT_LAT, lng=location?.lng??DEFAULT_LNG;
     if(body.venuesOnly){
+      if(body.directoryOnly===true){
+        try{
+          // Unlike chat, directory discovery must never silently use the London default.
+          const directory=await loadSharedVenueDirectory(db(),Number(location?.lat),Number(location?.lng));
+          res.status(200).json({venues:[],nextPageToken:null,batched:true,queryCount:0,...directory});
+        }catch(error){
+          const known=error instanceof VenueDirectoryError;
+          res.status(known?error.status:503).json({
+            error:known?error.code:'venue_directory_unavailable'
+          });
+        }
+        return;
+      }
       if(Array.isArray(body.queries)){
         const {venues,quotaExceeded}=await searchVenueBatch(body.queries,lat,lng);
         if(!venues.length&&quotaExceeded){
