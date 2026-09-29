@@ -391,7 +391,7 @@ export function createVenueDirectoryLoader({
           recordDirectoryEvent('venue_directory_stale_fallback', { layer: 'memory', areaKey: area.key });
           return publicResult({ ...memoryStale, stale: true }, area, latitude, longitude);
         }
-        throw new VenueDirectoryError('Shared venue directory storage is unavailable.');
+        throw new VenueDirectoryError('Shared venue directory storage is unavailable.', 503, 'shared_storage_access_failed');
       }
 
       if (outcome.kind === 'fresh') {

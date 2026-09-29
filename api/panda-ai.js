@@ -48,6 +48,7 @@ const GEMINI_RETRY_CACHE_MS = 15 * 1000;
 const GEMINI_CACHE_LIMIT = 100;
 const SHARED_GEMINI_CACHE_MS = 5 * 60 * 1000;
 let _db = null, _dbTried = false;
+let _dbInitFailure = 'shared_storage_not_configured';
 function db(){
   if(_dbTried) return _db;
   _dbTried = true;
@@ -57,7 +58,13 @@ function db(){
       admin.initializeApp({ credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)) });
     }
     _db = admin.firestore();
-  }catch(e){ _db = null; }
+  }catch(e){
+    _db = null;
+    // Only expose a failure class, never the credential or the exception text.
+    _dbInitFailure = e instanceof SyntaxError
+      ? 'shared_storage_invalid_configuration'
+      : 'shared_storage_init_failed';
+  }
   return _db;
 }
 function distMeters(aLat,aLng,bLat,bLng){const R=6371000,toRad=x=>x*Math.PI/180;const dLat=toRad(bLat-aLat),dLng=toRad(bLng-aLng);const s=Math.sin(dLat/2)**2+Math.cos(toRad(aLat))*Math.cos(toRad(bLat))*Math.sin(dLng/2)**2;return Math.round(2*R*Math.asin(Math.sqrt(s)));}
@@ -607,7 +614,9 @@ export default async function handler(req,res){
       if(body.directoryOnly===true){
         try{
           // Unlike chat, directory discovery must never silently use the London default.
-          const directory=await loadSharedVenueDirectory(db(),Number(location?.lat),Number(location?.lng));
+          const store=db();
+          if(!store) throw new VenueDirectoryError('Shared directory storage unavailable.',503,_dbInitFailure);
+          const directory=await loadSharedVenueDirectory(store,Number(location?.lat),Number(location?.lng));
           res.status(200).json({venues:[],nextPageToken:null,batched:true,queryCount:0,...directory});
         }catch(error){
           const known=error instanceof VenueDirectoryError;
