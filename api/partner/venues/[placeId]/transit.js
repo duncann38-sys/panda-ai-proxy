@@ -94,7 +94,13 @@ import {
             throw error;
           }
           const destination = { latitude: venue.latitude, longitude: venue.longitude };
-          const directWalk = await getWalkingRoute(location, destination).catch(() => null);
+          const nearbyMetres = Math.hypot(
+            (location.latitude - destination.latitude) * 111320,
+            (location.longitude - destination.longitude) * 111320 *
+              Math.cos((location.latitude + destination.latitude) * Math.PI / 360),
+          );
+          const directWalk = nearbyMetres <= 100 ? null :
+            await getWalkingRoute(location, destination).catch(() => null);
           const walkingResult = (reason) => ({
             recommendation: 'walk',
             recommendationReason: reason,
@@ -105,11 +111,13 @@ import {
             originWalk: null,
             venueWalk: null,
             updatedAt: new Date().toISOString(),
-            source: 'google_routes',
+            source: directWalk ? 'google_routes' : 'venue_proximity',
             timingSource: 'google_estimate',
           });
-          if (directWalk && directWalk.durationMinutes <= 15) {
-            const result = walkingResult('The venue is close by; public transport is unnecessary');
+          if (nearbyMetres <= 100 || (directWalk && directWalk.durationMinutes <= 15)) {
+            const result = walkingResult(nearbyMetres <= 100
+              ? 'The venue is nearby; check the walking entrance in Google Maps'
+              : 'The venue is close by; public transport is unnecessary');
             transitCache.set(cacheKey, { expiresAt: Date.now() + TRANSIT_CACHE_TTL_MS, result });
             return result;
           }
