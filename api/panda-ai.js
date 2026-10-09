@@ -214,7 +214,9 @@ async function googleSearch(query,lat,lng,pageToken,openNow){
         lat:loc.latitude??null,lng:loc.longitude??null,
         phone:p.nationalPhoneNumber||'',website:p.websiteUri||'',menuLink:p.websiteUri||'',
         mapsUri:p.googleMapsUri||'',directionsLink:p.googleMapsUri||'',
-         photoName:photo?photo.name:'',photoAttribution:attr,photoCount:Math.min(10,placePhotos.length),categories:googleCategoryTags({...p,hasMusic:!!musicBadge},query)};
+         photoName:photo?photo.name:'',photoAttribution:attr,photoCount:Math.min(10,placePhotos.length),
+         photoNames:placePhotos.slice(0,10).map(p=>({name:p.name,attribution:(p.authorAttributions||[]).map(a=>a.displayName).filter(Boolean).join(' · ')})),
+         categories:googleCategoryTags({...p,hasMusic:!!musicBadge},query)};
     });
     return {venues,nextPageToken:data.nextPageToken||null};
   }catch{return {venues:[],nextPageToken:null,providerFailed:true}}

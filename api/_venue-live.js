@@ -32,12 +32,13 @@ const TFL_CACHE_TTL_MS = 60_000;
     async function fetchTflLiveDeparture(step) {
     if (!step.departureStop || !step.lineName || !step.departureTime || (!step.headsign && !step.arrivalStop)) return null;
     const stationSearchUrl = new URL('https://api.tfl.gov.uk/StopPoint/Search/' + encodeURIComponent(step.departureStop));
-    stationSearchUrl.searchParams.set('modes', 'tube,overground,elizabeth-line,dlr,national-rail');
+    const modes = step.vehicleType === 'BUS' ? ['bus'] : step.vehicleType === 'FERRY' ? ['river-bus'] :
+      ['tube', 'overground', 'elizabeth-line', 'dlr', 'national-rail'];
+    stationSearchUrl.searchParams.set('modes', modes.join(','));
     stationSearchUrl.searchParams.set('maxResults', '5');
     const stationResponse = await fetch(stationSearchUrl, { signal: AbortSignal.timeout(4_000) });
     if (!stationResponse.ok) return null;
     const stationPayload = await stationResponse.json().catch(() => null);
-    const modes = ['tube', 'overground', 'elizabeth-line', 'dlr', 'national-rail'];
     const expectedStation = normalizeTransitLabel(step.departureStop);
     const station = stationPayload?.matches?.find((match) =>
       match.id && match.name && normalizeTransitLabel(match.name) === expectedStation
@@ -148,6 +149,8 @@ async function writeSharedCache(collection, key, value) {
 }
 
 const PROFILE_FIELD_MASK = [
+  'photos.name',
+  'photos.authorAttributions',
   'id',
   'displayName',
   'formattedAddress',
@@ -268,6 +271,7 @@ export function sendVenueError(res, error, fallbackMessage) {
 
 export async function searchVenueListings(query, locationBias = null) {
   const normalized = [
+    'planner-facts-v2',
     query.trim().toLocaleLowerCase('en-GB'),
     locationBias?.latitude?.toFixed(3) || '',
     locationBias?.longitude?.toFixed(3) || '',
@@ -303,6 +307,8 @@ export async function searchVenueListings(query, locationBias = null) {
             'places.id',
             'places.displayName',
             'places.formattedAddress',
+            'places.location',
+            'places.priceLevel',
             'places.primaryType',
           ].join(','),
         },
@@ -329,6 +335,9 @@ export async function searchVenueListings(query, locationBias = null) {
             name: place.displayName.text,
             address: place.formattedAddress,
             category: formatPlaceType(place.primaryType),
+            price: formatPriceLevel(place.priceLevel),
+            latitude: place.location?.latitude ?? null,
+            longitude: place.location?.longitude ?? null,
           }]
         : [],
     );
@@ -350,6 +359,8 @@ export async function searchVenueListings(query, locationBias = null) {
           'places.id',
           'places.displayName',
           'places.formattedAddress',
+          'places.location',
+          'places.priceLevel',
           'places.primaryType',
         ].join(','),
       },
@@ -380,6 +391,9 @@ export async function searchVenueListings(query, locationBias = null) {
           name: place.displayName.text,
           address: place.formattedAddress,
           category: formatPlaceType(place.primaryType),
+          price: formatPriceLevel(place.priceLevel),
+          latitude: place.location?.latitude ?? null,
+          longitude: place.location?.longitude ?? null,
         }]
       : [],
   );
@@ -448,6 +462,10 @@ export async function getVenueProfile(placeId) {
   ];
 
   const profile = {
+    photoNames: (place.photos || []).slice(0, 10).map(photo => ({
+      name: photo.name,
+      attribution: (photo.authorAttributions || []).map(author => author.displayName).filter(Boolean).join(' · '),
+    })),
     id: place.id,
     name: place.displayName.text,
     address: place.formattedAddress,
@@ -539,7 +557,12 @@ export async function findNearestTransitStation(latitude, longitude) {
   };
 }
 
+const walkingRouteCache = new Map();
 export async function getWalkingRoute(origin, destination) {
+    const cacheKey = [origin.latitude, origin.longitude, destination.latitude, destination.longitude]
+      .map(value => value.toFixed(5)).join(':');
+    const cached = walkingRouteCache.get(cacheKey);
+    if (cached && cached.expires > Date.now()) return cached.route;
     let payload;
     try {
       payload = await googleJson(
@@ -603,14 +626,17 @@ export async function getWalkingRoute(origin, destination) {
       }),
     );
 
-    return {
+    const walkingResult = {
       distanceMeters: route.distanceMeters,
-      durationMinutes: Math.max(1, Math.round(seconds / 60)),
+      durationMinutes: Math.max(1, Math.ceil(seconds / 60)),
       endLocation: destination,
       steps,
       ...(route.polyline?.encodedPolyline ? { polyline: route.polyline.encodedPolyline } : {}),
       source: 'google_routes',
     };
+    walkingRouteCache.set(cacheKey, { route: walkingResult, expires: Date.now() + 3 * 60 * 60 * 1000 });
+    if (walkingRouteCache.size > 1000) walkingRouteCache.delete(walkingRouteCache.keys().next().value);
+    return walkingResult;
     }
 
 
@@ -697,6 +723,7 @@ export async function getTransitRoute(origin, destination) {
         const endLocation = step.endLocation?.latLng;
         return [{
           mode,
+          vehicleType: transit?.transitLine?.vehicle?.type || null,
           instruction,
           durationMinutes: Math.max(1, Math.round(stepSeconds / 60)),
           distanceMeters: step.distanceMeters,

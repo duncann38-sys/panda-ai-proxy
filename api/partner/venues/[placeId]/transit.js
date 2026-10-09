@@ -2,6 +2,7 @@ import {
     applyVenueGuard,
     getVenueProfile,
     getTransitRoute,
+    getWalkingRoute,
     isValidPlaceId,
     readCoordinates,
     sendVenueError,
@@ -92,7 +93,37 @@ import {
             error.status = 404;
             throw error;
           }
-          const transitRoute = await getTransitRoute(location, { latitude: venue.latitude, longitude: venue.longitude });
+          const destination = { latitude: venue.latitude, longitude: venue.longitude };
+          const directWalk = await getWalkingRoute(location, destination).catch(() => null);
+          const walkingResult = (reason) => ({
+            recommendation: 'walk',
+            recommendationReason: reason,
+            directWalk,
+            originStation: null,
+            destinationStation: null,
+            transitRoute: null,
+            originWalk: null,
+            venueWalk: null,
+            updatedAt: new Date().toISOString(),
+            source: 'google_routes',
+            timingSource: 'google_estimate',
+          });
+          if (directWalk && directWalk.durationMinutes <= 15) {
+            const result = walkingResult('The venue is close by; public transport is unnecessary');
+            transitCache.set(cacheKey, { expiresAt: Date.now() + TRANSIT_CACHE_TTL_MS, result });
+            return result;
+          }
+          const transitRoute = await getTransitRoute(location, destination).catch(error => {
+            if (directWalk) return null;
+            throw error;
+          });
+          if (directWalk && ((!transitRoute && directWalk.durationMinutes <= 60) ||
+            (transitRoute && directWalk.durationMinutes <= transitRoute.durationMinutes))) {
+            const result = walkingResult(transitRoute ? 'Walking is quicker than the available public transport route' :
+              'No public transport route is available; a walking route was found');
+            transitCache.set(cacheKey, { expiresAt: Date.now() + TRANSIT_CACHE_TTL_MS, result });
+            return result;
+          }
           const firstTransitIndex = transitRoute?.steps.findIndex((step) => step.mode === 'TRANSIT') ?? -1;
           const lastTransitIndex = transitRoute
             ? transitRoute.steps.reduce((last, step, index) => step.mode === 'TRANSIT' ? index : last, -1)
@@ -118,6 +149,8 @@ import {
           const updatedAt = new Date().toISOString();
           transitRoute.updatedAt = updatedAt;
           const result = {
+            recommendation: 'transit',
+            directWalk,
             originStation,
             destinationStation,
             originWalk: walkingRouteFromSteps(transitRoute.steps.slice(0, firstTransitIndex)),
