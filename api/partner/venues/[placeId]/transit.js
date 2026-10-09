@@ -74,7 +74,9 @@ import {
       return;
     }
 
-    const cacheKey = placeId + ':' + location.latitude.toFixed(4) + ':' + location.longitude.toFixed(4);
+    const planner = req.query.planner === '1';
+    const maxMinutes = planner && req.query.max_minutes === '40' ? 40 : planner ? 60 : Infinity;
+    const cacheKey = placeId + ':' + location.latitude.toFixed(4) + ':' + location.longitude.toFixed(4) + (planner ? ':planner:' + maxMinutes : '');
     const cached = transitCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
       const result = removeExpiredLivePrediction(cached.result);
@@ -99,7 +101,7 @@ import {
             (location.longitude - destination.longitude) * 111320 *
               Math.cos((location.latitude + destination.latitude) * Math.PI / 360),
           );
-          const directWalk = nearbyMetres <= 100 ? null :
+          const directWalk = nearbyMetres <= 100 && !planner ? null :
             await getWalkingRoute(location, destination).catch(() => null);
           const walkingResult = (reason) => ({
             recommendation: 'walk',
@@ -121,7 +123,7 @@ import {
             transitCache.set(cacheKey, { expiresAt: Date.now() + TRANSIT_CACHE_TTL_MS, result });
             return result;
           }
-          const transitRoute = await getTransitRoute(location, destination).catch(error => {
+          const transitRoute = await getTransitRoute(location, destination, { includeLive: !planner, maxMinutes }).catch(error => {
             if (directWalk) return null;
             throw error;
           });

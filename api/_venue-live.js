@@ -2,6 +2,7 @@ import { applyGuard } from './_guard.js';
 import { createHash } from 'node:crypto';
 import admin from 'firebase-admin';
 import { boundedCacheExpiry, recordCostEvent } from './_cost-controls.js';
+import { addTransitStops, chooseTransitRoute } from './_transit-stops.js';
 
 const GOOGLE_DETAILS_URL = 'https://places.googleapis.com/v1/places';
 const GOOGLE_NEARBY_URL = 'https://places.googleapis.com/v1/places:searchNearby';
@@ -309,11 +310,13 @@ export async function searchVenueListings(query, locationBias = null) {
             'places.formattedAddress',
             'places.location',
             'places.priceLevel',
+            'places.rating',
+            'places.userRatingCount',
             'places.primaryType',
           ].join(','),
         },
         body: JSON.stringify({
-          includedTypes: ['restaurant', 'cafe', 'bar', 'pub'],
+          includedTypes: /night.?club|disco|late.?night/i.test(query) ? ['night_club', 'bar'] : ['restaurant', 'cafe', 'bar', 'pub'],
           maxResultCount: 20,
           rankPreference: 'DISTANCE',
           languageCode: 'en-GB',
@@ -336,6 +339,8 @@ export async function searchVenueListings(query, locationBias = null) {
             address: place.formattedAddress,
             category: formatPlaceType(place.primaryType),
             price: formatPriceLevel(place.priceLevel),
+            rating: place.rating ?? null,
+            ratingCount: place.userRatingCount ?? 0,
             latitude: place.location?.latitude ?? null,
             longitude: place.location?.longitude ?? null,
           }]
@@ -361,6 +366,8 @@ export async function searchVenueListings(query, locationBias = null) {
           'places.formattedAddress',
           'places.location',
           'places.priceLevel',
+          'places.rating',
+          'places.userRatingCount',
           'places.primaryType',
         ].join(','),
       },
@@ -392,6 +399,8 @@ export async function searchVenueListings(query, locationBias = null) {
           address: place.formattedAddress,
           category: formatPlaceType(place.primaryType),
           price: formatPriceLevel(place.priceLevel),
+          rating: place.rating ?? null,
+          ratingCount: place.userRatingCount ?? 0,
           latitude: place.location?.latitude ?? null,
           longitude: place.location?.longitude ?? null,
         }]
@@ -641,7 +650,7 @@ export async function getWalkingRoute(origin, destination) {
 
 
 
-export async function getTransitRoute(origin, destination) {
+export async function getTransitRoute(origin, destination, { includeLive = true, maxMinutes = Infinity } = {}) {
     const requestedDepartureTime = new Date().toISOString();
     let payload;
     try {
@@ -663,6 +672,7 @@ export async function getTransitRoute(origin, destination) {
               'routes.legs.steps.endLocation',
               'routes.legs.steps.polyline.encodedPolyline',
               'routes.legs.steps.transitDetails.stopDetails',
+              'routes.legs.steps.transitDetails.stopCount',
               'routes.legs.steps.transitDetails.stopDetails.departureTime',
               'routes.legs.steps.transitDetails.stopDetails.arrivalTime',
               'routes.legs.steps.transitDetails.headsign',
@@ -692,12 +702,7 @@ export async function getTransitRoute(origin, destination) {
       const duration = Number.parseFloat(String(candidate?.duration || '').replace(/s$/, ''));
       return typeof candidate?.distanceMeters === 'number' && Number.isFinite(duration);
     });
-    const route = routes.reduce((fastest, candidate) => {
-      if (!fastest) return candidate;
-      const candidateSeconds = Number.parseFloat(String(candidate.duration).replace(/s$/, ''));
-      const fastestSeconds = Number.parseFloat(String(fastest.duration).replace(/s$/, ''));
-      return candidateSeconds < fastestSeconds ? candidate : fastest;
-    }, null);
+    const route = chooseTransitRoute(routes, maxMinutes);
     const seconds = Number.parseFloat(String(route?.duration || '').replace(/s$/, ''));
     if (!route || !Number.isFinite(seconds)) return null;
 
@@ -725,6 +730,7 @@ export async function getTransitRoute(origin, destination) {
         return [{
           mode,
           vehicleType: transit?.transitLine?.vehicle?.type || null,
+          stopCount: transit?.stopCount ?? null,
           instruction,
           durationMinutes: Math.max(1, Math.round(stepSeconds / 60)),
           distanceMeters: step.distanceMeters,
@@ -753,7 +759,7 @@ export async function getTransitRoute(origin, destination) {
     if (!steps.length || !steps.some((step) => step.mode === 'TRANSIT')) return null;
 
     let timingSource = 'google_estimate';
-    if (origin.latitude >= 51.25 && origin.latitude <= 51.75 && origin.longitude >= -0.6 && origin.longitude <= 0.35) {
+    if (includeLive && origin.latitude >= 51.25 && origin.latitude <= 51.75 && origin.longitude >= -0.6 && origin.longitude <= 0.35) {
       const firstTransitIndex = steps.findIndex((step) => step.mode === 'TRANSIT');
       const liveDeparture = await getTflLiveDeparture(steps[firstTransitIndex]).catch(() => null);
       if (liveDeparture && Date.now() - Date.parse(liveDeparture.updatedAt) < TFL_CACHE_TTL_MS) {
@@ -763,6 +769,7 @@ export async function getTransitRoute(origin, destination) {
         timingSource = 'tfl_live';
       }
     }
+    if (includeLive) steps = await Promise.all(steps.map(addTransitStops));
     const updatedAt = new Date().toISOString();
     return {
       durationMinutes: Math.max(1, Math.round(seconds / 60)),
