@@ -668,6 +668,7 @@ export async function getTransitRoute(origin, destination) {
               'routes.legs.steps.transitDetails.headsign',
               'routes.legs.steps.transitDetails.transitLine.name',
               'routes.legs.steps.transitDetails.transitLine.nameShort',
+              'routes.legs.steps.transitDetails.transitLine.vehicle.type',
             ].join(','),
           },
           body: JSON.stringify({
