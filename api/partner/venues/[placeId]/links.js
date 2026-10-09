@@ -7,7 +7,7 @@ export default async function handler(req, res) {
   try {
     const profile = await getVenueProfile(req.query.placeId);
     if (!profile) return res.status(404).json({ error: 'Venue profile unavailable.' });
-    const links = await getOfficialVenueLinks(profile.website);
+    const links = await getOfficialVenueLinks(profile.website, profile.name);
     res.setHeader('Cache-Control', 'public, max-age=900, s-maxage=10800');
     res.status(200).json(links);
   } catch (error) {

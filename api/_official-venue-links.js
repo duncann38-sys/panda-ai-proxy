@@ -81,7 +81,7 @@ async function readOfficialPage(value, redirects = 0) {
 const decode = value => value.replace(/&amp;/gi, '&').replace(/&#(\d+);/g,
   (_, number) => String.fromCharCode(Number(number))).replace(/&quot;/gi, '"');
 
-export function linksFromOfficialHtml(html, base) {
+export function linksFromOfficialHtml(html, base, venueName = '') {
   const candidates = [];
   for (const match of html.matchAll(/<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)) {
     try {
@@ -92,29 +92,44 @@ export function linksFromOfficialHtml(html, base) {
       candidates.push({ url: url.href, text, pathname: url.pathname.toLowerCase() });
     } catch { /* Ignore malformed website anchors. */ }
   }
-  const choose = score => candidates.map(link => ({ ...link, score: score(link) }))
+  const words = value => value.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/['’]/g, '').split(/[^a-z0-9]+/).filter(word => word.length > 2 && word !== 'the');
+  const venueWords = words(venueName);
+  const venueSlug = venueWords.join('');
+  const affinity = link => {
+    const linkedWords = words(link.text + ' ' + link.pathname);
+    const matched = venueWords.filter(word => linkedWords.includes(word)).length;
+    const exactPath = venueSlug && link.pathname.split('/').some(segment =>
+      segment.replace(/[^a-z0-9]/g, '') === venueSlug);
+    return matched * 20 + (exactPath ? 100 : 0);
+  };
+  const choose = score => candidates.map(link => {
+    const baseScore = score(link);
+    return { ...link, score: baseScore > 0 ? baseScore + affinity(link) : 0 };
+  })
     .filter(link => link.score > 0).sort((a, b) => b.score - a.score)[0]?.url || null;
   return {
-    menuUrl: choose(link => /\b(menu|menus|food\s*(?:&|and)\s*drink)\b/.test(link.text)
-      ? 100 + (/menus?|\.pdf/.test(link.pathname) ? 20 : 0)
-      : /(?:^|\/)menus?(?:\/|\.|$)/.test(link.pathname) ? 40 : 0),
+    menuUrl: choose(link => /\b(menu|menus|meny|menyer|menukort|food\s*(?:&|and)\s*drink)\b/.test(link.text)
+      ? 100 + (/menus?|meny|menukort|\.pdf/.test(link.pathname) ? 20 : 0)
+      : /(?:^|\/)(?:menus?|meny|menukort)(?:\/|\.|$)/.test(link.pathname) ? 40 : 0),
     reservationUrl: choose(link => /\b(room|hotel|event|private hire)\b/.test(link.text) ? 0 :
-      /\b(reserve|reservation|reservations|book a table|book now|table booking)\b/.test(link.text) ? 100 :
-        /reserv|book-a-table|opentable|sevenrooms|resdiary|quandoo|thefork/.test(link.url.toLowerCase()) ? 40 : 0),
+      /\b(reserve|reservation|reservations|book a table|book now|table booking|boka bord|bordsbokning|bestil bord)\b/.test(link.text) ? 100 :
+        /reserv|book-a-table|boka-bord|opentable|sevenrooms|resdiary|quandoo|thefork/.test(link.url.toLowerCase()) ? 40 : 0),
   };
 }
 
-export async function getOfficialVenueLinks(website) {
+export async function getOfficialVenueLinks(website, venueName = '') {
   if (!website) return { menuUrl: null, reservationUrl: null, source: 'official_website', website: null };
   const url = new URL(website);
   if (url.protocol === 'http:') url.protocol = 'https:';
-  const key = publicUrl(url.href).href;
+  const pageUrl = publicUrl(url.href).href;
+  const key = pageUrl + '|' + venueName.trim().toLowerCase();
   const cached = cache.get(key);
   if (cached && cached.expires > Date.now()) return cached.value;
   if (pending.has(key)) return pending.get(key);
   const request = (async () => {
-    const page = await readOfficialPage(key);
-    const value = { ...linksFromOfficialHtml(page.html, page.url), website: page.url, source: 'official_website' };
+    const page = await readOfficialPage(pageUrl);
+    const value = { ...linksFromOfficialHtml(page.html, page.url, venueName), website: page.url, source: 'official_website' };
     cache.set(key, { expires: Date.now() + TTL, value });
     if (cache.size > 1000) cache.delete(cache.keys().next().value);
     return value;
