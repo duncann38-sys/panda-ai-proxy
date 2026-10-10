@@ -3,8 +3,16 @@ import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 test('shared luxury pool, two-hour proofs, Premium separation and planner reuse', async () => {
+  if (typeof vm.SourceTextModule !== 'function') {
+    const run = spawnSync(process.execPath, ['--experimental-vm-modules', '--test', fileURLToPath(import.meta.url)],
+      { encoding: 'utf8' });
+    assert.equal(run.status, 0, run.stdout + run.stderr);
+    return;
+  }
   const records = new Map();
   const counters = { searches: 0, matrices: 0, walks: 0 };
   let available = true;

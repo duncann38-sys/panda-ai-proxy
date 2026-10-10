@@ -178,7 +178,17 @@ export async function getBangingDirectory(origin, premiumIds = []) {
       const times = await getBangingTransitDurations(anchor, chunk.map(venue => ({
         latitude: venue.latitude, longitude: venue.longitude,
       })));
-      chunk.forEach((venue, index) => { durations[venue.id] = times[index]; });
+      for (let index = 0; index < chunk.length; index++) {
+        const venue = chunk[index];
+        let minutes = times[index];
+        // A venue at the boarding location may have no transit leg at all.
+        // Only a real, verified short walking route can admit this case.
+        if (minutes === null && meters(anchor, venue) <= 250) {
+          const walking = await getWalkingRoute(anchor, { latitude: venue.latitude, longitude: venue.longitude });
+          minutes = walking?.durationMinutes ?? null;
+        }
+        durations[venue.id] = minutes;
+      }
     }
     return durations;
   });

@@ -69,6 +69,10 @@ export function luxuryEvidence(venue) {
   if (london) {
     for (const [pool, source] of [[restaurants, RESTAURANT_SOURCE], [bars, BAR_SOURCE]]) {
       const found = pool.find(([label]) => normalizeLuxuryName(label) === name);
+      // These common bar names must bind to the hotel in the independent
+      // source, not a different London business with the same name.
+      if (found && source === BAR_SOURCE && name === 'americanbar' && !/\bsavoy\b|\bstrand\b/i.test(venue.address)) continue;
+      if (found && source === BAR_SOURCE && name === 'artesian' && !/\blangham\b|\bportland place\b/i.test(venue.address)) continue;
       if (found) return { luxurySource: source, neighborhood: found[1] };
     }
   }
