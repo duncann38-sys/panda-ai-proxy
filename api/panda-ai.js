@@ -8,7 +8,7 @@
 import { GoogleAuth } from 'google-auth-library';
 import admin from 'firebase-admin';
 import { applyGuard } from './_guard.js';
-import { quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailure, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues } from './_panda-chat-policy.js';
+import { quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues } from './_panda-chat-policy.js';
 import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-directory.js';
 import {
   boundedInteger,
@@ -44,6 +44,7 @@ let placesQuotaBlockedUntil = 0;
 const inFlightGemini = new Map();
 const recentGemini = new Map();
 let vertexAuth;
+let vertexDeniedAuthDiagnostic;
 const GEMINI_RETRY_CACHE_MS = 15 * 1000;
 const GEMINI_CACHE_LIMIT = 100;
 const SHARED_GEMINI_CACHE_MS = 5 * 60 * 1000;
@@ -599,13 +600,26 @@ async function gemini(token,projectId,body,cacheContext={}){
         const details=Array.isArray(data?.error?.details)?data.error.details:[];
         const providerReason=details.map(d=>d?.reason).find(x=>typeof x==='string'&&/^[A-Z0-9_]{1,96}$/.test(x));
         const deniedPermission=String(data?.error?.message||'').match(/\b(?:aiplatform|serviceusage|resourcemanager)\.[a-zA-Z.]+/)?.[0];
-        // Fixed classifications and permission names only; never raw errors or credentials.
+        if(!vertexDeniedAuthDiagnostic){
+          vertexDeniedAuthDiagnostic=(async()=>{
+            const client=await vertexAuth.getClient();
+            const info=await Promise.race([
+              client.getTokenInfo(token),
+              new Promise((_,reject)=>setTimeout(()=>reject(new Error('token-info-timeout')),2000)),
+            ]);
+            return {hasCloudPlatformScope:info.scopes.includes('https://www.googleapis.com/auth/cloud-platform')};
+          })().catch(()=>({tokenInfoUnavailable:true}));
+        }
+        const authDiagnostic=await vertexDeniedAuthDiagnostic;
+        // Private logs only; redact the actual token and recognizable credential formats.
         console.info(JSON.stringify({
           event:'panda_vertex_denial',
           model:/^gemini-[a-z0-9.-]{1,64}$/.test(model)?model:'custom',
           classification:last.failure,
           providerReason,
           deniedPermission,
+          message:redactedProviderMessage(data,token),
+          ...authDiagnostic,
         }));
       }
       if(r.status!==404 && r.status!==400) return last;

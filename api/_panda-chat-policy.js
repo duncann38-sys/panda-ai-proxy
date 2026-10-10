@@ -111,6 +111,19 @@ export function safeProviderFailure(data) {
   return null;
 }
 
+// Private diagnostic only. Never attach this text to an API response.
+export function redactedProviderMessage(data, accessToken) {
+  let text = String(data?.error?.message || '');
+  if (typeof accessToken === 'string' && accessToken) text = text.split(accessToken).join('[REDACTED_TOKEN]');
+  return text
+    .replace(/-----BEGIN[^-]*PRIVATE KEY-----[\s\S]*?-----END[^-]*PRIVATE KEY-----/g, '[REDACTED_KEY]')
+    .replace(/\bBearer\s+\S+/gi, 'Bearer [REDACTED_TOKEN]')
+    .replace(/\bAIza[A-Za-z0-9_-]{20,}/g, '[REDACTED_KEY]')
+    .replace(/\bya29\.[A-Za-z0-9._-]+/g, '[REDACTED_TOKEN]')
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[REDACTED_TOKEN]')
+    .slice(0, 1200);
+}
+
 export async function consumeWeatherBudget(store, limit = 25, now = new Date()) {
   if (!store) return false;
   const cap = Math.max(1, Math.min(1000, Number.parseInt(String(limit), 10) || 25));

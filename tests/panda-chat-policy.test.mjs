@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { localGreeting, quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailure, safeDegradedText, isDirectVenueRequest, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues } from '../api/_panda-chat-policy.js';
+import { localGreeting, quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues } from '../api/_panda-chat-policy.js';
 const chat = texts => texts.map(text => ({role:'user',parts:[{text}]}));
 test('greetings use current user timezone, including London DST and invalid zone fallback', () => {
   const now = new Date('2026-10-10T11:30:00Z');
@@ -45,6 +45,13 @@ test('weather budget fails closed and never spends the Gemini counter', async ()
   assert.equal(await consumeWeatherBudget(store,1),true);
   assert.equal(await consumeWeatherBudget(store,1),false);
   assert.equal(collection,'panda_weather_usage_v1');
+});
+test('private provider diagnostics redact credentials and bound message length',()=>{
+  const message='Permission denied; opaque-test-token; Bearer other-value; ya29.fake_token; '+ 'AIza'+'A'.repeat(35)+'; eyJabc.def.ghi; -----BEGIN PRIVATE KEY-----hidden-----END PRIVATE KEY-----';
+  const safe=redactedProviderMessage({error:{message}},'opaque-test-token');
+  assert.match(safe,/Permission denied/);
+  for(const secret of ['opaque-test-token','other-value','ya29.fake_token','AIza','eyJabc','hidden'])assert.equal(safe.includes(secret),false);
+  assert.equal(redactedProviderMessage({error:{message:'x'.repeat(2000)}}).length,1200);
 });
 test('session budget cap applies to cards, not just the reply',()=>{
   const contents=chat(['My budget is £££','A quiet bar near me']);
