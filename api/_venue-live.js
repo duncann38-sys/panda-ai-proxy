@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import admin from 'firebase-admin';
 import { boundedCacheExpiry, recordCostEvent } from './_cost-controls.js';
 import { addTransitStops, chooseTransitRoute } from './_transit-stops.js';
+import { parseServiceAccount } from './_firebase-service-account.js';
 
 const GOOGLE_DETAILS_URL = 'https://places.googleapis.com/v1/places';
 const GOOGLE_NEARBY_URL = 'https://places.googleapis.com/v1/places:searchNearby';
@@ -113,16 +114,7 @@ export function db() {
       return (_db = null);
     }
     if (!admin.apps.length) {
-      let account = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT.trim().replace(/^\uFEFF/, ''));
-      // Some secure settings editors wrap an already-serialized JSON value.
-      // Accept that format, without displaying or changing the stored secret.
-      if (typeof account === 'string') account = JSON.parse(account);
-      if (!account || typeof account !== 'object' || !account.project_id ||
-        !account.client_email || typeof account.private_key !== 'string') {
-        _dbFailure = 'FIREBASE_SERVICE_ACCOUNT_incomplete';
-        return (_db = null);
-      }
-      account.private_key = account.private_key.replace(/\\n/g, '\n');
+      const account = parseServiceAccount(process.env.FIREBASE_SERVICE_ACCOUNT);
       admin.initializeApp({
         credential: admin.credential.cert(account),
       });
@@ -130,7 +122,8 @@ export function db() {
     _db = admin.firestore();
     _dbFailure = '';
   } catch (error) {
-    _dbFailure = error instanceof SyntaxError ? 'FIREBASE_SERVICE_ACCOUNT_invalid_JSON'
+    _dbFailure = /^FIREBASE_SERVICE_ACCOUNT_/.test(error?.code || '') ? error.code
+      : error instanceof SyntaxError ? 'FIREBASE_SERVICE_ACCOUNT_invalid_JSON'
       : error?.code === 'app/invalid-credential' ? 'FIREBASE_SERVICE_ACCOUNT_invalid_certificate'
         : 'Firebase_initialization_failed';
     _db = null;
