@@ -14,17 +14,19 @@ export async function getPlannerPool({ origin, area, mode, budget, wide }) {
     longitude: Math.round(origin.longitude * 100) / 100,
   } : null;
   const terms = roles[mode].map(term => term === 'restaurants' && budget >= 3 ? 'upscale restaurants' : term);
-  const key = `planner-pool-v1:${mode}:${budget >= 3 ? 'upscale' : 'standard'}:${area.toLowerCase()}:${centre?.latitude}:${centre?.longitude}:${wide ? 'wide' : 'near'}`;
+  const key = `planner-pool-v2:${mode}:${budget >= 3 ? 'upscale' : 'standard'}:${area.toLowerCase()}:${centre?.latitude}:${centre?.longitude}:${wide ? 'wide' : 'near'}`;
   const stored = await refresh(key, async () => {
     const found = new Map();
     const collect = async (term, bias, namedArea = area) => {
       await withBudget('places');
       const query = namedArea ? `${term} in ${namedArea}` : term;
-      const results = await searchVenueListings(query, bias, { ttlMs: TTL });
+      const results = await searchVenueListings(query, bias, { ttlMs: TTL, rankByDistance: Boolean(bias) });
       for (const result of results) found.set(result.id, result);
     };
-    // Three nearest-role searches, reused by every phone in this area.
-    await Promise.all(terms.map(term => collect(term, centre)));
+    // Do not let an upscale-only query hide suitable restaurants in the
+    // user's immediate neighbourhood. Price remains a ceiling, not a floor.
+    const nearestTerms = terms.includes('restaurants') ? terms : [...terms, 'restaurants'];
+    await Promise.all(nearestTerms.map(term => collect(term, centre)));
     if (wide) {
       const first = [...found.values()].find(venue => Number.isFinite(venue.latitude) && Number.isFinite(venue.longitude));
       const base = area && first ? { latitude: first.latitude, longitude: first.longitude } : centre;
@@ -40,7 +42,8 @@ export async function getPlannerPool({ origin, area, mode, budget, wide }) {
       }
     }
     return [...found.values()].filter(venue => Number(venue.rating) >= 4 && /^£{1,4}$/.test(venue.price || '') &&
-      venue.photoNames?.length && Number.isFinite(venue.latitude) && Number.isFinite(venue.longitude));
+      venue.photoNames?.length && Number.isFinite(venue.latitude) && Number.isFinite(venue.longitude))
+      .map(venue => ({ ...venue, photoNames: venue.photoNames.slice(0, 5) }));
   });
   return { results: stored.value, expiresAt: stored.ts + TTL, stage: wide ? 'wide' : 'near' };
 }

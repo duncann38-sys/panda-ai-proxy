@@ -283,9 +283,10 @@ export function sendVenueError(res, error, fallbackMessage) {
   res.status(status).json({ error: error?.message || fallbackMessage });
 }
 
-export async function searchVenueListings(query, locationBias = null, { ttlMs = SEARCH_CACHE_TTL_MS } = {}) {
+export async function searchVenueListings(query, locationBias = null, { ttlMs = SEARCH_CACHE_TTL_MS, rankByDistance = false } = {}) {
   const normalized = [
-    ttlMs === SEARCH_CACHE_TTL_MS ? 'planner-facts-v3' : `curated-facts-v1:${ttlMs}`,
+    (ttlMs === SEARCH_CACHE_TTL_MS ? 'planner-facts-v3' : `curated-facts-v1:${ttlMs}`) +
+      (rankByDistance ? ':distance' : ''),
     query.trim().toLocaleLowerCase('en-GB'),
     locationBias?.latitude?.toFixed(3) || '',
     locationBias?.longitude?.toFixed(3) || '',
@@ -399,6 +400,7 @@ export async function searchVenueListings(query, locationBias = null, { ttlMs = 
         regionCode: 'GB',
         languageCode: 'en-GB',
         pageSize: 20,
+        ...(rankByDistance && locationBias ? { rankPreference: 'DISTANCE' } : {}),
         ...(locationBias
           ? {
               locationBias: {
