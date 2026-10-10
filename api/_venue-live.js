@@ -101,7 +101,7 @@ const TFL_CACHE_TTL_MS = 60_000;
 let _db = null;
 let _dbTried = false;
 
-function db() {
+export function db() {
   if (_dbTried) return _db;
   _dbTried = true;
   try {
@@ -122,7 +122,7 @@ function sharedCacheId(value) {
   return createHash('sha256').update(value).digest('base64url');
 }
 
-async function readSharedCache(collection, key, ttlMs) {
+export async function readSharedCache(collection, key, ttlMs) {
   const store = db();
   if (!store) return null;
   try {
@@ -136,7 +136,7 @@ async function readSharedCache(collection, key, ttlMs) {
   }
 }
 
-async function writeSharedCache(collection, key, value) {
+export async function writeSharedCache(collection, key, value) {
   const store = db();
   if (!store) return;
   try {
@@ -270,16 +270,16 @@ export function sendVenueError(res, error, fallbackMessage) {
   res.status(status).json({ error: error?.message || fallbackMessage });
 }
 
-export async function searchVenueListings(query, locationBias = null) {
+export async function searchVenueListings(query, locationBias = null, { ttlMs = SEARCH_CACHE_TTL_MS } = {}) {
   const normalized = [
-    'planner-facts-v3',
+    ttlMs === SEARCH_CACHE_TTL_MS ? 'planner-facts-v3' : `curated-facts-v1:${ttlMs}`,
     query.trim().toLocaleLowerCase('en-GB'),
     locationBias?.latitude?.toFixed(3) || '',
     locationBias?.longitude?.toFixed(3) || '',
   ].join(':');
   const cached = searchCache.get(normalized);
   if (cached && cached.expiresAt > Date.now()) return cached.results;
-  const shared = await readSharedCache('venue_search_cache_v1', normalized, SEARCH_CACHE_TTL_MS);
+  const shared = await readSharedCache('venue_search_cache_v1', normalized, ttlMs);
   if (Array.isArray(shared?.value)) {
     recordCostEvent('venue_search_cache_hit', { layer: 'firestore' });
     searchCache.set(normalized, {
@@ -288,7 +288,7 @@ export async function searchVenueListings(query, locationBias = null) {
         Date.now(),
         CACHE_TTL_MS,
         shared.ts,
-        SEARCH_CACHE_TTL_MS,
+        ttlMs,
       ),
     });
     return shared.value;
@@ -665,6 +665,36 @@ export async function getWalkingRoute(origin, destination) {
     }
 
 
+
+// Banging needs only a bounded travel-time proof, not a costly full detail,
+// station, live departures or photo lookup for every candidate.
+export async function getBangingTransitDurations(origin, destinations) {
+  if (!destinations.length || destinations.length > 50) throw requestError('Invalid Banging route batch.', 400);
+  recordCostEvent('banging_transit_matrix', { elements: destinations.length });
+  const payload = await googleJson(
+    'https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey(),
+        'X-Goog-FieldMask': 'originIndex,destinationIndex,duration,condition,status',
+      },
+      body: JSON.stringify({
+        origins: [{ waypoint: { location: { latLng: origin } } }],
+        destinations: destinations.map(destination => ({ waypoint: { location: { latLng: destination } } })),
+        travelMode: 'TRANSIT', departureTime: new Date().toISOString(),
+      }),
+    },
+    'Banging public transport verification is unavailable.',
+  );
+  if (!Array.isArray(payload)) throw requestError('Invalid public transport response.');
+  return destinations.map((_, index) => {
+    const element = payload.find(item => Number(item.originIndex || 0) === 0 && Number(item.destinationIndex || 0) === index);
+    const seconds = Number.parseFloat(String(element?.duration || '').replace(/s$/, ''));
+    return element?.condition === 'ROUTE_EXISTS' && !element.status?.code && Number.isFinite(seconds) && seconds > 0
+      ? Math.ceil(seconds / 60) : null;
+  });
+}
 
 export async function getTransitRoute(origin, destination, { includeLive = true, maxMinutes = Infinity } = {}) {
     const requestedDepartureTime = new Date().toISOString();
