@@ -721,7 +721,15 @@ export default async function handler(req,res){
     let credentials;
     try{ credentials=JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT); }
     catch(e){ await degrade('credentials-config'); return; }
-    if(!vertexAuth)vertexAuth=new GoogleAuth({credentials,scopes:['https://www.googleapis.com/auth/cloud-platform']});
+    if(!vertexAuth){
+      // Private runtime logs identify the IAM principal without exposing any credential/key.
+      console.info(JSON.stringify({
+        event:'panda_vertex_identity',
+        projectId:credentials.project_id,
+        serviceAccountEmail:credentials.client_email,
+      }));
+      vertexAuth=new GoogleAuth({credentials,scopes:['https://www.googleapis.com/auth/cloud-platform']});
+    }
     const client=await vertexAuth.getClient();
     const tokenPromise=client.getAccessToken().then(result=>({result}),()=>({failed:true}));
     const projectId=credentials.project_id;
