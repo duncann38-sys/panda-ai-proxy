@@ -688,7 +688,7 @@ export default async function handler(req,res){
       return;
     }
     const userText=latestUserText(contents);
-    const quick=quickChatReply(userText,body.chatContext);
+    const quick=quickChatReply(userText,body.chatContext,contents);
     if(quick){res.status(200).json({text:quick,venues:[],aiMode:'quick'});return;}
     if(maySearchVenues(userText)&&ambiguousClub(userText,contents)){
       res.status(200).json({text:'Do you mean a nightclub for dancing, a private members’ club, or a sports/social club?',venues:[],aiMode:'clarification'});return;
@@ -834,7 +834,7 @@ export default async function handler(req,res){
       const ut=latestUserText(b.contents);
       if(isWeatherQuestion(ut)){res.status(200).json({text:'Live weather is unavailable right now, so I won’t guess.',venues:[],aiMode:'fallback',aiFallbackReason:'backend_error'});return;}
       if(maySearchVenues(ut)&&isPubCrawlRequest(ut)){res.status(200).json(await buildCustomPubCrawl(ut,lat,lng));return;}
-      if(!maySearchVenues(ut)||isGreeting(ut)||!wantsPlaces(ut)){res.status(200).json({text:quickChatReply(ut,b.chatContext)||'The conversational AI is temporarily unavailable. I can still help with verified venue searches and directions.',venues:[],aiMode:'fallback',aiFallbackReason:'backend_error'});return;}
+      if(!maySearchVenues(ut)||isGreeting(ut)||!wantsPlaces(ut)){res.status(200).json({text:quickChatReply(ut,b.chatContext,b.contents)||'The conversational AI is temporarily unavailable. I can still help with verified venue searches and directions.',venues:[],aiMode:'fallback',aiFallbackReason:'backend_error'});return;}
       const found=limitChatVenues((await searchVenuesSmart(fallbackQuery(ut),lat,lng,extractArea(ut))).venues,ut,ut);
       res.status(200).json({text:safeDegradedText(ut,found),venues:found,richMetadata:true,aiMode:'fallback',aiFallbackReason:'backend_error'});
     }

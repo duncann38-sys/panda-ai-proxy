@@ -12,6 +12,29 @@ test('thanks is free, precise and does not swallow a venue question', () => {
   assert.match(quickChatReply('Thanks!'),/welcome/);
   assert.equal(quickChatReply('Thanks, find a pub near me'),null);
 });
+test('rejections and acknowledgements use prior reply without searching or pretending to act',()=>{
+  const history=[{role:'model',parts:[{text:'Here are real nearby matches. Open a card for the verified venue details.'}]}];
+  assert.match(quickChatReply('No',{},history),/Not those/);
+  assert.equal(maySearchVenues('No'),false);
+  const offline=[{role:'model',parts:[{text:'The conversational AI is temporarily unavailable. I can still help with verified venue searches and directions.'}]}];
+  assert.match(quickChatReply('Okay',{},offline),/won’t make a random pick/);
+  assert.doesNotMatch(quickChatReply('No',{},offline),/Not those/);
+  const rejected=[{role:'model',parts:[{text:quickChatReply('No',{},history)}]}];
+  assert.match(quickChatReply('Okay',{},rejected),/what you’d like to change/);
+  assert.equal(quickChatReply('No, find Italian restaurants instead',{},history),null);
+  assert.equal(maySearchVenues('No, find Italian restaurants instead'),true);
+});
+test('full send clarifies intent without paid searches or random venue cards',()=>{
+  for(const input of ['Full send','Full send!','fullsend','Send it']){
+    assert.match(quickChatReply(input),/dinner, drinks or dancing/);
+    assert.equal(maySearchVenues(input),false);
+  }
+  const service=[{role:'model',parts:[{text:'Please confirm your reservation directly with the venue.'}]}];
+  assert.match(quickChatReply('Full send',{},service),/can’t complete bookings/);
+  assert.match(quickChatReply('No',{},service),/no action taken/);
+  assert.equal(quickChatReply('Full send, find pubs near me'),null);
+  assert.equal(maySearchVenues('Full send, find pubs near me'),true);
+});
 test('club context distinguishes dancing, social and ambiguous intent', () => {
   assert.equal(ambiguousClub('Club near me',chat(['Club near me'])),true);
   assert.equal(ambiguousClub('Club near me',chat(['I want dancing and DJs','Club near me'])),false);
@@ -30,6 +53,7 @@ test('authoritative policy keeps explicit preferences and serious safety rules',
 test('only fixed provider classifications leave backend', () => {
   assert.equal(safeProviderFailure({error:{details:[{reason:'IAM_PERMISSION_DENIED',metadata:{secret:'not returned'}}]}}),'iam_permission_denied');
   assert.equal(safeProviderFailure({error:{message:'sensitive unrelated identifier'}}),null);
+  assert.equal(safeProviderFailure({error:{status:'PERMISSION_DENIED',message:'Lightning dunning decision is deny for project: projects/123'}}),'billing_restricted');
   assert.equal(safeProviderFailure({error:{status:'PERMISSION_DENIED',message:'Project x is not allowed to use Publisher Model gemini-3.1-flash-lite'}}),'model_access_denied');
   assert.equal(safeProviderFailure({error:{message:"Permission 'aiplatform.endpoints.predict' denied on resource gemini-3.1-flash-lite (or it may not exist)."}}),'permission_denied');
   assert.match(safeDegradedText('nut allergy',[{name:'x'}]),/not confirmed/);

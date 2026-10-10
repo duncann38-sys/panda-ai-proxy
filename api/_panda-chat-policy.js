@@ -11,13 +11,38 @@ export function localGreeting(context = {}, now = new Date()) {
   return { timeZone, greeting: hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening' };
 }
 
-export function quickChatReply(text, context = {}) {
-  const clean = String(text || '').trim().replace(/[!.?]+$/g, '').toLowerCase();
+const REJECTION = /^(no|nope|nah|no thanks|not those|none of those)$/;
+const VAGUE_ENTHUSIASM = /^(full\s*send|send it)$/;
+const ACKNOWLEDGEMENT = /^(ok|okay|cool|nice|lol|haha)$/;
+const cleanReply = text => String(text || '').trim().replace(/[!.?]+$/g, '').toLowerCase();
+
+export function quickChatReply(text, context = {}, contents = []) {
+  const clean = cleanReply(text);
+  const previous = (Array.isArray(contents) ? contents : []).filter(x => x?.role === 'model' || x?.role === 'assistant').at(-1);
+  const previousText = (Array.isArray(previous?.parts) ? previous.parts : [])
+    .map(p => typeof p?.text === 'string' ? p.text : '').join(' ').slice(0, 1600);
+  const unavailable = /(?:conversational|full|live) AI.*(?:unavailable|offline)|AI is temporarily unavailable/i.test(previousText);
+  const serious = /\b(allerg\w*|dietary|bookings?|reservations?|payments?|refunds?)\b/i.test(previousText);
+  if (REJECTION.test(clean)) {
+    if (serious) return 'Understood—no action taken. Tell me what you’d like to change.';
+    if (/\b(matches|venues|options|spots|cards|recommend\w*)\b/i.test(previousText) && !unavailable) {
+      return 'Not those—got it. What should we change: the vibe, budget or area?';
+    }
+    return 'Understood. I won’t run another venue search unless you ask.';
+  }
+  if (VAGUE_ENTHUSIASM.test(clean)) {
+    if (serious) return 'Please clarify what you’d like to do. I can’t complete bookings or payments, or verify allergen safety.';
+    return 'All in—but on what: dinner, drinks or dancing? Tell me your area and budget so I can find the right options.';
+  }
   if (/^(thanks|thank you|cheers|ta|nice one)$/.test(clean)) return 'You’re welcome. Fancy finding your next spot?';
   if (/^(hi+|hey+|hello+|hiya|yo|good morning|good afternoon|good evening)$/.test(clean)) {
     return `${localGreeting(context).greeting}! Food, drinks, or somewhere to dance—what’s the mood?`;
   }
-  if (/^(ok|okay|cool|nice|lol|haha)$/.test(clean)) return 'Sounds good—what shall we find next?';
+  if (ACKNOWLEDGEMENT.test(clean)) {
+    if (unavailable) return 'I can still help with venue searches, menus and directions. Tell me what you need; I won’t make a random pick.';
+    if (/not those|what.*change|no action taken|won’t run another/i.test(previousText)) return 'Okay—tell me what you’d like to change when you’re ready.';
+    return 'Okay—tell me the vibe, budget or area when you’re ready.';
+  }
   if (/^(who are you|what can you do|help)$/.test(clean)) {
     return 'I’m Panda, your going-out concierge. Tell me your location, budget and vibe; I can find real venues, menus and directions.';
   }
@@ -39,6 +64,8 @@ export function isDirectVenueRequest(text) {
 }
 
 export function maySearchVenues(text) {
+  const clean = cleanReply(text);
+  if (REJECTION.test(clean) || VAGUE_ENTHUSIASM.test(clean) || ACKNOWLEDGEMENT.test(clean)) return false;
   return !/\b(without (?:searching|finding)|(?:don['’]t|do not) search|my preferences|what (?:do you|have you) remember|how are you|who are you|what can you do|what is|what are|explain|how does)\b/i.test(String(text));
 }
 
@@ -95,12 +122,13 @@ export function buildChatInstruction(contents, context = {}, weather = null, exp
 }
 
 export function safeProviderFailure(data) {
+  const message = String(data?.error?.message || '');
+  if (/lightning dunning decision is deny/i.test(message)) return 'billing_restricted';
   const reasons = (data?.error?.details || []).map(x => x?.reason);
   const allowed = ['SERVICE_DISABLED', 'BILLING_DISABLED', 'IAM_PERMISSION_DENIED', 'API_KEY_SERVICE_BLOCKED', 'CONSUMER_INVALID', 'VPC_SERVICE_CONTROLS'];
   const reason = reasons.find(x => allowed.includes(x));
   if (reason) return reason.toLowerCase();
   // Classify internally; never return raw errors, account identifiers, resource names, or credentials.
-  const message = String(data?.error?.message || '');
   if (/aiplatform\.endpoints\.predict.*denied/i.test(message)) return 'permission_denied';
   if (/\b(?:publisher\s+model|gemini-[a-z0-9.-]+)\b/i.test(message) &&
       /\bnot (?:allowed|authorized|available)|\b(?:does not have|no) access/i.test(message)) return 'model_access_denied';
