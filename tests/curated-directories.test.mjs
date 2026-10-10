@@ -35,6 +35,7 @@ test('shared luxury pool, two-hour proofs, Premium separation and planner reuse'
   });
   const live = {
     db: () => available ? store : null,
+    sharedStorageFailure: () => 'TEST_storage_unavailable',
     readSharedCache: async (collection, key, ttl) => {
       if (!available) return null;
       const value = records.get(`${collection}/${createHash('sha256').update(key).digest('base64url')}`);
@@ -116,6 +117,6 @@ test('shared luxury pool, two-hour proofs, Premium separation and planner reuse'
   available = false;
   const last = counters.searches;
   await assert.rejects(directory.getBangingDirectory({ latitude: 53.48, longitude: -2.2 }),
-    /Shared Banging storage is unavailable/);
+    /Shared venue storage is unavailable/);
   assert.equal(counters.searches, last);
 });

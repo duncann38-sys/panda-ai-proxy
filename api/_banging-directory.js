@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  db, readSharedCache, searchVenueListings, getVenueProfile,
+  db, sharedStorageFailure, readSharedCache, searchVenueListings, getVenueProfile,
   getBangingTransitDurations, getWalkingRoute,
 } from './_venue-live.js';
 import { consumeDailyBudget, recordCostEvent } from './_cost-controls.js';
@@ -33,7 +33,7 @@ export async function refresh(key, loader, ttl = TTL) {
   if (flights.has(key)) return flights.get(key);
   const request = (async () => {
     const store = db();
-    if (!store) throw error('Shared Banging storage is unavailable. Please try again shortly.');
+    if (!store) throw error(`Shared venue storage is unavailable (${sharedStorageFailure()}). Please check Vercel Production configuration.`);
     const id = createHash('sha256').update(key).digest('base64url');
     const ref = store.collection(CACHE).doc(id);
     const lease = store.collection('banging_refresh_locks_v1').doc(id);

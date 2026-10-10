@@ -100,19 +100,39 @@ const TFL_CACHE_TTL_MS = 60_000;
 
 let _db = null;
 let _dbTried = false;
+let _dbFailure = 'not_initialized';
+
+export function sharedStorageFailure() { return _dbFailure; }
 
 export function db() {
   if (_dbTried) return _db;
   _dbTried = true;
   try {
-    if (!process.env.FIREBASE_SERVICE_ACCOUNT) return (_db = null);
+    if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
+      _dbFailure = 'FIREBASE_SERVICE_ACCOUNT_missing';
+      return (_db = null);
+    }
     if (!admin.apps.length) {
+      let account = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT.trim().replace(/^\uFEFF/, ''));
+      // Some secure settings editors wrap an already-serialized JSON value.
+      // Accept that format, without displaying or changing the stored secret.
+      if (typeof account === 'string') account = JSON.parse(account);
+      if (!account || typeof account !== 'object' || !account.project_id ||
+        !account.client_email || typeof account.private_key !== 'string') {
+        _dbFailure = 'FIREBASE_SERVICE_ACCOUNT_incomplete';
+        return (_db = null);
+      }
+      account.private_key = account.private_key.replace(/\\n/g, '\n');
       admin.initializeApp({
-        credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
+        credential: admin.credential.cert(account),
       });
     }
     _db = admin.firestore();
-  } catch {
+    _dbFailure = '';
+  } catch (error) {
+    _dbFailure = error instanceof SyntaxError ? 'FIREBASE_SERVICE_ACCOUNT_invalid_JSON'
+      : error?.code === 'app/invalid-credential' ? 'FIREBASE_SERVICE_ACCOUNT_invalid_certificate'
+        : 'Firebase_initialization_failed';
     _db = null;
   }
   return _db;
