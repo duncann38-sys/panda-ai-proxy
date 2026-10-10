@@ -101,6 +101,9 @@ export function safeProviderFailure(data) {
   if (reason) return reason.toLowerCase();
   // Classify internally; never return raw errors, account identifiers, resource names, or credentials.
   const message = String(data?.error?.message || '');
+  if (/aiplatform\.endpoints\.predict.*denied/i.test(message)) return 'permission_denied';
+  if (/\b(?:publisher\s+model|gemini-[a-z0-9.-]+)\b/i.test(message) &&
+      /\bnot (?:allowed|authorized|available)|\b(?:does not have|no) access/i.test(message)) return 'model_access_denied';
   if (/aiplatform\.endpoints\.predict.*denied|permission.*denied|does not have permission|insufficient.*scope/i.test(message)) return 'permission_denied';
   if (/publisher model.*(?:not found|not have access)|model.*not supported/i.test(message)) return 'model_unavailable';
   if(data?.error?.status==='PERMISSION_DENIED')return 'permission_denied';

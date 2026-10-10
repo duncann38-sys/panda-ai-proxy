@@ -595,6 +595,19 @@ async function gemini(token,projectId,body,cacheContext={}){
         return result;
       }
       last={ok:false,status:r.status,data,failure:safeProviderFailure(data)};
+      if(r.status===403){
+        const details=Array.isArray(data?.error?.details)?data.error.details:[];
+        const providerReason=details.map(d=>d?.reason).find(x=>typeof x==='string'&&/^[A-Z0-9_]{1,96}$/.test(x));
+        const deniedPermission=String(data?.error?.message||'').match(/\b(?:aiplatform|serviceusage|resourcemanager)\.[a-zA-Z.]+/)?.[0];
+        // Fixed classifications and permission names only; never raw errors or credentials.
+        console.info(JSON.stringify({
+          event:'panda_vertex_denial',
+          model:/^gemini-[a-z0-9.-]{1,64}$/.test(model)?model:'custom',
+          classification:last.failure,
+          providerReason,
+          deniedPermission,
+        }));
+      }
       if(r.status!==404 && r.status!==400) return last;
     }catch(e){ last={ok:false,status:e?.name==='TimeoutError'?504:500,data:{},failure:e?.name==='TimeoutError'?'timeout':'network'}; }
   }

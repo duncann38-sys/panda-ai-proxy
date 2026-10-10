@@ -30,6 +30,8 @@ test('authoritative policy keeps explicit preferences and serious safety rules',
 test('only fixed provider classifications leave backend', () => {
   assert.equal(safeProviderFailure({error:{details:[{reason:'IAM_PERMISSION_DENIED',metadata:{secret:'not returned'}}]}}),'iam_permission_denied');
   assert.equal(safeProviderFailure({error:{message:'sensitive unrelated identifier'}}),null);
+  assert.equal(safeProviderFailure({error:{status:'PERMISSION_DENIED',message:'Project x is not allowed to use Publisher Model gemini-3.1-flash-lite'}}),'model_access_denied');
+  assert.equal(safeProviderFailure({error:{message:"Permission 'aiplatform.endpoints.predict' denied on resource gemini-3.1-flash-lite (or it may not exist)."}}),'permission_denied');
   assert.match(safeDegradedText('nut allergy',[{name:'x'}]),/not confirmed/);
   assert.match(safeDegradedText('book me a table'),/haven’t made a booking/);
 });
