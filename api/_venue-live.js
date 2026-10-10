@@ -272,7 +272,7 @@ export function sendVenueError(res, error, fallbackMessage) {
 
 export async function searchVenueListings(query, locationBias = null) {
   const normalized = [
-    'planner-facts-v2',
+    'planner-facts-v3',
     query.trim().toLocaleLowerCase('en-GB'),
     locationBias?.latitude?.toFixed(3) || '',
     locationBias?.longitude?.toFixed(3) || '',
@@ -313,6 +313,8 @@ export async function searchVenueListings(query, locationBias = null) {
             'places.rating',
             'places.userRatingCount',
             'places.primaryType',
+            'places.currentOpeningHours',
+            'places.photos',
           ].join(','),
         },
         body: JSON.stringify({
@@ -341,6 +343,12 @@ export async function searchVenueListings(query, locationBias = null) {
             price: formatPriceLevel(place.priceLevel),
             rating: place.rating ?? null,
             ratingCount: place.userRatingCount ?? 0,
+            openNow: place.currentOpeningHours?.openNow ?? null,
+            todayHours: getTodayHours(place),
+            photoNames: (place.photos || []).slice(0, 10).map(photo => ({
+              name: photo.name,
+              attribution: (photo.authorAttributions || []).map(author => author.displayName).filter(Boolean).join(' · '),
+            })),
             latitude: place.location?.latitude ?? null,
             longitude: place.location?.longitude ?? null,
           }]
@@ -369,6 +377,8 @@ export async function searchVenueListings(query, locationBias = null) {
           'places.rating',
           'places.userRatingCount',
           'places.primaryType',
+          'places.currentOpeningHours',
+          'places.photos',
         ].join(','),
       },
       body: JSON.stringify({
@@ -401,6 +411,12 @@ export async function searchVenueListings(query, locationBias = null) {
           price: formatPriceLevel(place.priceLevel),
           rating: place.rating ?? null,
           ratingCount: place.userRatingCount ?? 0,
+          openNow: place.currentOpeningHours?.openNow ?? null,
+          todayHours: getTodayHours(place),
+          photoNames: (place.photos || []).slice(0, 10).map(photo => ({
+            name: photo.name,
+            attribution: (photo.authorAttributions || []).map(author => author.displayName).filter(Boolean).join(' · '),
+          })),
           latitude: place.location?.latitude ?? null,
           longitude: place.location?.longitude ?? null,
         }]
