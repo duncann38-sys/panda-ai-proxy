@@ -38,6 +38,10 @@ export function isDirectVenueRequest(text) {
     && !/\b(why|difference|what is|what are|explain|refund|complaint|allergic reaction)\b/i.test(text);
 }
 
+export function maySearchVenues(text) {
+  return !/\b(without (?:searching|finding)|(?:don['’]t|do not) search|my preferences|what (?:do you|have you) remember|how are you|who are you|what can you do|what is|what are|explain|how does)\b/i.test(String(text));
+}
+
 export function sessionVenueQuery(text, contents) {
   const statements=userTexts(contents).slice(-12).join(' ').toLowerCase();
   const mood=statements.match(/\b(quiet|cosy|cozy|romantic|luxury|lively|upmarket|live music)\b/g)||[];
@@ -97,8 +101,10 @@ export function safeProviderFailure(data) {
   if (reason) return reason.toLowerCase();
   // Classify internally; never return raw errors, account identifiers, resource names, or credentials.
   const message = String(data?.error?.message || '');
-  if (/aiplatform\.endpoints\.predict.*denied|permission.*denied/i.test(message)) return 'permission_denied';
+  if (/aiplatform\.endpoints\.predict.*denied|permission.*denied|does not have permission|insufficient.*scope/i.test(message)) return 'permission_denied';
   if (/publisher model.*(?:not found|not have access)|model.*not supported/i.test(message)) return 'model_unavailable';
+  if(data?.error?.status==='PERMISSION_DENIED')return 'permission_denied';
+  if(data?.error?.status==='UNAUTHENTICATED')return 'unauthenticated';
   return null;
 }
 

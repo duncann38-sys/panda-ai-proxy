@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { localGreeting, quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailure, safeDegradedText, isDirectVenueRequest, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues } from '../api/_panda-chat-policy.js';
+import { localGreeting, quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailure, safeDegradedText, isDirectVenueRequest, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues } from '../api/_panda-chat-policy.js';
 const chat = texts => texts.map(text => ({role:'user',parts:[{text}]}));
 test('greetings use current user timezone, including London DST and invalid zone fallback', () => {
   const now = new Date('2026-10-10T11:30:00Z');
@@ -49,4 +49,10 @@ test('session budget cap applies to cards, not just the reply',()=>{
   assert.deepEqual(filterSessionVenues([{id:'a',price:'££'},{id:'b',price:'££££'},{id:'c'}],contents).map(v=>v.id),['a']);
   assert.match(sessionVenueQuery('pubs',contents),/^pubs quiet$/);
   assert.deepEqual(filterSessionVenues([{id:'a'}],[]),[{id:'a'}]);
+});
+test('pure conversation and explicit no-search requests never trigger paid venue fallbacks',()=>{
+  assert.equal(maySearchVenues('Tell me my preferences without searching venues'),false);
+  assert.equal(maySearchVenues('What is a pub crawl?'),false);
+  assert.equal(maySearchVenues('How are you?'),false);
+  assert.equal(maySearchVenues('Find pubs near me'),true);
 });
