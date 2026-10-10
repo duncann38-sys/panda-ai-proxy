@@ -8,6 +8,7 @@
 import { GoogleAuth } from 'google-auth-library';
 import admin from 'firebase-admin';
 import { applyGuard } from './_guard.js';
+import { quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailure, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues } from './_panda-chat-policy.js';
 import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-directory.js';
 import {
   boundedInteger,
@@ -24,10 +25,8 @@ import {
   writeSharedGeminiCall,
 } from './_cost-controls.js';
 const MODELS = [...new Set([
-  process.env.PANDA_MODEL,
-  'gemini-2.5-flash',
-  'gemini-2.0-flash',
-  'gemini-1.5-flash',
+  !/^gemini-(?:1\.5|2\.0|2\.5)-/.test(process.env.PANDA_MODEL || '') && process.env.PANDA_MODEL,
+  'gemini-3.1-flash-lite',
 ].filter(Boolean))];
 const LOCATION = process.env.PANDA_LOCATION || 'us-central1';
 const MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY;
@@ -44,6 +43,7 @@ const inFlightSearches = new Map();
 let placesQuotaBlockedUntil = 0;
 const inFlightGemini = new Map();
 const recentGemini = new Map();
+let vertexAuth;
 const GEMINI_RETRY_CACHE_MS = 15 * 1000;
 const GEMINI_CACHE_LIMIT = 100;
 const SHARED_GEMINI_CACHE_MS = 5 * 60 * 1000;
@@ -441,10 +441,10 @@ function nearbyChatVenues(venues){
   }
   return [...unique.values()].sort((a,b)=>a.distanceMeters-b.distanceMeters).slice(0,CHAT_CARD_LIMIT);
 }
-async function searchChatVenues(query,lat,lng,area,openNow){
+async function searchChatVenues(query,lat,lng,area,openNow,fast=false){
   const first=await searchVenuesSmart(query,lat,lng,area,openNow);
   let venues=nearbyChatVenues(first.venues);
-  if(venues.length<15&&first.nextPageToken&&!area){
+  if(!fast&&venues.length<15&&first.nextPageToken&&!area){
     const second=await searchVenues(query,lat,lng,first.nextPageToken,openNow);
     venues=nearbyChatVenues([...(first.venues||[]),...(second.venues||[])]);
   }
@@ -581,8 +581,11 @@ async function gemini(token,projectId,body,cacheContext={}){
   let last={ok:false,status:0,data:{}};
   for(const model of MODELS){
     try{
-      const url=`https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${LOCATION}/publishers/google/models/${model}:generateContent`;
-      const r=await fetch(url,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify(body)});
+      const region=model.startsWith('gemini-3')?'global':LOCATION;
+      const host=region==='global'?'aiplatform.googleapis.com':`${region}-aiplatform.googleapis.com`;
+      const url=`https://${host}/v1/projects/${projectId}/locations/${region}/publishers/google/models/${model}:generateContent`;
+      const requestBody={...body,generationConfig:{...body.generationConfig,thinkingConfig:model.startsWith('gemini-3')?{thinkingLevel:'MINIMAL'}:{thinkingBudget:0}}};
+      const r=await fetch(url,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify(requestBody),signal:AbortSignal.timeout(6500)});
       const data=await r.json().catch(()=>({}));
       if(r.ok) {
         const result={ok:true,status:r.status,data};
@@ -591,9 +594,9 @@ async function gemini(token,projectId,body,cacheContext={}){
         }
         return result;
       }
-      last={ok:false,status:r.status,data};
+      last={ok:false,status:r.status,data,failure:safeProviderFailure(data)};
       if(r.status!==404 && r.status!==400) return last;
-    }catch(e){ last={ok:false,status:500,data:{error:String(e)}}; }
+    }catch(e){ last={ok:false,status:e?.name==='TimeoutError'?504:500,data:{},failure:e?.name==='TimeoutError'?'timeout':'network'}; }
   }
   return last;
   })();
@@ -620,7 +623,7 @@ export default async function handler(req,res){
   if(applyGuard(req,res,{methods:['POST','OPTIONS'],limit:true})) return;
   try{
     const body=req.body||{};
-    const {systemInstruction,contents,generationConfig,location}=body;
+    const {contents,generationConfig,location}=body;
     const lat=location?.lat??DEFAULT_LAT, lng=location?.lng??DEFAULT_LNG;
     if(body.venuesOnly){
       if(body.directoryOnly===true){
@@ -658,18 +661,56 @@ export default async function handler(req,res){
       return;
     }
     const userText=latestUserText(contents);
+    const quick=quickChatReply(userText,body.chatContext);
+    if(quick){res.status(200).json({text:quick,venues:[],aiMode:'quick'});return;}
+    if(ambiguousClub(userText,contents)){
+      res.status(200).json({text:'Do you mean a nightclub for dancing, a private members’ club, or a sports/social club?',venues:[],aiMode:'clarification'});return;
+    }
+    if(isDirectVenueRequest(userText)&&!extractArea(userText)&&(!location||!Number.isFinite(Number(location.lat))||!Number.isFinite(Number(location.lng)))){
+      res.status(200).json({text:'Tell me your city or area, or allow location access, so I can find real nearby venues.',venues:[],aiMode:'clarification'});return;
+    }
     if(isPubCrawlRequest(userText)){res.status(200).json(await buildCustomPubCrawl(userText,lat,lng));return;}
+    let prefetchedVenues=null;
+    let weather=null;
+    let weatherStatus=null;
+    if(isWeatherQuestion(userText)){
+      const area=extractArea(userText);
+      const point=area?await geocodeArea(area):location;
+      if(!point||!Number.isFinite(Number(point.lat))||!Number.isFinite(Number(point.lng))){
+        res.status(200).json({text:'Which city or area should I check the weather for?',venues:[],aiMode:'clarification'});return;
+      }
+      // Weather is only requested on explicit weather questions, never every greeting or venue visit.
+      const weatherAllowed=await consumeWeatherBudget(db(),process.env.PANDA_DAILY_WEATHER_LIMIT||25);
+      if(weatherAllowed&&MAPS_KEY){
+        try{
+          const url=new URL('https://weather.googleapis.com/v1/currentConditions:lookup');
+          url.search=new URLSearchParams({key:MAPS_KEY,'location.latitude':String(point.lat),'location.longitude':String(point.lng),unitsSystem:'METRIC'});
+          recordCostEvent('weather_provider_call');
+          const reply=await fetch(url,{signal:AbortSignal.timeout(2500)});
+          const data=await reply.json();
+          if(reply.ok&&data.currentTime&&data.weatherCondition){
+            weather={observedAt:data.currentTime,condition:data.weatherCondition.description?.text,temperatureC:data.temperature?.degrees,source:'Google Weather'};
+          }else weatherStatus=safeProviderFailure(data)||'weather_unavailable';
+        }catch{weatherStatus='weather_unavailable';}
+      }else weatherStatus='weather_unavailable';
+    }
     async function degrade(reason='unknown'){
+      if(prefetchedVenues!==null){
+        res.status(200).json({text:safeDegradedText(userText,prefetchedVenues),venues:prefetchedVenues,richMetadata:true,aiMode:'fallback',aiFallbackReason:reason});return;
+      }
+      if(isWeatherQuestion(userText)){
+        res.status(200).json({text:weather?`Current conditions: ${weather.condition}, ${weather.temperatureC}°C (Google Weather). ${/rain|storm|snow/i.test(weather.condition||'')?'An indoor spot looks the better option.':'Tell me if you fancy an indoor or outdoor spot.'}`:'Live weather is unavailable right now, so I won’t guess. Tell me if you’d prefer an indoor or outdoor spot.',venues:[],aiMode:'fallback',aiFallbackReason:reason,weatherStatus,weather});return;
+      }
       if(isGreeting(userText) || !wantsPlaces(userText)){
-        res.status(200).json({text:pick(GREET_LINES),venues:[],aiMode:'fallback',aiFallbackReason:reason});
+        res.status(200).json({text:safeDegradedText(userText),venues:[],aiMode:'fallback',aiFallbackReason:reason});
         return;
       }
       const wantOpen=/\bopen\b/i.test(userText);
       const q=fallbackQuery(userText),area=extractArea(userText);
       let found=await searchChatVenues(q,lat,lng,area,wantOpen);
       if(!found.length){found=await searchChatVenues('restaurants and bars',lat,lng,area,false);}
-      found=limitChatVenues(found,userText,q);
-      res.status(200).json({text:found.length?"Grabbed a few spots near you \uD83D\uDC3C":pick(NORESULT_LINES),venues:found,richMetadata:true,aiMode:'fallback',aiFallbackReason:reason});
+      found=filterSessionVenues(limitChatVenues(found,userText,q),contents);
+      res.status(200).json({text:safeDegradedText(userText,found),venues:found,richMetadata:true,aiMode:'fallback',aiFallbackReason:reason});
     }
     const clientBudget=await consumeClientDailyBudget(
       db(),
@@ -680,16 +721,15 @@ export default async function handler(req,res){
     let credentials;
     try{ credentials=JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT); }
     catch(e){ await degrade('credentials-config'); return; }
-    const auth=new GoogleAuth({credentials,scopes:['https://www.googleapis.com/auth/cloud-platform']});
-    const client=await auth.getClient();
-    const {token}=await client.getAccessToken();
+    if(!vertexAuth)vertexAuth=new GoogleAuth({credentials,scopes:['https://www.googleapis.com/auth/cloud-platform']});
+    const client=await vertexAuth.getClient();
+    const tokenPromise=client.getAccessToken().then(result=>({result}),()=>({failed:true}));
     const projectId=credentials.project_id;
-    const convo=process.env.PANDA_COMPACT_CONVERSATION==='true'
-      ?compactConversation(contents)
-      :(Array.isArray(contents)?contents.slice():[]);
+    const convo=compactConversation(contents,{maxItems:12,maxChars:7000});
     const baseBody={contents:convo,tools:[FIND_PLACES_TOOL]};
-    if(systemInstruction)baseBody.systemInstruction=systemInstruction.parts?systemInstruction:{parts:[{text:String(systemInstruction)}]};
-    const maxOutputTokens=boundedInteger(process.env.PANDA_MAX_OUTPUT_TOKENS,0,0,4096);
+    baseBody.systemInstruction={parts:[{text:buildChatInstruction(contents,body.chatContext,weather,body.sessionPreferences)}]};
+    if(isWeatherQuestion(userText)&&!isDirectVenueRequest(userText))delete baseBody.tools;
+    const maxOutputTokens=boundedInteger(process.env.PANDA_MAX_OUTPUT_TOKENS,320,96,512);
     if(generationConfig||maxOutputTokens){
       baseBody.generationConfig={...(generationConfig||{})};
       if(maxOutputTokens){
@@ -700,15 +740,28 @@ export default async function handler(req,res){
       }
     }
     let venues=[];
+    // An explicit venue request needs one grounded model reply, not a model decision plus
+    // a second/third inference. Keep the established guarded, shared Places search.
+    if(isDirectVenueRequest(userText)&&!isWeatherQuestion(userText)){
+      const area=extractArea(userText);
+      const q=sessionVenueQuery(fallbackQuery(userText),contents);
+      prefetchedVenues=filterSessionVenues(limitChatVenues(await searchChatVenues(q,lat,lng,area,/\bopen\b/i.test(userText),!/\b(all|more|another|different)\b/i.test(userText)),userText,q),contents);
+      venues=prefetchedVenues;
+      delete baseBody.tools;
+      baseBody.systemInstruction.parts[0].text+=`\nVerified venue shortlist: ${venuesToText(venues,userText)}\nAnswer only from this shortlist. If empty, say no matching venues were verified.`;
+    }
+    const tokenResult=await tokenPromise;
+    if(tokenResult.failed){await degrade('vertex-auth-unavailable');return;}
+    const {token}=tokenResult.result;
     const cacheLocation={
       lat:Math.round(lat*10000)/10000,
       lng:Math.round(lng*10000)/10000,
       stage:'initial',
     };
     let resp=await gemini(token,projectId,baseBody,cacheLocation);
-    if(!resp.ok){ await degrade(resp.budgetExceeded?'gemini-daily-budget':`vertex-${resp.status||'network'}`); return; }
+    if(!resp.ok){ await degrade(resp.budgetExceeded?'gemini-daily-budget':`vertex-${resp.status||'network'}${resp.failure?':'+resp.failure:''}`); return; }
     let rounds=0;
-    const maxToolRounds=boundedInteger(process.env.PANDA_MAX_TOOL_ROUNDS,2,0,2);
+    const maxToolRounds=boundedInteger(process.env.PANDA_MAX_TOOL_ROUNDS,1,0,1);
     while(rounds<maxToolRounds){
       const cand=resp.data.candidates?.[0];
       const parts=cand?.content?.parts||[];
@@ -720,7 +773,7 @@ export default async function handler(req,res){
       const wantOpen=/\bopen\b/i.test(q)||/\bopen\b/i.test(userText);
       let found=await searchChatVenues(q,lat,lng,area,wantOpen);
       if(!found.length){const broad=(userText||q).split(' ').slice(0,4).join(' ')+' restaurants bars';found=await searchChatVenues(broad,lat,lng,area,false);}
-      if(found.length) venues=limitChatVenues(found,userText,q);
+      if(found.length) venues=filterSessionVenues(limitChatVenues(found,userText,q),contents);
       convo.push(cand.content);
       convo.push({role:'user',parts:[{functionResponse:{name:'find_places',response:{venues:venuesToText(found,userText)}}}]});
       const nextBody={contents:convo,tools:[FIND_PLACES_TOOL]};
@@ -731,22 +784,23 @@ export default async function handler(req,res){
       rounds++;
     }
     let text=(resp.data?.candidates?.[0]?.content?.parts||[]).map(p=>p.text||'').join('').trim();
-    if(!venues.length&&wantsPlaces(userText)&&!isGreeting(userText)){
+    if(prefetchedVenues===null&&!venues.length&&wantsPlaces(userText)&&!isGreeting(userText)&&!isWeatherQuestion(userText)){
       const fallbackArea=extractArea(userText);
       const found=await searchChatVenues(fallbackQuery(userText),lat,lng,fallbackArea,false);
-      venues=limitChatVenues(found,userText,userText);
+      venues=filterSessionVenues(limitChatVenues(found,userText,userText),contents);
     }
     if(!text) text=venues.length?"Here's what I dug up near you \uD83D\uDC3C":pick(NORESULT_LINES);
     venues=limitChatVenues(venues,userText,userText);
-    res.status(200).json({text,venues,richMetadata:true});
+    res.status(200).json({text,venues,richMetadata:true,aiMode:'vertex',weatherStatus,weather});
   }catch(err){
     try{
       const b=req.body||{};const loc=b.location||{};const lat=loc.lat??DEFAULT_LAT,lng=loc.lng??DEFAULT_LNG;
       const ut=latestUserText(b.contents);
+      if(isWeatherQuestion(ut)){res.status(200).json({text:'Live weather is unavailable right now, so I won’t guess.',venues:[],aiMode:'fallback',aiFallbackReason:'backend_error'});return;}
       if(isPubCrawlRequest(ut)){res.status(200).json(await buildCustomPubCrawl(ut,lat,lng));return;}
-      if(isGreeting(ut)||!wantsPlaces(ut)){res.status(200).json({text:pick(GREET_LINES),venues:[]});return;}
+      if(isGreeting(ut)||!wantsPlaces(ut)){res.status(200).json({text:quickChatReply(ut,b.chatContext)||safeDegradedText(ut),venues:[],aiMode:'fallback',aiFallbackReason:'backend_error'});return;}
       const found=limitChatVenues((await searchVenuesSmart(fallbackQuery(ut),lat,lng,extractArea(ut))).venues,ut,ut);
-      res.status(200).json({text:found.length?"Here are some nearby spots \uD83D\uDC3C":pick(NORESULT_LINES),venues:found,richMetadata:true});
+      res.status(200).json({text:safeDegradedText(ut,found),venues:found,richMetadata:true,aiMode:'fallback',aiFallbackReason:'backend_error'});
     }
     catch(e){res.status(200).json({text:"I glitched for a second \u2014 give that another go.",venues:[]});}
   }
