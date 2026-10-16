@@ -2,6 +2,7 @@ import { applyGuard } from './_guard.js';
 import admin from 'firebase-admin';
 import { boundedCacheExpiry, recordCostEvent } from './_cost-controls.js';
 import { providerQuotaInfo } from './_london-index.js';
+import { fetchPhoto } from './_photo-fetch.js';
 
 const GOOGLE_DETAILS_URL = 'https://places.googleapis.com/v1/places';
 const GOOGLE_PHOTO_FIELD_MASK = 'photos.name,photos.authorAttributions';
@@ -64,7 +65,7 @@ export function sendVenuePhotoError(res, error) {
 
 async function loadVenuePhotos(placeId) {
   recordCostEvent('photo_metadata_provider_call');
-  const response = await fetch(GOOGLE_DETAILS_URL + '/' + encodeURIComponent(placeId), {
+  const response = await fetchPhoto(GOOGLE_DETAILS_URL + '/' + encodeURIComponent(placeId), {
     headers: {
       'X-Goog-Api-Key': apiKey(),
       'X-Goog-FieldMask': GOOGLE_PHOTO_FIELD_MASK,
@@ -173,14 +174,14 @@ export async function getVenuePhotoImage(placeId, photoIndex) {
   let photo = (await getVenuePhotos(placeId))[photoIndex];
   if (!photo) throw requestError('This venue does not have that Google photo.', 404);
 
-  let response = await fetch(
+  let response = await fetchPhoto(
     'https://places.googleapis.com/v1/' + encodeURI(photo.name) + '/media?maxHeightPx=900',
     { headers: { 'X-Goog-Api-Key': apiKey() } },
   );
   if (response.status === 400 || response.status === 404) {
     photo = (await getVenuePhotos(placeId, { refresh: true, invalidReference: true }))[photoIndex];
     if (!photo) throw requestError('This venue does not have that Google photo.', 404);
-    response = await fetch(
+    response = await fetchPhoto(
       'https://places.googleapis.com/v1/' + encodeURI(photo.name) + '/media?maxHeightPx=900',
       { headers: { 'X-Goog-Api-Key': apiKey() } },
     );

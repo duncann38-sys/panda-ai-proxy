@@ -7,7 +7,7 @@ const module = await readFile(new URL('../api/_venue-photos.js', import.meta.url
 const source = module.slice(module.indexOf('export async function getVenuePhotoImage'))
   .replace(/^export /, '');
 const makeImageLoader = (metadata, provider) => new Function(
-  'getVenuePhotos', 'fetch', 'apiKey', 'requestError', 'providerQuotaInfo',
+  'getVenuePhotos', 'fetchPhoto', 'apiKey', 'requestError', 'providerQuotaInfo',
   `${source}\nreturn getVenuePhotoImage;`,
 )(metadata, provider, () => 'unit-only', (message, status) => Object.assign(new Error(message), { status }),
   providerQuotaInfo);
