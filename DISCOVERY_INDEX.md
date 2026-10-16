@@ -19,8 +19,10 @@ content cache code below is a dormant prototype, not the active deployment path.
   fallback. Google details cannot be invented if the provider or quota is down.
 - Limited profile responses retain independently owned partner information and
   active tier, with unknown opening hours explicitly null.
-- Initial searches can page up to three times: **126–378 calls per round**,
-  not a guaranteed full-London census or a verified “less than 1%” bill.
+- The initial index samples one page for each of **126 area/category queries**.
+  It is not a guaranteed full-London census or a verified “less than 1%” bill.
+  Live discovery is not restricted to these sampled venue IDs. Optional deeper
+  indexing can page up to three times when separately configured.
 - The shared 500/day guard covers this index and cover searches, not all existing
   photo/profile/routes costs. It is not a guarantee that all Maps spending stays
   within the credit and is not a per-customer or registration limit.
@@ -33,6 +35,9 @@ content cache code below is a dormant prototype, not the active deployment path.
 - Background seeding stops at half the default shared daily budget, leaving
   headroom for customers. An unfinished seed resumes rather than consuming the
   whole interactive search allowance.
+- Background provider requests are paced three seconds apart. Google minute
+  quotas trigger bounded waits and checkpointed resumes in the same run;
+  daily, unknown and customer-reserve pauses stop safely until a later run.
 
 Release: apply the scoped backend sources, constants, workflow, runner and
 vercel.json together; enable `expiresAt` TTL only on the new empty coordinate

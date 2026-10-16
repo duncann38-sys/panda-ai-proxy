@@ -8,6 +8,24 @@ export const JOB_COLLECTION = 'panda_london_seed_jobs_v1';
 export const LOCATION_TTL_MS = 29 * 24 * 60 * 60 * 1000;
 export const INDEX_FIELDS = 'places.id,places.location,nextPageToken';
 
+export function providerQuotaInfo(error, retryAfter) {
+  const metadata = (error?.details || []).map(detail => detail?.metadata || {})
+    .find(item => item.quota_limit || item.quota_unit || item.quota_metric) || {};
+  const safe = value => typeof value === 'string' && /^[\w./{}: -]{1,160}$/.test(value) ? value : null;
+  const unit = safe(metadata.quota_unit);
+  const limit = safe(metadata.quota_limit);
+  const description = `${unit || ''} ${limit || ''}`.toLowerCase();
+  const period = /minute|\/min(?:\/|$)|permin/.test(description) ? 'minute'
+    : /day|\/d(?:\/|$)/.test(description) ? 'day' : 'unknown';
+  const retrySeconds = Number(retryAfter);
+  return {
+    period, metric: safe(metadata.quota_metric), limit, unit,
+    limitValue: safe(metadata.quota_limit_value),
+    retryAfterSeconds: period === 'minute'
+      ? Math.max(65, Math.min(180, Number.isFinite(retrySeconds) ? retrySeconds : 65)) : null,
+  };
+}
+
 export async function indexedVenueBaseline(store, placeId, now = Date.now()) {
   const [identity, position, partner] = await Promise.all([
     store.collection(ID_COLLECTION).doc(placeId).get(),
@@ -91,8 +109,10 @@ export function londonClock(now) {
 
 export function createLondonSeeder({
   store, apiKey, consumeBudget, fetchImpl = fetch, now = Date.now,
-  arrayUnion, tasks = LONDON_SEED_TASKS,
+  arrayUnion, tasks = LONDON_SEED_TASKS, pagesPerQuery = 1,
+  paceMs = 3000, wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
 }) {
+  const pageLimit = Math.max(1, Math.min(3, Math.floor(pagesPerQuery) || 1));
   return async ({ manual = false, maxRequests = 4 } = {}) => {
     if (!store || !apiKey) return { status: 'not_configured' };
     const clock = londonClock(new Date(now()));
@@ -109,12 +129,19 @@ export function createLondonSeeder({
       const state = {
         taskIndex: 0, page: 0, pageToken: '', indexed: 0, requests: 0,
         ...previous, owner, leaseUntil: now() + 90000, status: 'running', week: clock.week,
+        pauseReason: null, quota: null,
       };
       transaction.set(ref, state, { merge: true });
       return state;
     });
     if (lease.skip) return { ...lease, status: lease.skip, owner: undefined };
     const state = { ...lease };
+    // A previous deeper run may already have sampled this query's first page.
+    if (state.page >= pageLimit) {
+      state.taskIndex++;
+      state.page = 0;
+      state.pageToken = '';
+    }
     let requests = 0;
     let failure = null;
     try {
@@ -123,13 +150,19 @@ export function createLondonSeeder({
         const reserve = Math.max(0, Math.min(dailyLimit,
           Number.parseInt(process.env.PANDA_SEED_CUSTOMER_RESERVE || String(Math.floor(dailyLimit / 2)), 10) || 0));
         // Background indexing must not consume all interactive discovery headroom.
-        if (dailyLimit <= reserve) { failure = 'quota_paused'; break; }
+        if (dailyLimit <= reserve) {
+          failure = 'quota_paused'; state.pauseReason = 'customer_reserve'; break;
+        }
         const allowance = await consumeBudget(store, 'places', dailyLimit - reserve);
         if (!allowance.allowed || allowance.shared !== true) {
           failure = !allowance.allowed ? 'quota_paused' : 'budget_unavailable';
+          state.pauseReason = !allowance.allowed ? 'customer_reserve' : 'budget_store_unavailable';
           break;
         }
         const task = tasks[state.taskIndex];
+        const delay = Math.max(0, Number(state.lastProviderRequestAt || 0) + paceMs - now());
+        if (delay) await wait(delay);
+        state.lastProviderRequestAt = now();
         requests++;
         state.requests++;
         const response = await fetchImpl('https://places.googleapis.com/v1/places:searchText', {
@@ -146,6 +179,10 @@ export function createLondonSeeder({
         if (!response.ok || data.error) {
           failure = response.status === 429 || data.error?.status === 'RESOURCE_EXHAUSTED'
             ? 'quota_paused' : 'provider_unavailable';
+          if (failure === 'quota_paused') {
+            state.pauseReason = 'google_quota';
+            state.quota = providerQuotaInfo(data.error, response.headers?.get?.('retry-after'));
+          }
           break;
         }
         if (data.places != null && !Array.isArray(data.places)) {
@@ -154,8 +191,9 @@ export function createLondonSeeder({
         state.indexed += await indexPlaceIdentities(store, data.places || [], {
           now: now(), context: `${task.name}/${task.category}`, arrayUnion,
         });
-        // Three pages maximum. A sampled search is not an exhaustive census.
-        if (data.nextPageToken && state.page < 2) {
+        // Sample one page by default, keeping budget for live discovery.
+        // Optional deeper indexing never exceeds three pages per query.
+        if (data.nextPageToken && state.page + 1 < pageLimit) {
           state.pageToken = data.nextPageToken;
           state.page++;
         } else {
@@ -186,6 +224,7 @@ export function createLondonSeeder({
       status: state.status, week: clock.week, taskIndex: state.taskIndex,
       totalTasks: tasks.length, indexed: state.indexed, requests: state.requests,
       requestsThisChunk: requests, coverage: 'sampled_not_exhaustive',
+      pauseReason: state.pauseReason, quota: state.quota,
     };
   };
 }

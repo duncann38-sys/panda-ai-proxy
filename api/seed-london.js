@@ -9,7 +9,7 @@ export default async function handler(req, res) {
     return res.status(200).json({
       service: 'panda-london-index', version: 1,
       schedule: 'Sunday 03:00 Europe/London; daily resume if incomplete',
-      tasks: 126, maxPagesPerTask: 3, maxRequestsPerChunk: 4,
+      tasks: 126, pagesPerTask: 1, maxRequestsPerChunk: 4,
       fields: 'place IDs and expiring coordinates only',
       paidRecords: 'never overwritten',
     });

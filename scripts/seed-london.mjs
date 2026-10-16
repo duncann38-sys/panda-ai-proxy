@@ -16,6 +16,8 @@ async function token() {
 }
 let bearer;
 let issued = 0;
+const startedAt = Date.now();
+let rateRetries = 0;
 for (let chunk = 0; chunk < 150; chunk++) {
   if (!bearer || Date.now() - issued > 180000) {
     bearer = await token(); issued = Date.now();
@@ -47,6 +49,14 @@ for (let chunk = 0; chunk < 150; chunk++) {
   console.log(JSON.stringify(result));
   if (['complete', 'outside_schedule_window', 'nothing_to_resume'].includes(result.status)) process.exit(0);
   if (result.status === 'quota_paused') {
+    if (result.pauseReason === 'google_quota' && result.quota?.period === 'minute'
+      && rateRetries < 12 && Date.now() - startedAt < 16 * 60 * 1000) {
+      rateRetries++;
+      const seconds = result.quota.retryAfterSeconds || 65;
+      console.log(`::notice::Google minute quota reached. Waiting ${seconds}s before resuming saved progress.`);
+      await new Promise(resolve => setTimeout(resolve, seconds * 1000));
+      continue;
+    }
     console.log('::notice::London indexing paused safely at a request allowance or Google quota. Completed pages are saved; the next scheduled attempt can resume.');
     process.exit(0);
   }

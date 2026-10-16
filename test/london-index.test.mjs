@@ -4,7 +4,7 @@ import { generateKeyPairSync, sign } from 'node:crypto';
 import { testStore } from './index-store-fixture.mjs';
 import {
   ID_COLLECTION, LOCATION_COLLECTION, JOB_COLLECTION, LOCATION_TTL_MS, INDEX_FIELDS,
-  createLondonSeeder, indexPlaceIdentities, nearbyPlaceIdentities, londonClock, indexedVenueBaseline,
+  createLondonSeeder, indexPlaceIdentities, nearbyPlaceIdentities, londonClock, indexedVenueBaseline, providerQuotaInfo,
 } from '../api/_london-index.js';
 import { LONDON_CLUSTERS, PANDA_CATEGORIES, LONDON_SEED_TASKS } from '../constants/london_clusters.js';
 import { verifySeedJob, SEED_AUDIENCE, SEED_SUBJECT } from '../api/_seed-job-auth.js';
@@ -19,7 +19,7 @@ function seedFixture(extra = {}) {
   let calls = 0;
   const seed = createLondonSeeder({
     store, apiKey: 'test-only', now: () => now, tasks: [task],
-    consumeBudget: allowance,
+    consumeBudget: allowance, paceMs: 0,
     fetchImpl: async (_url, init) => {
       calls++;
       assert.equal(init.headers['X-Goog-FieldMask'], INDEX_FIELDS);
@@ -112,7 +112,7 @@ test('HTTP 200 quota error preserves task cursor and releases lease', async () =
 });
 test('pagination is bounded to three pages and continues across chunks', async () => {
   let calls = 0;
-  const s = seedFixture({ fetchImpl: async () => ({
+  const s = seedFixture({ pagesPerQuery: 3, fetchImpl: async () => ({
     ok: true, status: 200, json: async () => ({
       places: [point], nextPageToken: `page-${++calls}`,
     }),
@@ -121,6 +121,38 @@ test('pagination is bounded to three pages and continues across chunks', async (
   assert.equal((await s.seed({ maxRequests: 1 })).status, 'running');
   assert.equal((await s.seed({ maxRequests: 1 })).status, 'complete');
   assert.equal(calls, 3);
+});
+test('default indexing samples one page rather than spending three requests per query', async () => {
+  const s = seedFixture({ fetchImpl: async () => ({
+    ok: true, json: async () => ({ places: [point], nextPageToken: 'more' }),
+  }) });
+  const result = await s.seed();
+  assert.equal(result.status, 'complete');
+  assert.equal(result.requests, 1);
+});
+test('background requests are paced across provider pages', async () => {
+  const delays = [];
+  const s = seedFixture({ pagesPerQuery: 3, paceMs: 3000, wait: async ms => { delays.push(ms); },
+    fetchImpl: async () => ({ ok: true, json: async () => ({ places: [point], nextPageToken: 'more' }) }) });
+  await s.seed();
+  assert.deepEqual(delays, [3000, 3000]);
+});
+test('resuming a previous deeper cursor does not repeat a sampled first page', async () => {
+  const s = seedFixture();
+  s.store.table(JOB_COLLECTION).set('2026-10-18', { taskIndex: 0, page: 1, pageToken: 'next', requests: 1 });
+  assert.equal((await s.seed()).status, 'complete');
+  assert.equal(s.calls(), 0);
+});
+test('quota diagnostics distinguish Google minute/day limits without retaining consumer details', () => {
+  const info = providerQuotaInfo({ details: [{ metadata: {
+    quota_unit: '1/min/{project}', quota_limit: 'SearchTextRequestsPerMinutePerProject',
+    quota_limit_value: '33', consumer: 'do-not-retain',
+  } }] }, '1');
+  assert.equal(info.period, 'minute');
+  assert.equal(info.retryAfterSeconds, 65);
+  assert.equal(info.consumer, undefined);
+  assert.equal(providerQuotaInfo({ details: [{ metadata: { quota_unit: '1/d/{project}' } }] }).period, 'day');
+  assert.equal(providerQuotaInfo({}).period, 'unknown');
 });
 test('another live lease prevents duplicate seed work', async () => {
   const s = seedFixture();
