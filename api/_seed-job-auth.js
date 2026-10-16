@@ -3,6 +3,11 @@ import { createPublicKey, verify } from 'node:crypto';
 export const SEED_AUDIENCE = 'panda-london-seed';
 const ISSUER = 'https://token.actions.githubusercontent.com';
 const REPOSITORY = 'duncann38-sys/panda-ai-proxy';
+const REPOSITORY_ID = '1332508666';
+const OWNER_ID = '266837386';
+// Pinned to this repository's GitHub OIDC customization settings:
+// use_immutable_subject=true. Stable IDs prevent name-reuse impersonation.
+export const SEED_SUBJECT = `repo:duncann38-sys@${OWNER_ID}/panda-ai-proxy@${REPOSITORY_ID}:ref:refs/heads/main`;
 const WORKFLOW = `${REPOSITORY}/.github/workflows/seed-london.yml@refs/heads/main`;
 let cachedKeys;
 let cachedUntil = 0;
@@ -19,7 +24,8 @@ export async function verifySeedJob(token, { fetchImpl = fetch, now = Date.now }
     if (header.alg !== 'RS256' || typeof header.kid !== 'string' || header.kid.length > 200
       || header.crit || claims.iss !== ISSUER || claims.aud !== SEED_AUDIENCE
       || claims.repository !== REPOSITORY || claims.ref !== 'refs/heads/main'
-      || claims.sub !== `repo:${REPOSITORY}:ref:refs/heads/main`
+      || claims.repository_id !== REPOSITORY_ID || claims.repository_owner_id !== OWNER_ID
+      || claims.sub !== SEED_SUBJECT
       || claims.workflow_ref !== WORKFLOW
       || !['schedule', 'workflow_dispatch'].includes(claims.event_name)
       || !Number.isFinite(claims.exp) || claims.exp <= seconds || claims.exp > seconds + 900

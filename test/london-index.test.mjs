@@ -7,7 +7,7 @@ import {
   createLondonSeeder, indexPlaceIdentities, nearbyPlaceIdentities, londonClock, indexedVenueBaseline,
 } from '../api/_london-index.js';
 import { LONDON_CLUSTERS, PANDA_CATEGORIES, LONDON_SEED_TASKS } from '../constants/london_clusters.js';
-import { verifySeedJob, SEED_AUDIENCE } from '../api/_seed-job-auth.js';
+import { verifySeedJob, SEED_AUDIENCE, SEED_SUBJECT } from '../api/_seed-job-auth.js';
 import { createDiscoveryService } from '../api/_discovery-lite.js';
 
 const now = Date.parse('2026-10-18T02:00:00Z'); // Sunday 03:00 London BST
@@ -192,7 +192,7 @@ const jwk = { ...pair.publicKey.export({ format: 'jwk' }), kid: 'unit-key', alg:
 const claims = {
   iss: 'https://token.actions.githubusercontent.com', aud: SEED_AUDIENCE,
   repository: 'duncann38-sys/panda-ai-proxy', ref: 'refs/heads/main',
-  sub: 'repo:duncann38-sys/panda-ai-proxy:ref:refs/heads/main',
+  sub: SEED_SUBJECT, repository_id: '1332508666', repository_owner_id: '266837386',
   workflow_ref: 'duncann38-sys/panda-ai-proxy/.github/workflows/seed-london.yml@refs/heads/main',
   event_name: 'workflow_dispatch', exp: Math.floor(now / 1000) + 300, iat: Math.floor(now / 1000),
 };
@@ -210,7 +210,9 @@ test('authorized main-branch workflow signature is accepted', async () => {
 });
 test('different repositories, branches, workflows and audiences cannot seed', async () => {
   for (const change of [{ repository: 'attacker/repo' }, { ref: 'refs/heads/dev' },
-    { workflow_ref: 'another-file' }, { aud: 'other' }, { event_name: 'pull_request' }]) {
+    { workflow_ref: 'another-file' }, { aud: 'other' }, { event_name: 'pull_request' },
+    { repository_id: 'another-repository' }, { repository_owner_id: 'another-owner' },
+    { sub: 'repo:duncann38-sys/panda-ai-proxy:ref:refs/heads/main' }]) {
     assert.equal(await verifySeedJob(jwt(change), authOptions), null);
   }
 });

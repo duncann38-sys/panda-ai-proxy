@@ -1,6 +1,6 @@
 // GitHub supplies its short-lived OIDC credentials; no copied API key is used.
-import { verifySeedJob } from '../api/_seed-job-auth.js';
-const audience = 'panda-london-seed';
+import { verifySeedJob, SEED_SUBJECT, SEED_AUDIENCE } from '../api/_seed-job-auth.js';
+const audience = SEED_AUDIENCE;
 const backend = process.argv[2];
 if (!backend || new URL(backend).protocol !== 'https:') throw new Error('Explicit HTTPS backend URL required.');
 async function token() {
@@ -28,7 +28,9 @@ for (let chunk = 0; chunk < 150; chunk++) {
       audienceMatches: claims.aud === audience,
       repositoryMatches: claims.repository === 'duncann38-sys/panda-ai-proxy',
       branchMatches: claims.ref === 'refs/heads/main',
-      subjectMatches: claims.sub === 'repo:duncann38-sys/panda-ai-proxy:ref:refs/heads/main',
+      subjectMatches: claims.sub === SEED_SUBJECT,
+      repositoryIdMatches: claims.repository_id === '1332508666',
+      ownerIdMatches: claims.repository_owner_id === '266837386',
       workflowMatches: claims.workflow_ref === 'duncann38-sys/panda-ai-proxy/.github/workflows/seed-london.yml@refs/heads/main',
       eventAllowed: ['schedule', 'workflow_dispatch'].includes(claims.event_name),
       lifetimeSeconds: claims.exp - claims.iat,
