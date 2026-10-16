@@ -292,3 +292,11 @@ test('a failed primary provider retries a GET mirror before reporting an outage'
   assert.equal(seen[1].method, 'GET');
   assert.match(seen[1].url, /^https:\/\/overpass\.kumi\.systems\/api\/interpreter\?data=/);
 });
+test('directory queries request node coordinates as well as way and relation centres', async () => {
+  const loader = createVenueDirectoryLoader({ fetchImpl: async (_url, options) => {
+    assert.match(options.body.get('data'), /out body center 601;/);
+    return response([listing()]);
+  } });
+  const result = await loader.load(fakeStore(), 51.5, -0.14);
+  assert.equal(result.directoryVenues.length, 1);
+});

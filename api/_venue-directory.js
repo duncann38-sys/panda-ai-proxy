@@ -215,7 +215,7 @@ async function fetchAreaFromOverpass(area, fetchImpl, timeoutMs, radius = SEARCH
     `nwr["shop"~"^(alcohol|bakery|books|cheese|chocolate|coffee|convenience|deli|department_store|florist|gift|greengrocer|supermarket|tea|wine)$"](around:${radius},${area.latitude},${area.longitude});`,
     `nwr["tourism"~"^(aquarium|artwork|attraction|gallery|museum|viewpoint|zoo)$"](around:${radius},${area.latitude},${area.longitude});`,
     ');',
-    `out center tags ${VENUE_DIRECTORY_MAX_RECORDS + 1};`,
+    `out body center ${VENUE_DIRECTORY_MAX_RECORDS + 1};`,
   ].join('');
   const startedAt = Date.now();
   recordDirectoryEvent('venue_directory_provider_call', { areaKey: area.key, source: 'openstreetmap' });
