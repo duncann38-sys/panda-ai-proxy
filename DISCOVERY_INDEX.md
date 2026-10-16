@@ -8,6 +8,12 @@ photos or opening status. Directory refreshes try bounded alternative providers
 before entering their shared failure cooldown.
 This independent directory uses a shared 24-hour cache. This does not enable
 new durable caching of Google venue names, photos, ratings or opening hours.
+On a provider failure, cover discovery first checks saved neighbouring directory
+cells and applies an exact four-kilometre distance bound. A missing cell must not
+hide genuinely nearby saved venues or require a successful public-provider refresh.
+Compound alternatives such as bars and pubs are matched as alternatives. Returned
+backup records carry their saved timestamps, and unmatched secondary lists are not
+sent redundantly to phones.
 
 The scheduled round starts Sunday at 03:00 London time. Incomplete work gets
 daily attempts at 03:00 and 09:00 London time. An unfinished previous week

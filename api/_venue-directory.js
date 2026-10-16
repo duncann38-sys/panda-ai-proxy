@@ -315,6 +315,71 @@ function publicResult(entry, area, latitude, longitude) {
   };
 }
 
+// Reading a saved neighbouring cell must not require a new public-provider call.
+// Never substitute remote venues: apply the actual user's distance afterwards.
+export function createNearbySavedDirectoryReader({ now = Date.now } = {}) {
+  const memory = new Map();
+  const pending = new Map();
+  return async function readNearbySavedDirectory(store, latitude, longitude, radius = 4000) {
+    const area = venueDirectoryArea(latitude, longitude);
+    if (!area || !store?.collection) return null;
+    const distanceLimit = Math.max(1, Math.min(4000, Number(radius) || 4000));
+    const key = area.key;
+    let rows = memory.get(key);
+    if (!rows || now() - rows.readAt >= 60_000) {
+      if (!pending.has(key)) {
+        const read = (async () => {
+          const keys = new Set();
+          for (let y = -2; y <= 2; y += 1) {
+            const lat = area.latitude + y * CELL_LAT_DEGREES;
+            if (lat < -90 || lat > 90) continue;
+            const width = CELL_LAT_DEGREES / Math.max(0.25, Math.cos(lat * Math.PI / 180));
+            for (let x = -2; x <= 2; x += 1) {
+              const lng = ((longitude + x * width + 180) % 360 + 360) % 360 - 180;
+              const neighbour = venueDirectoryArea(lat, lng);
+              if (neighbour) keys.add(neighbour.key);
+            }
+          }
+          const refs = [...keys].map(id => store.collection(VENUE_DIRECTORY_COLLECTION).doc(id));
+          const snapshots = typeof store.getAll === 'function'
+            ? await store.getAll(...refs) : await Promise.all(refs.map(ref => ref.get()));
+          const entries = snapshots.flatMap(snapshot => {
+            const entry = snapshot.exists
+              ? validStoredDirectory(snapshot.data(), now(), { allowStale: true }) : null;
+            return entry ? [entry] : [];
+          });
+          const result = { readAt: now(), entries };
+          memory.set(key, result);
+          while (memory.size > 16) memory.delete(memory.keys().next().value);
+          return result;
+        })().finally(() => pending.delete(key));
+        pending.set(key, read);
+      }
+      try { rows = await pending.get(key); } catch { return null; }
+    }
+    const candidates = new Map();
+    for (const entry of rows.entries) {
+      // Recheck retention on memory hits as well as database reads.
+      if (!validStoredDirectory(entry, now(), { allowStale: true })) continue;
+      for (const venue of entry.venues) {
+        if (!String(venue?.id).startsWith('osm:') || !venue.name
+          || !validCoordinates(venue.lat, venue.lng)
+          || distanceMeters(latitude, longitude, venue) > distanceLimit) continue;
+        const previous = candidates.get(venue.id);
+        if (!previous || previous.cachedAt < entry.updatedAt)
+          candidates.set(venue.id, { ...venue, cachedAt: entry.updatedAt });
+      }
+    }
+    if (!candidates.size) return null;
+    const venues = [...candidates.values()];
+    const updatedAt = Math.min(...venues.map(venue => venue.cachedAt));
+    return publicResult({ venues, updatedAt, stale: now() - updatedAt >= VENUE_DIRECTORY_TTL_MS,
+      truncated: true }, area, latitude, longitude);
+  };
+}
+
+export const readNearbySavedVenueDirectory = createNearbySavedDirectoryReader();
+
 function defaultSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

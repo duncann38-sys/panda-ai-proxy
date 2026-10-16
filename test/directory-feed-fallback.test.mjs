@@ -24,7 +24,18 @@ test('the feed receives clearly sourced directory previews during Google quota d
   assert.equal(result.venues[0].detailsDeferred, true);
   assert.equal(result.venues[0].photoCount, 0);
   assert.equal(result.venues[0].openNow, undefined);
-  assert.equal(result.directoryVenues.length, 2);
+  assert.equal(result.directoryVenues.length, 1);
+});
+test('a combined bars-and-pubs query accepts a pub rather than requiring both words', async () => {
+  const result = await service()({ query: 'bars and pubs', location });
+  assert.equal(result.venues.length, 1);
+  assert.equal(result.venues[0].type, 'Pub');
+  assert.equal(result.directoryVenues.length, 1);
+});
+test('an unfinished conjunction does not turn a pub search into every venue', async () => {
+  const result = await service()({ query: 'pubs and', location });
+  assert.equal(result.venues.length, 1);
+  assert.equal(result.venues[0].type, 'Pub');
 });
 test('batch fallback does not infer venue categories from unrelated requested searches', async () => {
   const result = await service()({ queries: ['restaurants', 'pubs'], location });

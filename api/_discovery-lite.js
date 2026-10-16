@@ -96,23 +96,27 @@ export function createDiscoveryService({
       let baseline = {};
       try { baseline = loadFallback ? await loadFallback(request) : {}; }
       catch { warn('Independent local fallback unavailable.'); }
-      const terms = request.query.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/)
-        .filter(word => word && !['near', 'nearby', 'me', 'in', 'london', 'venues', 'places', 'and', 'all',
-          'find', 'show', 'please', 'best', 'the', 'a', 'an', 'around'].includes(word))
-        .map(word => word.replace(/s$/, ''));
+      const alternatives = request.query.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+        .split(/\band\b|\bor\b/).map(group => group.replace(/[^a-z0-9 ]/g, ' ').split(/\s+/)
+          .filter(word => word && !['near', 'nearby', 'me', 'in', 'london', 'venues', 'places', 'all',
+            'find', 'show', 'please', 'best', 'the', 'a', 'an', 'around'].includes(word))
+          .map(word => word.endsWith('ies') ? `${word.slice(0, -3)}y` : word.replace(/s$/, '')))
+        .filter(terms => terms.length);
       const directory = (Array.isArray(baseline.directoryVenues) ? baseline.directoryVenues : [])
         .filter(venue => String(venue.id).startsWith('osm:') && typeof venue.name === 'string'
           && Number.isFinite(venue.lat) && Number.isFinite(venue.lng))
         .map(venue => ({ ...venue, source: 'openstreetmap', detailsDeferred: true,
           sourceQueries: ['OpenStreetMap directory'], photoCount: 0, photoName: undefined,
-          photoNames: undefined, rating: undefined, ratingCount: undefined, price: undefined, openNow: undefined }));
+          photoNames: undefined, rating: undefined, ratingCount: undefined, price: undefined, openNow: undefined,
+          cachedAt: venue.cachedAt || baseline.directory?.updatedAt || undefined }));
       const previews = directory.filter(venue => {
         const text = `${venue.name} ${venue.type} ${venue.primaryType || ''} ${(venue.types || []).join(' ')} ${(venue.categories || []).join(' ')} ${venue.address || ''}`
           .toLowerCase().replaceAll('_', ' ');
-        return terms.every(term => text.includes(term));
+        return !alternatives.length || alternatives.some(terms => terms.every(term =>
+          text.includes(term) || text.replace(/\s/g, '').includes(term)));
       });
       return {
-        ...baseline, directoryVenues: directory, venues: previews, nextPageToken: null, cached: true,
+        ...baseline, directoryVenues: previews, venues: previews, nextPageToken: null, cached: true,
         quotaExceeded: reason === 'quota', dataMode: previews.length ? 'directory' : 'unavailable',
         fallbackReason: reason,
       };

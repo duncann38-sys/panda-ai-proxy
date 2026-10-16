@@ -9,7 +9,7 @@ import { GoogleAuth } from 'google-auth-library';
 import admin from 'firebase-admin';
 import { applyGuard } from './_guard.js';
 import { quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues } from './_panda-chat-policy.js';
-import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-directory.js';
+import { loadSharedVenueDirectory, readNearbySavedVenueDirectory, VenueDirectoryError } from './_venue-directory.js';
 import { createDiscoveryService } from './_discovery-lite.js';
 import { indexPlaceIdentities, nearbyPlaceIdentities } from './_london-index.js';
 import {
@@ -665,7 +665,9 @@ export default async function handler(req,res){
             arrayUnion:admin.firestore.FieldValue.arrayUnion,
           }),
           readIndex:request=>nearbyPlaceIdentities(db(),request),
-          loadFallback:request=>loadSharedVenueDirectory(db(),request.lat,request.lng),
+          loadFallback:async request=>
+            await readNearbySavedVenueDirectory(db(),request.lat,request.lng,request.radius)
+            || await loadSharedVenueDirectory(db(),request.lat,request.lng),
         });
         try{
           res.setHeader('Cache-Control','private, no-store');
