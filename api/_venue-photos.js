@@ -1,6 +1,7 @@
 import { applyGuard } from './_guard.js';
 import admin from 'firebase-admin';
 import { boundedCacheExpiry, recordCostEvent } from './_cost-controls.js';
+import { providerQuotaInfo } from './_london-index.js';
 
 const GOOGLE_DETAILS_URL = 'https://places.googleapis.com/v1/places';
 const GOOGLE_PHOTO_FIELD_MASK = 'photos.name,photos.authorAttributions';
@@ -54,7 +55,11 @@ export function isValidPlaceId(value) {
 
 export function sendVenuePhotoError(res, error) {
   const status = Number.isInteger(error?.status) ? error.status : 502;
-  res.status(status).json({ error: error?.message || 'Google venue photos are unavailable right now.' });
+  res.status(status).json({
+    error: error?.message || 'Google venue photos are unavailable right now.',
+    ...(error?.provider ? { provider: error.provider } : {}),
+    ...(error?.quota ? { quota: error.quota } : {}),
+  });
 }
 
 async function loadVenuePhotos(placeId) {
@@ -181,10 +186,16 @@ export async function getVenuePhotoImage(placeId, photoIndex) {
     );
   }
   if (!response.ok) {
-    throw requestError(
+    const failure = requestError(
       'This Google venue photo is unavailable right now.',
       response.status === 429 ? 429 : 502,
     );
+    if (response.url) failure.provider = new URL(response.url).hostname;
+    if (response.status === 429) {
+      const payload = await response.json().catch(() => ({}));
+      failure.quota = providerQuotaInfo(payload.error || {}, response.headers.get('retry-after'));
+    }
+    throw failure;
   }
 
   return {

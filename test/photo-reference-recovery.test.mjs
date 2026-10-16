@@ -1,14 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
+import { providerQuotaInfo } from '../api/_london-index.js';
 
 const module = await readFile(new URL('../api/_venue-photos.js', import.meta.url), 'utf8');
 const source = module.slice(module.indexOf('export async function getVenuePhotoImage'))
   .replace(/^export /, '');
 const makeImageLoader = (metadata, provider) => new Function(
-  'getVenuePhotos', 'fetch', 'apiKey', 'requestError',
+  'getVenuePhotos', 'fetch', 'apiKey', 'requestError', 'providerQuotaInfo',
   `${source}\nreturn getVenuePhotoImage;`,
-)(metadata, provider, () => 'unit-only', (message, status) => Object.assign(new Error(message), { status }));
+)(metadata, provider, () => 'unit-only', (message, status) => Object.assign(new Error(message), { status }),
+  providerQuotaInfo);
 const picture = () => new Response(new Uint8Array([255, 216, 255, 217]),
   { status: 200, headers: { 'Content-Type': 'image/jpeg' } });
 
