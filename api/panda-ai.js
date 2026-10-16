@@ -10,6 +10,8 @@ import admin from 'firebase-admin';
 import { applyGuard } from './_guard.js';
 import { quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues } from './_panda-chat-policy.js';
 import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-directory.js';
+import { createDiscoveryService } from './_discovery-lite.js';
+import { indexPlaceIdentities, nearbyPlaceIdentities } from './_london-index.js';
 import {
   boundedInteger,
   cacheablePlacesResult,
@@ -30,6 +32,7 @@ const MODELS = [...new Set([
 ].filter(Boolean))];
 const LOCATION = process.env.PANDA_LOCATION || 'us-central1';
 const MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY;
+let coverDiscovery;
 const DEFAULT_LAT = 51.5074, DEFAULT_LNG = -0.1278;
 const PRICE = {PRICE_LEVEL_INEXPENSIVE:'\u00a3',PRICE_LEVEL_MODERATE:'\u00a3\u00a3',PRICE_LEVEL_EXPENSIVE:'\u00a3\u00a3\u00a3',PRICE_LEVEL_VERY_EXPENSIVE:'\u00a3\u00a3\u00a3\u00a3'};
 const CACHE_TTL_MS   = 30 * 60 * 1000;
@@ -653,6 +656,25 @@ export default async function handler(req,res){
     const {contents,generationConfig,location}=body;
     const lat=location?.lat??DEFAULT_LAT, lng=location?.lng??DEFAULT_LNG;
     if(body.venuesOnly){
+      // Opt-in: old Android builds and AI/Planner retain their existing contract.
+      if(body.discoveryMode === 'cover' && body.directoryOnly!==true){
+        coverDiscovery ||= createDiscoveryService({
+          store:db(),apiKey:MAPS_KEY,consumeBudget:consumeDailyBudget,
+          persistFullContent:false,
+          indexIdentities:venues=>indexPlaceIdentities(db(),venues,{
+            arrayUnion:admin.firestore.FieldValue.arrayUnion,
+          }),
+          readIndex:request=>nearbyPlaceIdentities(db(),request),
+          loadFallback:request=>loadSharedVenueDirectory(db(),request.lat,request.lng),
+        });
+        try{
+          res.setHeader('Cache-Control','private, no-store');
+          res.status(200).json(await coverDiscovery(body));
+        }catch(error){
+          res.status(error?.status || 503).json({error:error?.status === 400 ? error.message : 'Discovery is temporarily unavailable.'});
+        }
+        return;
+      }
       if(body.directoryOnly===true){
         try{
           // Unlike chat, directory discovery must never silently use the London default.

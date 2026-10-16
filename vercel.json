@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/seed-london.js": {
+      "maxDuration": 60
+    }
+  }
+}
