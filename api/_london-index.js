@@ -116,8 +116,12 @@ export function createLondonSeeder({
   return async ({ manual = false, maxRequests = 4 } = {}) => {
     if (!store || !apiKey) return { status: 'not_configured' };
     const clock = londonClock(new Date(now()));
-    if (!manual && clock.hour !== 3) return { status: 'outside_schedule_window' };
-    const ref = store.collection(JOB_COLLECTION).doc(clock.week);
+    if (!manual && clock.hour !== 3 && clock.hour !== 9) return { status: 'outside_schedule_window' };
+    const previousWeek = new Date(Date.parse(`${clock.week}T00:00:00Z`) - 7 * 86400000)
+      .toISOString().slice(0, 10);
+    const previous = await store.collection(JOB_COLLECTION).doc(previousWeek).get();
+    const week = previous.exists && previous.data()?.status !== 'complete' ? previousWeek : clock.week;
+    const ref = store.collection(JOB_COLLECTION).doc(week);
     const owner = randomUUID();
     const lease = await store.runTransaction(async transaction => {
       const doc = await transaction.get(ref);
@@ -128,13 +132,13 @@ export function createLondonSeeder({
       if (Number(previous.leaseUntil || 0) > now()) return { skip: 'busy' };
       const state = {
         taskIndex: 0, page: 0, pageToken: '', indexed: 0, requests: 0,
-        ...previous, owner, leaseUntil: now() + 90000, status: 'running', week: clock.week,
+        ...previous, owner, leaseUntil: now() + 90000, status: 'running', week,
         pauseReason: null, quota: null,
       };
       transaction.set(ref, state, { merge: true });
       return state;
     });
-    if (lease.skip) return { ...lease, status: lease.skip, owner: undefined };
+    if (lease.skip) return { ...lease, status: lease.skip, owner: undefined, week: lease.week || week };
     const state = { ...lease };
     // A previous deeper run may already have sampled this query's first page.
     if (state.page >= pageLimit) {
@@ -221,7 +225,7 @@ export function createLondonSeeder({
       });
     }
     return {
-      status: state.status, week: clock.week, taskIndex: state.taskIndex,
+      status: state.status, week: state.week, taskIndex: state.taskIndex,
       totalTasks: tasks.length, indexed: state.indexed, requests: state.requests,
       requestsThisChunk: requests, coverage: 'sampled_not_exhaustive',
       pauseReason: state.pauseReason, quota: state.quota,

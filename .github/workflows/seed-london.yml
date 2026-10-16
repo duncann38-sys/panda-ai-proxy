@@ -3,7 +3,7 @@ on:
   schedule:
     # Both UTC slots handle London DST. The backend accepts only local 03:00.
     # Sunday starts the weekly round; other days resume only unfinished rounds.
-    - cron: '0 2,3 * * *'
+    - cron: '0 2,3,8,9 * * *'
   workflow_dispatch:
 permissions:
   contents: read

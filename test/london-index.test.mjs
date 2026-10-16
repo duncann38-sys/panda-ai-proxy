@@ -143,6 +143,16 @@ test('resuming a previous deeper cursor does not repeat a sampled first page', a
   assert.equal((await s.seed()).status, 'complete');
   assert.equal(s.calls(), 0);
 });
+test('a morning attempt resumes an unfinished previous week instead of restarting', async () => {
+  const s = seedFixture({ now: () => Date.parse('2026-10-18T08:00:00Z') });
+  s.store.table(JOB_COLLECTION).set('2026-10-11',
+    { taskIndex: 0, page: 0, indexed: 12, requests: 7, status: 'quota_paused' });
+  const result = await s.seed({ manual: false });
+  assert.equal(result.week, '2026-10-11');
+  assert.equal(result.status, 'complete');
+  assert.equal(result.requests, 8);
+  assert.equal(s.store.table(JOB_COLLECTION).has('2026-10-18'), false);
+});
 test('quota diagnostics distinguish Google minute/day limits without retaining consumer details', () => {
   const info = providerQuotaInfo({ details: [{ metadata: {
     quota_unit: '1/min/{project}', quota_limit: 'SearchTextRequestsPerMinutePerProject',

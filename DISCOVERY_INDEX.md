@@ -1,6 +1,11 @@
 # Panda: cover-only discovery, full details on tap
 
 ## Current London-index rollout
+The scheduled round starts Sunday at 03:00 London time. Incomplete work gets
+daily attempts at 03:00 and 09:00 London time. An unfinished previous week
+resumes before a new round starts. Daily Google quota exhaustion is never
+treated as a completed index or used to trigger an automatic quota increase.
+
 The production path keeps photo-led cards, uses the lighter Pro search mask and
 persists **only place IDs and expiring coordinates** from these new Google calls.
 Google venue names/photo references remain in the response, not this new shared

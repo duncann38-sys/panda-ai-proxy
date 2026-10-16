@@ -8,7 +8,7 @@ export default async function handler(req, res) {
   if (req.method === 'GET') {
     return res.status(200).json({
       service: 'panda-london-index', version: 1,
-      schedule: 'Sunday 03:00 Europe/London; daily resume if incomplete',
+      schedule: 'Sunday 03:00 Europe/London; daily resume at 03:00 and 09:00 if incomplete',
       tasks: 126, pagesPerTask: 1, maxRequestsPerChunk: 4,
       fields: 'place IDs and expiring coordinates only',
       paidRecords: 'never overwritten',
