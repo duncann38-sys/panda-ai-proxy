@@ -46,6 +46,10 @@ for (let chunk = 0; chunk < 150; chunk++) {
   const result = await response.json();
   console.log(JSON.stringify(result));
   if (['complete', 'outside_schedule_window', 'nothing_to_resume'].includes(result.status)) process.exit(0);
+  if (result.status === 'quota_paused') {
+    console.log('::notice::London indexing paused safely at a request allowance or Google quota. Completed pages are saved; the next scheduled attempt can resume.');
+    process.exit(0);
+  }
   if (!['running', 'busy'].includes(result.status)) {
     throw new Error(`Index paused: ${result.status}. Completed pages are saved; no emails or payments are triggered.`);
   }
