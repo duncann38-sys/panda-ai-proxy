@@ -1,0 +1,24 @@
+name: London venue identity index
+on:
+  schedule:
+    # Both UTC slots handle London DST. The backend accepts only local 03:00.
+    # Sunday starts the weekly round; other days resume only unfinished rounds.
+    - cron: '0 2,3 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: london-venue-identity-index
+  cancel-in-progress: false
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Seed or resume the external Panda index
+        run: node scripts/seed-london.mjs https://panda-ai-proxy.vercel.app
