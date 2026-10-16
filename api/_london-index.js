@@ -6,7 +6,7 @@ export const LOCATION_COLLECTION = 'panda_london_place_locations_v1';
 export const JOB_COLLECTION = 'panda_london_seed_jobs_v1';
 // Expire before the 30-day coordinate allowance; physical TTL cleanup is async.
 export const LOCATION_TTL_MS = 29 * 24 * 60 * 60 * 1000;
-export const INDEX_FIELDS = 'places.id,places.location,nextPageToken';
+export const INDEX_FIELDS = 'places.id,places.location,places.photos.name,nextPageToken';
 
 export function providerQuotaInfo(error, retryAfter) {
   const metadata = (error?.details || []).map(detail => detail?.metadata || {})
@@ -69,13 +69,17 @@ export async function nearbyPlaceIdentities(store, { lat, lng, radius }, now = D
 export async function indexPlaceIdentities(store, places, {
   now = Date.now(), context = 'live_discovery',
   arrayUnion = (...items) => items,
+  requirePhoto = false,
+  seedPlan = '',
 } = {}) {
   const valid = (Array.isArray(places) ? places : []).filter(place => {
     const lat = place.location?.latitude ?? place.lat;
     const lng = place.location?.longitude ?? place.lng;
     return typeof place.id === 'string' && /^[\w-]{1,256}$/.test(place.id)
       && Number.isFinite(lat) && Math.abs(lat) <= 90
-      && Number.isFinite(lng) && Math.abs(lng) <= 180;
+      && Number.isFinite(lng) && Math.abs(lng) <= 180
+      && (!requirePhoto || place.photos?.some(photo =>
+        typeof photo.name === 'string' && photo.name.startsWith(`places/${place.id}/photos/`)));
   });
   // Stay below Firestore's 500-write batch maximum.
   for (let offset = 0; offset < valid.length; offset += 200) {
@@ -84,6 +88,8 @@ export async function indexPlaceIdentities(store, places, {
       batch.set(store.collection(ID_COLLECTION).doc(place.id), {
         place_id: place.id, last_indexed: new Date(now),
         searchContexts: arrayUnion(context), source: 'google_place_id',
+        ...(requirePhoto ? { primary_photo_path: `/api/partner/venues/${place.id}/photos/0/image` } : {}),
+        ...(seedPlan ? { seed_plan: seedPlan } : {}),
       }, { merge: true });
       batch.set(store.collection(LOCATION_COLLECTION).doc(place.id), {
         place_id: place.id,
@@ -111,6 +117,7 @@ export function createLondonSeeder({
   store, apiKey, consumeBudget, fetchImpl = fetch, now = Date.now,
   arrayUnion, tasks = LONDON_SEED_TASKS, pagesPerQuery = 1,
   paceMs = 3000, wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
+  dailyRequestLimit, customerReserve, planId = '', requirePhoto = false,
 }) {
   const pageLimit = Math.max(1, Math.min(3, Math.floor(pagesPerQuery) || 1));
   return async ({ manual = false, maxRequests = 4 } = {}) => {
@@ -119,9 +126,10 @@ export function createLondonSeeder({
     if (!manual && clock.hour !== 3 && clock.hour !== 9) return { status: 'outside_schedule_window' };
     const previousWeek = new Date(Date.parse(`${clock.week}T00:00:00Z`) - 7 * 86400000)
       .toISOString().slice(0, 10);
-    const previous = await store.collection(JOB_COLLECTION).doc(previousWeek).get();
+    const key = week => planId ? `${week}_${planId}` : week;
+    const previous = await store.collection(JOB_COLLECTION).doc(key(previousWeek)).get();
     const week = previous.exists && previous.data()?.status !== 'complete' ? previousWeek : clock.week;
-    const ref = store.collection(JOB_COLLECTION).doc(week);
+    const ref = store.collection(JOB_COLLECTION).doc(key(week));
     const owner = randomUUID();
     const lease = await store.runTransaction(async transaction => {
       const doc = await transaction.get(ref);
@@ -134,6 +142,7 @@ export function createLondonSeeder({
         taskIndex: 0, page: 0, pageToken: '', indexed: 0, requests: 0,
         ...previous, owner, leaseUntil: now() + 90000, status: 'running', week,
         pauseReason: null, quota: null,
+        planId, categoryCoverage: previous.categoryCoverage || {},
       };
       transaction.set(ref, state, { merge: true });
       return state;
@@ -150,9 +159,11 @@ export function createLondonSeeder({
     let failure = null;
     try {
       while (state.taskIndex < tasks.length && requests < Math.min(4, Math.max(1, maxRequests))) {
-        const dailyLimit = Math.max(1, Number.parseInt(process.env.PANDA_DAILY_PLACES_LIMIT || '500', 10) || 500);
+        const dailyLimit = dailyRequestLimit ? dailyRequestLimit() :
+          Math.max(1, Number.parseInt(process.env.PANDA_DAILY_PLACES_LIMIT || '500', 10) || 500);
         const reserve = Math.max(0, Math.min(dailyLimit,
-          Number.parseInt(process.env.PANDA_SEED_CUSTOMER_RESERVE || String(Math.floor(dailyLimit / 2)), 10) || 0));
+          Number.parseInt(process.env.PANDA_SEED_CUSTOMER_RESERVE ||
+            String(customerReserve ?? Math.floor(dailyLimit / 2)), 10) || 0));
         // Background indexing must not consume all interactive discovery headroom.
         if (dailyLimit <= reserve) {
           failure = 'quota_paused'; state.pauseReason = 'customer_reserve'; break;
@@ -173,7 +184,7 @@ export function createLondonSeeder({
           method: 'POST', signal: AbortSignal.timeout(8000),
           headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': INDEX_FIELDS },
           body: JSON.stringify({
-            textQuery: `${task.category.replaceAll('_', ' ')} in ${task.name.replaceAll('_', ' ')}, London`,
+            textQuery: `${task.query || task.category.replaceAll('_', ' ')} in ${task.name.replaceAll('_', ' ')}, London`,
             pageSize: 20, rankPreference: 'DISTANCE', languageCode: 'en-GB',
             locationBias: { circle: { center: { latitude: task.lat, longitude: task.lng }, radius: 2600 } },
             ...(state.pageToken ? { pageToken: state.pageToken } : {}),
@@ -192,9 +203,20 @@ export function createLondonSeeder({
         if (data.places != null && !Array.isArray(data.places)) {
           failure = 'provider_unavailable'; break;
         }
-        state.indexed += await indexPlaceIdentities(store, data.places || [], {
+        const indexed = await indexPlaceIdentities(store, data.places || [], {
           now: now(), context: `${task.name}/${task.category}`, arrayUnion,
+          requirePhoto,
+          seedPlan: planId,
         });
+        state.indexed += indexed;
+        const coverageKey = `${task.name}/${task.category}`;
+        const priorCoverage = state.categoryCoverage[coverageKey] || { pages: 0, observations: 0, indexed: 0 };
+        state.categoryCoverage[coverageKey] = {
+          pages: priorCoverage.pages + 1,
+          observations: priorCoverage.observations + (data.places || []).length,
+          indexed: priorCoverage.indexed + indexed,
+          providerHasMore: !!data.nextPageToken,
+        };
         // Sample one page by default, keeping budget for live discovery.
         // Optional deeper indexing never exceeds three pages per query.
         if (data.nextPageToken && state.page + 1 < pageLimit) {
@@ -229,6 +251,11 @@ export function createLondonSeeder({
       totalTasks: tasks.length, indexed: state.indexed, requests: state.requests,
       requestsThisChunk: requests, coverage: 'sampled_not_exhaustive',
       pauseReason: state.pauseReason, quota: state.quota,
+      planId, categoriesQueried: Object.keys(state.categoryCoverage).length,
+      categoriesWithoutPhotoCandidates: Object.values(state.categoryCoverage).filter(item => !item.indexed).length,
+      ...(state.status === 'complete' ? {
+        emptyCategories: Object.entries(state.categoryCoverage).filter(([, item]) => !item.indexed).map(([key]) => key),
+      } : {}),
     };
   };
 }

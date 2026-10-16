@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { discoveryDailyLimit } from './_index-budget.js';
 
 // These are Pro search fields. Photo references do not fetch image bytes.
 // No rating, hours, price, reviews, contact or Atmosphere fields on this path.
@@ -89,7 +90,6 @@ export function createDiscoveryService({
 }) {
   const pending = new Map();
   const memory = new Map();
-  const limit = Math.max(1, Number.parseInt(process.env.PANDA_DAILY_PLACES_LIMIT || '1000', 10) || 1000);
 
   async function localFallback(request, reason) {
     if (!persistFullContent) {
@@ -175,6 +175,7 @@ export function createDiscoveryService({
     }
     // Fail closed for paid misses if a distributed counter cannot be enforced.
     if (!store || !apiKey) return localFallback(request, 'storage_or_provider_unavailable');
+    const limit = discoveryDailyLimit(process.env, now());
     const budget = await consumeBudget(store, 'places', limit);
     if (!budget.allowed) {
       warn(`Google discovery request budget reached (${budget.current}/${budget.limit}). Activating local fallback.`);

@@ -28,12 +28,13 @@ function seedFixture(extra = {}) {
   });
   return { store, seed, calls: () => calls };
 }
-test('all 18 requested clusters and seven categories yield 126 tasks', () => {
+test('all 18 clusters and 33 app categories yield 594 tasks', () => {
   assert.equal(LONDON_CLUSTERS.length, 18);
-  assert.equal(PANDA_CATEGORIES.length, 7);
-  assert.equal(LONDON_SEED_TASKS.length, 126);
-  assert.equal(new Set(LONDON_SEED_TASKS.map(t => `${t.name}/${t.category}`)).size, 126);
-  assert.doesNotMatch(INDEX_FIELDS, /displayName|formattedAddress|photos|rating|currentOpeningHours/);
+  assert.equal(PANDA_CATEGORIES.length, 33);
+  assert.equal(LONDON_SEED_TASKS.length, 594);
+  assert.equal(new Set(LONDON_SEED_TASKS.map(t => `${t.name}/${t.category}`)).size, 594);
+  assert.doesNotMatch(INDEX_FIELDS, /displayName|formattedAddress|rating|currentOpeningHours/);
+  assert.match(INDEX_FIELDS, /places.photos.name/);
 });
 test('index writes whitelist IDs/coordinates and never overwrite paid records', async () => {
   const store = testStore();

@@ -1,6 +1,24 @@
+import { createHash } from 'node:crypto';
 export const PANDA_CATEGORIES = [
-  'restaurant', 'bar', 'pub', 'cafe', 'cocktail_bar', 'brunch', 'nightclub',
+  'All', 'Indian', 'Italian', 'Chinese', 'Spanish', 'French', 'British',
+  'Japanese', 'Mexican', 'Turkish', 'American', 'Meat', 'Bar', 'Lebanese',
+  'Thai', 'Chicken', 'Pizza', 'Burgers', 'Dessert', 'Coffee', 'Breakfast',
+  'Lunch', 'Brunch', 'Bottomless', 'Pubs', 'Dinner', 'Drinks', 'Sports',
+  'Live Music', 'Nightlife', 'Clubs', 'Shops', 'Places of Interest',
 ];
+const CATEGORY_QUERIES = {
+  All: 'restaurants bars pubs cafes', Meat: 'steakhouses barbecue restaurants',
+  Bar: 'bars cocktail bars', Chicken: 'chicken restaurants', Pizza: 'pizzerias',
+  Burgers: 'burger restaurants', Dessert: 'dessert shops bakeries ice cream',
+  Coffee: 'coffee shops cafes', Breakfast: 'breakfast restaurants cafes',
+  Lunch: 'lunch restaurants', Brunch: 'brunch restaurants',
+  Bottomless: 'bottomless brunch restaurants', Pubs: 'pubs',
+  Dinner: 'dinner restaurants', Drinks: 'cocktail bars wine bars',
+  Sports: 'sports bars pubs showing sport', 'Live Music': 'live music venues pubs bars',
+  Nightlife: 'nightlife bars clubs', Clubs: 'nightclubs',
+  Shops: 'food shops delicatessens wine shops',
+  'Places of Interest': 'tourist attractions museums landmarks',
+};
 export const LONDON_CLUSTERS = [
   { name: 'battersea_nine_elms', lat: 51.4791, lng: -0.1420 },
   { name: 'clapham_wandsworth', lat: 51.4617, lng: -0.1382 },
@@ -22,4 +40,8 @@ export const LONDON_CLUSTERS = [
   { name: 'kingston_surbiton', lat: 51.4122, lng: -0.3007 },
 ];
 export const LONDON_SEED_TASKS = LONDON_CLUSTERS.flatMap(cluster =>
-  PANDA_CATEGORIES.map(category => ({ ...cluster, category })));
+  PANDA_CATEGORIES.map(category => ({ ...cluster, category,
+    query: CATEGORY_QUERIES[category] || `${category} restaurants` })));
+// Never resume a cursor against a changed category/cluster ordering.
+export const LONDON_SEED_PLAN = 'google-photo-' + createHash('sha256')
+  .update(JSON.stringify({ tasks: LONDON_SEED_TASKS, pages: 1 })).digest('hex').slice(0, 12);

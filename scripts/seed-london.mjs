@@ -18,7 +18,11 @@ let bearer;
 let issued = 0;
 const startedAt = Date.now();
 let rateRetries = 0;
-for (let chunk = 0; chunk < 150; chunk++) {
+for (let chunk = 0; chunk < 500; chunk++) {
+  if (Date.now() - startedAt >= 17 * 60 * 1000) {
+    console.log('::notice::Run time bound reached. Saved London indexing can be continued by another run.');
+    process.exit(0);
+  }
   if (!bearer || Date.now() - issued > 180000) {
     bearer = await token(); issued = Date.now();
     // Log only validation outcomes, never the bearer or complete claims.

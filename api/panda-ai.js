@@ -675,18 +675,8 @@ export default async function handler(req,res){
         return;
       }
       if(body.directoryOnly===true){
-        try{
-          // Unlike chat, directory discovery must never silently use the London default.
-          const store=db();
-          if(!store) throw new VenueDirectoryError('Shared directory storage unavailable.',503,_dbInitFailure);
-          const directory=await loadSharedVenueDirectory(store,Number(location?.lat),Number(location?.lng));
-          res.status(200).json({venues:[],nextPageToken:null,batched:true,queryCount:0,...directory});
-        }catch(error){
-          const known=error instanceof VenueDirectoryError;
-          res.status(known?error.status:503).json({
-            error:known?error.code:'venue_directory_unavailable'
-          });
-        }
+        res.status(410).json({error:'independent_directory_disabled',
+          message:'Panda discovery uses verified Google venues and Panda Partner data only.'});
         return;
       }
       if(Array.isArray(body.queries)){
