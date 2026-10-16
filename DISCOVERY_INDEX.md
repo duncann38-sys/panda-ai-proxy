@@ -1,14 +1,22 @@
 # Panda: cover-only discovery, full details on tap
 
 ## Current London-index rollout
-When Google denies discovery, independently sourced OpenStreetMap previews
+The Native customer feed uses Google photo-led discovery, not text-only OSM previews.
+Google's increased SearchText quota is separate from app-side spending controls;
+the default cover-search ceiling is now 1,000 attempts per day, while any explicitly
+configured lower ceiling remains respected. Google-only names/photos/full cards
+are hydrated on demand; paid records remain separate and are not overwritten.
+Independent directory support remains available separately, but is no longer wired
+as the production cover-feed fallback.
+
+Previously, when Google denied discovery, independently sourced OpenStreetMap previews
 are included in the main feed as well as the directory response. They have
 explicit provenance and unknown Google-only details, not invented ratings,
 photos or opening status. Directory refreshes try bounded alternative providers
 before entering their shared failure cooldown.
 This independent directory uses a shared 24-hour cache. This does not enable
 new durable caching of Google venue names, photos, ratings or opening hours.
-On a provider failure, cover discovery first checks saved neighbouring directory
+The independent directory reader checks saved neighbouring directory
 cells and applies an exact four-kilometre distance bound. A missing cell must not
 hide genuinely nearby saved venues or require a successful public-provider refresh.
 Compound alternatives such as bars and pubs are matched as alternatives. Returned

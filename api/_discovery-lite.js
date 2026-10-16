@@ -89,7 +89,7 @@ export function createDiscoveryService({
 }) {
   const pending = new Map();
   const memory = new Map();
-  const limit = Math.max(1, Number.parseInt(process.env.PANDA_DAILY_PLACES_LIMIT || '500', 10) || 500);
+  const limit = Math.max(1, Number.parseInt(process.env.PANDA_DAILY_PLACES_LIMIT || '1000', 10) || 1000);
 
   async function localFallback(request, reason) {
     if (!persistFullContent) {

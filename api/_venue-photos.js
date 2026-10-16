@@ -125,9 +125,10 @@ async function writeSharedVenuePhotos(placeId, photos) {
   }
 }
 
-export async function getVenuePhotos(placeId) {
+export async function getVenuePhotos(placeId, { refresh = false, invalidReference = false } = {}) {
   const cached = photoCache.get(placeId);
-  if (cached && cached.expiresAt > Date.now()) {
+  if (cached && cached.expiresAt > Date.now() && !invalidReference
+    && (!refresh || Date.now() - cached.sourceTimestamp < 60_000)) {
     recordCostEvent('photo_metadata_cache_hit', { layer: 'memory' });
     return cached.photos;
   }
@@ -137,7 +138,8 @@ export async function getVenuePhotos(placeId) {
 
   const request = (async () => {
       const shared = await readSharedVenuePhotos(placeId);
-      if (shared && Date.now() - shared.ts < SHARED_CACHE_TTL_MS) {
+      if (shared && !invalidReference
+        && Date.now() - shared.ts < (refresh ? 60_000 : SHARED_CACHE_TTL_MS)) {
         cacheInMemory(placeId, shared.photos, shared.ts);
         recordCostEvent('photo_metadata_cache_hit', { layer: 'firestore' });
         return shared.photos;
@@ -148,7 +150,7 @@ export async function getVenuePhotos(placeId) {
         await writeSharedVenuePhotos(placeId, photos);
         return photos;
       } catch (error) {
-        if (shared && Date.now() - shared.ts < STALE_CACHE_TTL_MS) {
+        if (shared && !invalidReference && Date.now() - shared.ts < STALE_CACHE_TTL_MS) {
           cacheInMemory(placeId, shared.photos, shared.ts, STALE_CACHE_TTL_MS);
           recordCostEvent('photo_metadata_stale_hit', { layer: 'firestore' });
           return shared.photos;
@@ -163,13 +165,21 @@ export async function getVenuePhotos(placeId) {
 }
 
 export async function getVenuePhotoImage(placeId, photoIndex) {
-  const photo = (await getVenuePhotos(placeId))[photoIndex];
+  let photo = (await getVenuePhotos(placeId))[photoIndex];
   if (!photo) throw requestError('This venue does not have that Google photo.', 404);
 
-  const response = await fetch(
+  let response = await fetch(
     'https://places.googleapis.com/v1/' + encodeURI(photo.name) + '/media?maxHeightPx=900',
     { headers: { 'X-Goog-Api-Key': apiKey() } },
   );
+  if (response.status === 400 || response.status === 404) {
+    photo = (await getVenuePhotos(placeId, { refresh: true, invalidReference: true }))[photoIndex];
+    if (!photo) throw requestError('This venue does not have that Google photo.', 404);
+    response = await fetch(
+      'https://places.googleapis.com/v1/' + encodeURI(photo.name) + '/media?maxHeightPx=900',
+      { headers: { 'X-Goog-Api-Key': apiKey() } },
+    );
+  }
   if (!response.ok) {
     throw requestError(
       'This Google venue photo is unavailable right now.',
