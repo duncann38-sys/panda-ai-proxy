@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { recordCostEvent } from './_cost-controls.js';
 
 export const VENUE_DIRECTORY_COLLECTION = 'venue_area_directory_v1';
-export const VENUE_DIRECTORY_TTL_MS = 3 * 60 * 60 * 1000;
+export const VENUE_DIRECTORY_TTL_MS = 24 * 60 * 60 * 1000;
 export const VENUE_DIRECTORY_STALE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 export const VENUE_DIRECTORY_MAX_RECORDS = 600;
 
@@ -14,6 +14,46 @@ const RETRY_DELAY_MS = 15 * 60 * 1000;
 const REFRESH_WAIT_MS = 11_000;
 const REFRESH_POLL_MS = 250;
 const MEMORY_CACHE_LIMIT = 250;
+
+async function fetchDirectoryResponse(query, fetchImpl, timeoutMs) {
+  const providers = [
+    ['https://overpass-api.de/api/interpreter', 'POST'],
+    ['https://overpass.kumi.systems/api/interpreter', 'GET'],
+    ['https://overpass.private.coffee/api/interpreter', 'GET'],
+  ];
+  let lastResponse;
+  let lastError;
+  for (const [endpoint, method] of providers) {
+    try {
+      const response = await fetchImpl(method === 'GET'
+        ? `${endpoint}?${new URLSearchParams({ data: query })}` : endpoint, {
+        method,
+        headers: {
+          ...(method === 'POST' ? { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' } : {}),
+          Accept: 'application/json',
+          'User-Agent': 'Panda venue directory (OpenStreetMap data)',
+        },
+        ...(method === 'POST' ? { body: new URLSearchParams({ data: query }) } : {}),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!response.ok) {
+        lastResponse = response;
+        if (response.status < 500 && response.status !== 429 && response.status !== 403) return response;
+        continue;
+      }
+      const payload = await response.json();
+      if (!Array.isArray(payload?.elements) || (payload.remark && !payload.elements.length)) {
+        lastError = new Error('Invalid or incomplete directory response.');
+        continue;
+      }
+      return { ok: true, status: response.status || 200, json: async () => payload };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (lastResponse) return lastResponse;
+  throw lastError || new Error('Venue directory providers unavailable.');
+}
 function recordDirectoryEvent(event, { areaKey, ...fields } = {}) {
   // Keep area-level hit counts useful without putting reversible coordinates in logs.
   const areaHash = areaKey
@@ -182,16 +222,7 @@ async function fetchAreaFromOverpass(area, fetchImpl, timeoutMs, radius = SEARCH
 
   let response;
   try {
-    response = await fetchImpl('https://overpass-api.de/api/interpreter', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-        Accept: 'application/json',
-        'User-Agent': 'Panda venue directory (OpenStreetMap data)',
-      },
-      body: new URLSearchParams({ data: query }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    response = await fetchDirectoryResponse(query, fetchImpl, timeoutMs);
   } catch (error) {
     recordDirectoryEvent('venue_directory_provider_failure', {
       areaKey: area.key,

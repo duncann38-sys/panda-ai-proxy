@@ -219,14 +219,15 @@ test('quota fallback retains independent directory records in batch responses', 
   const search = createDiscoveryService({
     store: testStore(), apiKey: 'test-only',
     consumeBudget: async () => ({ allowed: false, shared: true }),
-    loadFallback: async () => ({ directoryVenues: [{ id: 'osm:node:1', name: 'Independent name' }],
+    loadFallback: async () => ({ directoryVenues: [{ id: 'osm:node:1', name: 'Independent name',
+      type: 'Restaurant', lat: 51.48, lng: -0.14 }],
       directory: { source: 'OpenStreetMap' } }),
     fetchImpl: () => { throw new Error('No paid request allowed.'); },
   });
-  const result = await search({ queries: ['restaurants', 'pubs'], location: { lat: 51.48, lng: -0.14 } });
+  const result = await search({ queries: ['restaurants'], location: { lat: 51.48, lng: -0.14 } });
   assert.equal(result.directoryVenues.length, 1);
   assert.equal(result.quotaExceeded, true);
-  assert.equal(result.dataMode, 'cached');
+  assert.equal(result.dataMode, 'directory');
 });
 
 const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });

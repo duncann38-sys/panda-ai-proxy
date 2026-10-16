@@ -127,7 +127,7 @@ test('OSM normalization deduplicates venues and enforces the record cap', () => 
   assert.equal(venues[0].name, 'The Example');
 });
 
-test('a shared area result is reused for three hours, then refreshed', async () => {
+test('a shared area result is reused for 24 hours, then refreshed', async () => {
   const store = fakeStore();
   let time = 1_000_000;
   let providerCalls = 0;
@@ -255,7 +255,7 @@ test('an upstream outage has a shared cooldown rather than retrying for every vi
   });
   await assert.rejects(failing.load(store, 51.5, -0.14), { code: 'venue_directory_unavailable' });
   await assert.rejects(failing.load(store, 51.5, -0.14), { code: 'venue_directory_unavailable' });
-  assert.equal(calls, 1);
+  assert.equal(calls, 3);
 
   time += 16 * 60 * 1000;
   const recovered = createVenueDirectoryLoader({ now: () => time, fetchImpl: async () => {
@@ -264,7 +264,7 @@ test('an upstream outage has a shared cooldown rather than retrying for every vi
   } });
   const result = await recovered.load(store, 51.5, -0.14);
   assert.equal(result.directoryVenues.length, 1);
-  assert.equal(calls, 2);
+  assert.equal(calls, 4);
 });
 
 test('directory requests fail explicitly instead of making an unshared upstream request', async () => {
@@ -279,4 +279,16 @@ test('directory requests fail explicitly instead of making an unshared upstream 
   await assert.rejects(loader.load(null, 51.5, -0.14), { code: 'venue_directory_unavailable' });
   await assert.rejects(loader.load(fakeStore(), Number.NaN, -0.14), { code: 'location_required' });
   assert.equal(providerCalls, 0);
+});
+test('a failed primary provider retries a GET mirror before reporting an outage', async () => {
+  const seen = [];
+  const loader = createVenueDirectoryLoader({ fetchImpl: async (url, options) => {
+    seen.push({ url, method: options.method });
+    return seen.length === 1 ? { ok: false, status: 503 } : response([listing()]);
+  } });
+  const result = await loader.load(fakeStore(), 51.5, -0.14);
+  assert.equal(result.directoryVenues.length, 1);
+  assert.equal(seen.length, 2);
+  assert.equal(seen[1].method, 'GET');
+  assert.match(seen[1].url, /^https:\/\/overpass\.kumi\.systems\/api\/interpreter\?data=/);
 });

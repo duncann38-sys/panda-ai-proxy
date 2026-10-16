@@ -1,6 +1,14 @@
 # Panda: cover-only discovery, full details on tap
 
 ## Current London-index rollout
+When Google denies discovery, independently sourced OpenStreetMap previews
+are included in the main feed as well as the directory response. They have
+explicit provenance and unknown Google-only details, not invented ratings,
+photos or opening status. Directory refreshes try bounded alternative providers
+before entering their shared failure cooldown.
+This independent directory uses a shared 24-hour cache. This does not enable
+new durable caching of Google venue names, photos, ratings or opening hours.
+
 The scheduled round starts Sunday at 03:00 London time. Incomplete work gets
 daily attempts at 03:00 and 09:00 London time. An unfinished previous week
 resumes before a new round starts. Daily Google quota exhaustion is never

@@ -96,9 +96,24 @@ export function createDiscoveryService({
       let baseline = {};
       try { baseline = loadFallback ? await loadFallback(request) : {}; }
       catch { warn('Independent local fallback unavailable.'); }
+      const terms = request.query.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/)
+        .filter(word => word && !['near', 'nearby', 'me', 'in', 'london', 'venues', 'places', 'and', 'all',
+          'find', 'show', 'please', 'best', 'the', 'a', 'an', 'around'].includes(word))
+        .map(word => word.replace(/s$/, ''));
+      const directory = (Array.isArray(baseline.directoryVenues) ? baseline.directoryVenues : [])
+        .filter(venue => String(venue.id).startsWith('osm:') && typeof venue.name === 'string'
+          && Number.isFinite(venue.lat) && Number.isFinite(venue.lng))
+        .map(venue => ({ ...venue, source: 'openstreetmap', detailsDeferred: true,
+          sourceQueries: ['OpenStreetMap directory'], photoCount: 0, photoName: undefined,
+          photoNames: undefined, rating: undefined, ratingCount: undefined, price: undefined, openNow: undefined }));
+      const previews = directory.filter(venue => {
+        const text = `${venue.name} ${venue.type} ${venue.primaryType || ''} ${(venue.types || []).join(' ')} ${(venue.categories || []).join(' ')} ${venue.address || ''}`
+          .toLowerCase().replaceAll('_', ' ');
+        return terms.every(term => text.includes(term));
+      });
       return {
-        ...baseline, venues: [], nextPageToken: null, cached: true,
-        quotaExceeded: reason === 'quota', dataMode: baseline.directoryVenues?.length ? 'cached' : 'unavailable',
+        ...baseline, directoryVenues: directory, venues: previews, nextPageToken: null, cached: true,
+        quotaExceeded: reason === 'quota', dataMode: previews.length ? 'directory' : 'unavailable',
         fallbackReason: reason,
       };
     }
@@ -232,7 +247,8 @@ export function createDiscoveryService({
       results.forEach((result, index) => {
         for (const venue of result.venues) {
           const existing = venues.get(venue.id);
-          venues.set(venue.id, { ...venue, sourceQueries: [...new Set([...(existing?.sourceQueries || []), queries[index]])] });
+          venues.set(venue.id, { ...venue, sourceQueries: venue.source === 'openstreetmap'
+            ? venue.sourceQueries : [...new Set([...(existing?.sourceQueries || []), queries[index]])] });
         }
         for (const venue of result.directoryVenues || []) directoryVenues.set(venue.id, venue);
       });
