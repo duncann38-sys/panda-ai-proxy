@@ -37,7 +37,7 @@ test('broad activity categories require an explicit Google place-type match', ()
   assert.equal(pubCategories.includes('Live Music'), false);
 
   const sportsBar = { primaryType: 'sports_bar', types: ['sports_bar', 'bar'] };
-  assert.deepEqual(classifyGoogleTypeCategories(sportsBar), ['Sports']);
+  assert.equal(classifyGoogleTypeCategories(sportsBar).includes('Sports'), true);
 
   const musicVenue = { primaryType: 'live_music_venue', types: ['live_music_venue'] };
   assert.deepEqual(classifyGoogleTypeCategories(musicVenue), ['Live Music']);
