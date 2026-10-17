@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { LONDON_SEED_TASKS } from '../constants/london_clusters.js';
+import { LONDON_CLUSTERS, LONDON_SEED_PLAN, LONDON_SEED_TASKS } from '../constants/london_clusters.js';
 
 export const ID_COLLECTION = 'panda_london_place_ids_v1';
 export const LOCATION_COLLECTION = 'panda_london_place_locations_v1';
@@ -62,6 +62,101 @@ export async function nearbyPlaceIdentities(store, { lat, lng, radius }, now = D
     return expiry > now && Number.isFinite(distance) && distance <= radius
       ? [{ place_id: item.place_id, lat: item.lat, lng: item.lng, distanceMeters: Math.round(distance) }] : [];
   }).sort((a, b) => a.distanceMeters - b.distanceMeters);
+}
+
+const toRadians = degrees => degrees * Math.PI / 180;
+function distanceMeters(aLat, aLng, bLat, bLng) {
+  const dLat = toRadians(bLat - aLat), dLng = toRadians(bLng - aLng);
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(toRadians(aLat)) * Math.cos(toRadians(bLat)) * Math.sin(dLng / 2) ** 2;
+  return 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
+}
+function encodePageCursor(value) {
+  return Buffer.from(JSON.stringify(value)).toString('base64url');
+}
+function decodePageCursor(value) {
+  if (!value || typeof value !== 'string' || value.length > 12_000) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reads a small, category-tagged page from the permitted Place ID index.
+ * Only IDs and expiring coordinates are read from Firestore; Google fields
+ * are hydrated by the API route for this page and are never written back.
+ */
+export async function nearbySeededPlacePage(store, {
+  lat, lng, radius = 6000, category = 'All', cursor = null, pageSize = 6,
+}, now = Date.now()) {
+  if (!store || !Number.isFinite(lat) || !Number.isFinite(lng)
+    || !Number.isFinite(radius) || radius < 500 || radius > 20_000
+    || typeof category !== 'string' || !category.trim() || category.length > 64) {
+    throw new TypeError('A valid location, radius, and category are required.');
+  }
+  const size = Math.max(1, Math.min(8, Math.floor(pageSize) || 6));
+  const roundedOrigin = `${lat.toFixed(4)},${lng.toFixed(4)}`;
+  const decoded = decodePageCursor(cursor);
+  const state = decoded?.category === category && decoded?.origin === roundedOrigin
+    ? decoded
+    : { clusterIndex: 0, pending: [] };
+  const nearbyClusters = LONDON_CLUSTERS
+    .map(cluster => ({ ...cluster, centerDistance: distanceMeters(lat, lng, cluster.lat, cluster.lng) }))
+    .filter(cluster => cluster.centerDistance <= radius + 3000)
+    .sort((a, b) => a.centerDistance - b.centerDistance);
+  let clusterIndex = Math.max(0, Math.min(nearbyClusters.length, Number(state.clusterIndex) || 0));
+  const found = Array.isArray(state.pending)
+    ? state.pending.filter(item => typeof item?.place_id === 'string'
+      && Number.isFinite(item.lat) && Number.isFinite(item.lng))
+    : [];
+  const seen = new Set(found.map(item => item.place_id));
+
+  // Pull from the nearest cluster contexts until there is enough to return
+  // a useful page plus a small look-ahead for distance ordering.
+  while (found.length < size * 2 && clusterIndex < nearbyClusters.length) {
+    const cluster = nearbyClusters[clusterIndex++];
+    const context = `${cluster.name}/${category}`;
+    const snapshot = await store.collection(ID_COLLECTION)
+      .where('searchContexts', 'array-contains', context).limit(20).get();
+    const positions = await Promise.all(snapshot.docs.map(async identityDoc => {
+      const identity = identityDoc.data();
+      if (identity.seed_plan !== LONDON_SEED_PLAN || seen.has(identityDoc.id)) return null;
+      const positionDoc = await store.collection(LOCATION_COLLECTION).doc(identityDoc.id).get();
+      if (!positionDoc.exists) return null;
+      const position = positionDoc.data();
+      const expiry = position.expiresAt?.toMillis?.() ?? new Date(position.expiresAt).getTime();
+      if (!Number.isFinite(expiry) || expiry <= now
+        || !Number.isFinite(position.lat) || !Number.isFinite(position.lng)) return null;
+      const distance = distanceMeters(lat, lng, position.lat, position.lng);
+      if (!Number.isFinite(distance) || distance > radius) return null;
+      return {
+        place_id: identityDoc.id, lat: position.lat, lng: position.lng,
+        distanceMeters: Math.round(distance),
+        primary_photo_path: identity.primary_photo_path
+          || `/api/partner/venues/${encodeURIComponent(identityDoc.id)}/photos/0/image`,
+      };
+    }));
+    for (const position of positions) {
+      if (!position || seen.has(position.place_id)) continue;
+      seen.add(position.place_id);
+      found.push(position);
+    }
+  }
+
+  found.sort((a, b) => a.distanceMeters - b.distanceMeters);
+  const identities = found.slice(0, size);
+  const pending = found.slice(size);
+  const hasMore = pending.length > 0 || clusterIndex < nearbyClusters.length;
+  return {
+    identities,
+    nextCursor: hasMore ? encodePageCursor({
+      category, origin: roundedOrigin, clusterIndex, pending,
+    }) : null,
+    indexExhausted: !hasMore,
+  };
 }
 
 // This is an identity index, not a persistent copy of Google venue content.

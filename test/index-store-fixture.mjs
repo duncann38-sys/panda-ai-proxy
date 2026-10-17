@@ -21,7 +21,9 @@ export function testStore() {
         where(field, op, value) { return query([...conditions, [field, op, value]], maximum); },
         limit(count) { return query(conditions, count); },
         async get() { return { docs: [...table(name)].filter(([, row]) => conditions.every(([f, op, value]) =>
-          op === '>=' ? row[f] >= value : op === '<=' ? row[f] <= value : row[f] === value))
+          op === '>=' ? row[f] >= value : op === '<=' ? row[f] <= value
+            : op === 'array-contains' ? Array.isArray(row[f]) && row[f].includes(value)
+              : row[f] === value))
           .slice(0, maximum).map(([id, value]) => ({ id, data: () => value })) }; },
       });
       return query();

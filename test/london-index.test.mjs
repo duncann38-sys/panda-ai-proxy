@@ -4,9 +4,10 @@ import { generateKeyPairSync, sign } from 'node:crypto';
 import { testStore } from './index-store-fixture.mjs';
 import {
   ID_COLLECTION, LOCATION_COLLECTION, JOB_COLLECTION, LOCATION_TTL_MS, INDEX_FIELDS,
-  createLondonSeeder, indexPlaceIdentities, nearbyPlaceIdentities, londonClock, indexedVenueBaseline, providerQuotaInfo,
+  createLondonSeeder, indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage,
+  londonClock, indexedVenueBaseline, providerQuotaInfo,
 } from '../api/_london-index.js';
-import { LONDON_CLUSTERS, PANDA_CATEGORIES, LONDON_SEED_TASKS } from '../constants/london_clusters.js';
+import { LONDON_CLUSTERS, LONDON_SEED_PLAN, PANDA_CATEGORIES, LONDON_SEED_TASKS } from '../constants/london_clusters.js';
 import { verifySeedJob, SEED_AUDIENCE, SEED_SUBJECT } from '../api/_seed-job-auth.js';
 import { createDiscoveryService } from '../api/_discovery-lite.js';
 
@@ -71,6 +72,40 @@ test('limited profile fallback preserves active paid tier and never invents hour
   assert.equal(await indexedVenueBaseline(store, 'unknown', now), null);
   store.table('partner_venues').set(point.id, { tier: 'discovery', active: false });
   assert.equal((await indexedVenueBaseline(store, point.id, now)).partnerTier, undefined);
+});
+test('indexed discovery returns nearby category IDs in small pages and skips expired or unseeded records', async () => {
+  const store = testStore();
+  const origin = { lat: 51.4791, lng: -0.1420 };
+  const indexed = [
+    ['near-one', 51.4795, -0.1422, ['battersea_nine_elms/All'], LONDON_SEED_PLAN],
+    ['near-two', 51.4800, -0.1415, ['battersea_nine_elms/All'], LONDON_SEED_PLAN],
+    ['wrong-category', 51.4801, -0.1414, ['battersea_nine_elms/Pubs'], LONDON_SEED_PLAN],
+    ['expired', 51.4802, -0.1413, ['battersea_nine_elms/All'], LONDON_SEED_PLAN],
+    ['wrong-plan', 51.4803, -0.1412, ['battersea_nine_elms/All'], 'old-plan'],
+  ];
+  for (const [id, lat, lng, contexts, seedPlan] of indexed) {
+    store.table(ID_COLLECTION).set(id, {
+      place_id: id, searchContexts: contexts, seed_plan: seedPlan,
+      primary_photo_path: `/api/partner/venues/${id}/photos/0/image`,
+    });
+    store.table(LOCATION_COLLECTION).set(id, {
+      place_id: id, lat, lng,
+      expiresAt: new Date(now + (id === 'expired' ? -1000 : LOCATION_TTL_MS)),
+    });
+  }
+  const first = await nearbySeededPlacePage(store, {
+    ...origin, category: 'All', radius: 5000, pageSize: 1,
+  }, now);
+  assert.equal(first.identities.length, 1);
+  assert.equal(first.identities[0].place_id, 'near-one');
+  assert.ok(first.nextCursor);
+
+  const second = await nearbySeededPlacePage(store, {
+    ...origin, category: 'All', radius: 5000, pageSize: 1, cursor: first.nextCursor,
+  }, now);
+  assert.equal(second.identities.length, 1);
+  assert.equal(second.identities[0].place_id, 'near-two');
+  assert.notEqual(second.identities[0].place_id, first.identities[0].place_id);
 });
 test('one seed page is checkpointed and a completed round is idempotent', async () => {
   const s = seedFixture();

@@ -11,7 +11,7 @@ import { applyGuard } from './_guard.js';
 import { quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues } from './_panda-chat-policy.js';
 import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-directory.js';
 import { createDiscoveryService } from './_discovery-lite.js';
-import { indexPlaceIdentities, nearbyPlaceIdentities } from './_london-index.js';
+import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage } from './_london-index.js';
 import {
   boundedInteger,
   cacheablePlacesResult,
@@ -34,6 +34,8 @@ const LOCATION = process.env.PANDA_LOCATION || 'us-central1';
 const MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY;
 let coverDiscovery;
 const DEFAULT_LAT = 51.5074, DEFAULT_LNG = -0.1278;
+let nextIndexedDetailRequestAt = 0;
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const PRICE = {PRICE_LEVEL_INEXPENSIVE:'\u00a3',PRICE_LEVEL_MODERATE:'\u00a3\u00a3',PRICE_LEVEL_EXPENSIVE:'\u00a3\u00a3\u00a3',PRICE_LEVEL_VERY_EXPENSIVE:'\u00a3\u00a3\u00a3\u00a3'};
 const CACHE_TTL_MS   = 30 * 60 * 1000;
 const QUOTA_STALE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -224,6 +226,111 @@ async function googleSearch(query,lat,lng,pageToken,openNow){
     });
     return {venues,nextPageToken:data.nextPageToken||null};
   }catch{return {venues:[],nextPageToken:null,providerFailed:true}}
+}
+
+async function hydrateIndexedPlace(placeId, fallbackLocation, category) {
+  if (!MAPS_KEY) return { providerFailed: true, providerStatus: 503 };
+  if (Date.now() < placesQuotaBlockedUntil) {
+    return { providerFailed: true, providerStatus: 429 };
+  }
+  const budget = await consumeDailyBudget(db(), 'places', process.env.PANDA_DAILY_PLACES_LIMIT);
+  if (!budget.allowed) return { budgetExceeded: true };
+
+  const startAt = Math.max(Date.now(), nextIndexedDetailRequestAt);
+  nextIndexedDetailRequestAt = startAt + 75;
+  await wait(Math.max(0, startAt - Date.now()));
+  recordCostEvent('places_indexed_card_details_call', { category });
+  const fields = [
+    'id', 'displayName', 'formattedAddress', 'shortFormattedAddress', 'location',
+    'primaryType', 'primaryTypeDisplayName', 'types', 'photos',
+  ].join(',');
+  try {
+    const response = await fetch(`https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}`, {
+      headers: { 'X-Goog-Api-Key': MAPS_KEY, 'X-Goog-FieldMask': fields },
+    });
+    if (!response.ok) {
+      if (response.status === 429) placesQuotaBlockedUntil = Date.now() + 5 * 60 * 1000;
+      recordCostEvent('places_indexed_card_details_failure', { status: response.status });
+      return { providerFailed: true, providerStatus: response.status };
+    }
+    const place = await response.json();
+    const photos = Array.isArray(place.photos) ? place.photos : [];
+    const primaryPhoto = photos[0];
+    const location = place.location || {};
+    const typeText = place.primaryTypeDisplayName?.text || '';
+    const types = Array.isArray(place.types) ? place.types : [];
+    return {
+      venue: {
+        id: place.id || placeId,
+        name: place.displayName?.text || '',
+        type: typeText,
+        primaryType: place.primaryType || '',
+        types,
+        address: place.shortFormattedAddress || place.formattedAddress || '',
+        fullAddress: place.formattedAddress || '',
+        lat: location.latitude ?? fallbackLocation.lat,
+        lng: location.longitude ?? fallbackLocation.lng,
+        photoName: primaryPhoto?.name || '',
+        photoAttribution: (primaryPhoto?.authorAttributions || [])
+          .map(item => item.displayName).filter(Boolean).join(' · '),
+        photoCount: Math.min(10, photos.length),
+        detailsDeferred: true,
+        categories: googleCategoryTags(place, category),
+        sourceQueries: [`indexed:${category}`],
+      },
+    };
+  } catch {
+    recordCostEvent('places_indexed_card_details_failure', { status: 'network' });
+    return { providerFailed: true };
+  }
+}
+
+async function indexedFeedPage(body) {
+  const lat = Number(body.location?.lat);
+  const lng = Number(body.location?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return { status: 400, body: { error: 'valid_location_required' } };
+  }
+  const category = typeof body.category === 'string' ? body.category.trim() : 'All';
+  const page = await nearbySeededPlacePage(db(), {
+    lat, lng,
+    radius: Number.isFinite(Number(body.radiusMeters))
+      ? Math.max(500, Math.min(20_000, Number(body.radiusMeters)))
+      : (category === 'All' ? 6000 : 20_000),
+    category,
+    cursor: body.cursor || null,
+    pageSize: Math.max(1, Math.min(6, Number(body.pageSize) || 6)),
+  });
+  const hydrated = await Promise.all(page.identities.map(identity =>
+    hydrateIndexedPlace(identity.place_id, identity, category)));
+  const venues = hydrated.flatMap(result => result.venue?.name && result.venue.photoName
+    ? [{ ...result.venue, primaryPhotoPath: page.identities.find(identity =>
+        identity.place_id === result.venue.id)?.primary_photo_path }]
+    : []);
+  const budgetExceeded = hydrated.some(result => result.budgetExceeded);
+  const providerFailure = hydrated.find(result => result.providerFailed);
+  if (!venues.length && (budgetExceeded || providerFailure)) {
+    const status = budgetExceeded ? 503
+      : providerFailure.providerStatus === 429 ? 429
+        : providerFailure.providerStatus === 403 ? 403 : 502;
+    return {
+      status,
+      body: {
+        error: budgetExceeded ? 'places_daily_budget_exceeded' : 'places_card_lookup_failed',
+        nextCursor: page.nextCursor,
+        indexExhausted: page.indexExhausted,
+      },
+    };
+  }
+  return {
+    status: 200,
+    body: {
+      venues, nextCursor: page.nextCursor, indexExhausted: page.indexExhausted,
+      dataMode: 'indexed_candidates_live_card_fields',
+      ...(budgetExceeded ? { budgetExceeded: true } : {}),
+      ...(hydrated.some(result => result.providerFailed) ? { partial: true } : {}),
+    },
+  };
 }
 async function searchVenues(query,lat,lng,pageToken,openNow){
   if(!MAPS_KEY||!query) return {venues:[],nextPageToken:null};
@@ -656,6 +763,16 @@ export default async function handler(req,res){
     const {contents,generationConfig,location}=body;
     const lat=location?.lat??DEFAULT_LAT, lng=location?.lng??DEFAULT_LNG;
     if(body.venuesOnly){
+      if(body.discoveryMode === 'indexed-feed'){
+        try{
+          const result=await indexedFeedPage(body);
+          res.setHeader('Cache-Control','private, no-store');
+          res.status(result.status).json(result.body);
+        }catch(error){
+          res.status(503).json({error:'indexed_discovery_unavailable'});
+        }
+        return;
+      }
       // Opt-in: old Android builds and AI/Planner retain their existing contract.
       if(body.discoveryMode === 'cover' && body.directoryOnly!==true){
         coverDiscovery ||= createDiscoveryService({
