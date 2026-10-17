@@ -45,7 +45,68 @@ test('indexed feed returns a complete 200-card Google-hydrated page by default',
     venue.name && venue.photoName && venue.categories.includes('Pubs')));
 });
 
-test('indexed feed never fills a 200-card page with mismatched or photo-less results', async () => {
+test('indexed feed continues through stored IDs until 200 valid cards are found', async () => {
+  const firstIdentities = Array.from({ length: 200 }, (_, index) => ({
+    place_id: `first-${String(index).padStart(3, '0')}`,
+    lat: 51.46,
+    lng: -0.16,
+  }));
+  const secondIdentities = Array.from({ length: 200 }, (_, index) => ({
+    place_id: `second-${String(index).padStart(3, '0')}`,
+    lat: 51.46,
+    lng: -0.16,
+  }));
+  const cursors = [];
+  const response = await buildIndexedFeedPage({
+    location: { lat: 51.46, lng: -0.16 },
+    category: 'Pubs',
+    pageSize: 200,
+  }, {
+    maxPageSize: 200,
+    readPage: async ({ cursor, pageSize }) => {
+      cursors.push({ cursor, pageSize });
+      if (!cursor) {
+        return {
+          identities: firstIdentities,
+          nextCursor: 'next-index-page',
+          indexExhausted: false,
+        };
+      }
+      return {
+        identities: secondIdentities,
+        nextCursor: null,
+        indexExhausted: true,
+      };
+    },
+    hydratePlace: async (placeId) => ({
+      venue: placeId.startsWith('first-')
+        ? {
+          id: placeId,
+          name: `Venue ${placeId}`,
+          photoName: `places/${placeId}/photos/cover`,
+          categories: ['Coffee'],
+        }
+        : {
+          id: placeId,
+          name: `Venue ${placeId}`,
+          photoName: `places/${placeId}/photos/cover`,
+          categories: ['Pubs'],
+        },
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(cursors, [
+    { cursor: null, pageSize: 200 },
+    { cursor: 'next-index-page', pageSize: 200 },
+  ]);
+  assert.equal(response.body.venues.length, 200);
+  assert.equal(response.body.partial, undefined);
+  assert.ok(response.body.venues.every(venue =>
+    venue.photoName && venue.categories.includes('Pubs')));
+});
+
+test('indexed feed returns only valid matches when the stored index is exhausted', async () => {
   const identities = Array.from({ length: 200 }, (_, index) => ({
     place_id: `place-${String(index).padStart(3, '0')}`,
     lat: 51.46,

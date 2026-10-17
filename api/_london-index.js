@@ -145,9 +145,9 @@ function orderedSeedClusters(lat, lng, category, radius) {
 }
 
 /**
- * Reads a small, category-tagged page from the permitted Place ID index.
+ * Reads a category-tagged page from the permitted Place ID index.
  * Only IDs and expiring coordinates are read from Firestore; Google fields
- * are hydrated by the API route for this page and are never written back.
+ * are hydrated live by the API route and are never written back.
  */
 export async function nearbySeededPlacePage(store, {
   lat, lng, radius = 6000, category = 'All', cursor = null, pageSize = MAX_INDEXED_FEED_PAGE_SIZE,
@@ -177,8 +177,8 @@ export async function nearbySeededPlacePage(store, {
     ...found.map(item => item.place_id),
   ]);
 
-  // The stored-ID page and customer-facing page use the same size. Read only IDs
-  // and expiring coordinates here; Google card fields are hydrated by the API.
+  // Read only as many stored IDs as are still needed for this customer page.
+  // Google card fields are hydrated live by the API and are never written back.
   while (found.length < pageTarget && clusterIndex < clusters.length) {
     const cluster = clusters[clusterIndex];
     const context = `${cluster.name}/${category}`;

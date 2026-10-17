@@ -38,14 +38,14 @@ export async function buildIndexedFeedPage(body, {
   let cursor = body.cursor || null;
   let indexExhausted = false;
   let expandedArea = false;
-  let attempts = 0;
   const venues = [];
   let budgetExceeded = false;
   let providerFailure;
 
-  // A page is capped at the same size requested by the app. Invalid or stale
-  // records can leave a partial page; its next cursor continues the index.
-  while (venues.length < requestedPageSize && attempts < requestedPageSize) {
+  // Continue through stored ID pages until the customer page is full or the
+  // index, Google budget, or provider makes further hydration unavailable.
+  // Failed category/photo checks never count toward the requested page size.
+  while (venues.length < requestedPageSize) {
     const wanted = Math.min(maxPageSize, requestedPageSize - venues.length);
     const page = await readPage({
       lat, lng, radius, category, cursor, pageSize: wanted,
@@ -54,7 +54,6 @@ export async function buildIndexedFeedPage(body, {
     indexExhausted = page.indexExhausted;
     expandedArea ||= page.expandedArea === true;
     if (!page.identities.length) break;
-    attempts += page.identities.length;
     const batch = await mapWithConcurrency(page.identities, 6, identity =>
       hydratePlace(identity.place_id, identity, category));
     for (const result of batch) {
@@ -73,7 +72,7 @@ export async function buildIndexedFeedPage(body, {
         if (venues.length >= requestedPageSize) break;
       }
     }
-    if (venues.length >= requestedPageSize || !cursor || indexExhausted
+    if (venues.length >= requestedPageSize || indexExhausted
       || budgetExceeded || [403, 429, 500, 502, 503, 504].includes(providerFailure?.providerStatus)) break;
   }
 
@@ -95,7 +94,7 @@ export async function buildIndexedFeedPage(body, {
     status: 200,
     body: {
       venues, nextCursor: cursor, indexExhausted,
-      dataMode: 'indexed_candidates_live_card_fields',
+      dataMode: 'indexed_feed_live_google_card_fields',
       expandedArea,
       ...(budgetExceeded ? { budgetExceeded: true } : {}),
       ...(venues.length < requestedPageSize ? { partial: true } : {}),
