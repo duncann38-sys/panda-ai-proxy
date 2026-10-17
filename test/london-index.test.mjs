@@ -423,7 +423,7 @@ test('live photo-led discovery defaults to no persistent Google-content cache', 
   assert.equal(store.table('discovery_cover_searches_v1').size, 0);
   assert.equal(store.table('discovery_cover_venues_v1').size, 0);
 });
-test('quota fallback retains independent directory records in batch responses', async () => {
+test('quota fallback does not expose independent directory records in batch responses', async () => {
   const search = createDiscoveryService({
     store: testStore(), apiKey: 'test-only',
     consumeBudget: async () => ({ allowed: false, shared: true }),
@@ -433,9 +433,10 @@ test('quota fallback retains independent directory records in batch responses', 
     fetchImpl: () => { throw new Error('No paid request allowed.'); },
   });
   const result = await search({ queries: ['restaurants'], location: { lat: 51.48, lng: -0.14 } });
-  assert.equal(result.directoryVenues.length, 1);
+  assert.deepEqual(result.venues, []);
+  assert.equal(result.directoryVenues, undefined);
   assert.equal(result.quotaExceeded, true);
-  assert.equal(result.dataMode, 'directory');
+  assert.equal(result.dataMode, 'unavailable');
 });
 
 const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });

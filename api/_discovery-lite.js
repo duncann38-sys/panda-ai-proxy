@@ -82,49 +82,36 @@ function fresh(timestamp, now) {
   return Number.isFinite(timestamp) && timestamp <= now && now - timestamp < DISCOVERY_TTL_MS;
 }
 
+function isGoogleVenue(venue) {
+  return Boolean(venue && typeof venue.id === 'string'
+    && !venue.id.startsWith('osm:')
+    && !/openstreetmap/i.test(String(venue.source || ''))
+    && !/openstreetmap/i.test(String(venue.sourceAttribution || '')));
+}
+
 // Separate from partner records: Google refreshes must never overwrite billing,
 // paid placement, owner-supplied content or enrollment documents.
 export function createDiscoveryService({
   store, apiKey, consumeBudget, fetchImpl = fetch, now = Date.now, warn = console.warn,
-  persistFullContent = false, indexIdentities, readIndex, loadFallback,
+  persistFullContent = false, indexIdentities, readIndex,
 }) {
   const pending = new Map();
   const memory = new Map();
 
   async function localFallback(request, reason) {
     if (!persistFullContent) {
-      let baseline = {};
-      try { baseline = loadFallback ? await loadFallback(request) : {}; }
-      catch { warn('Independent local fallback unavailable.'); }
-      const alternatives = request.query.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
-        .split(/\band\b|\bor\b/).map(group => group.replace(/[^a-z0-9 ]/g, ' ').split(/\s+/)
-          .filter(word => word && !['near', 'nearby', 'me', 'in', 'london', 'venues', 'places', 'all',
-            'find', 'show', 'please', 'best', 'the', 'a', 'an', 'around'].includes(word))
-          .map(word => word.endsWith('ies') ? `${word.slice(0, -3)}y` : word.replace(/s$/, '')))
-        .filter(terms => terms.length);
-      const directory = (Array.isArray(baseline.directoryVenues) ? baseline.directoryVenues : [])
-        .filter(venue => String(venue.id).startsWith('osm:') && typeof venue.name === 'string'
-          && Number.isFinite(venue.lat) && Number.isFinite(venue.lng))
-        .map(venue => ({ ...venue, source: 'openstreetmap', detailsDeferred: true,
-          sourceQueries: ['OpenStreetMap directory'], photoCount: 0, photoName: undefined,
-          photoNames: undefined, rating: undefined, ratingCount: undefined, price: undefined, openNow: undefined,
-          cachedAt: venue.cachedAt || baseline.directory?.updatedAt || undefined }));
-      const previews = directory.filter(venue => {
-        const text = `${venue.name} ${venue.type} ${venue.primaryType || ''} ${(venue.types || []).join(' ')} ${(venue.categories || []).join(' ')} ${venue.address || ''}`
-          .toLowerCase().replaceAll('_', ' ');
-        return !alternatives.length || alternatives.some(terms => terms.every(term =>
-          text.includes(term) || text.replace(/\s/g, '').includes(term)));
-      });
       return {
-        ...baseline, directoryVenues: previews, venues: previews, nextPageToken: null, cached: true,
-        quotaExceeded: reason === 'quota', dataMode: previews.length ? 'directory' : 'unavailable',
+        venues: [], nextPageToken: null, cached: false,
+        quotaExceeded: reason === 'quota', dataMode: 'unavailable',
         fallbackReason: reason,
       };
     }
     const candidates = new Map();
     for (const entry of memory.values()) {
       if (fresh(entry.ts, now())) {
-        for (const venue of entry.venues) candidates.set(venue.id, { ...venue, cachedAt: entry.ts });
+        for (const venue of entry.venues) {
+          if (isGoogleVenue(venue)) candidates.set(venue.id, { ...venue, cachedAt: entry.ts });
+        }
       }
     }
     if (store) {
@@ -138,7 +125,7 @@ export function createDiscoveryService({
           .limit(300).get();
         for (const doc of snapshot.docs) {
           const data = doc.data();
-          if (fresh(data.last_updated, now())) {
+          if (fresh(data.last_updated, now()) && isGoogleVenue(data.venue)) {
             candidates.set(doc.id, { ...data.venue, cachedAt: data.last_updated });
           }
         }
@@ -171,7 +158,12 @@ export function createDiscoveryService({
     }
     if (saved && fresh(saved.ts, now()) && Array.isArray(saved.venues)) {
       memory.set(key, saved);
-      return { venues: located(saved.venues, request), nextPageToken: saved.nextPageToken || null, cached: true, dataMode: 'cached' };
+      return {
+        venues: located(saved.venues.filter(isGoogleVenue), request),
+        nextPageToken: saved.nextPageToken || null,
+        cached: true,
+        dataMode: 'cached',
+      };
     }
     // Fail closed for paid misses if a distributed counter cannot be enforced.
     if (!store || !apiKey) return localFallback(request, 'storage_or_provider_unavailable');
@@ -248,18 +240,14 @@ export function createDiscoveryService({
         }
       }));
       const venues = new Map();
-      const directoryVenues = new Map();
       results.forEach((result, index) => {
-        for (const venue of result.venues) {
+        for (const venue of result.venues.filter(isGoogleVenue)) {
           const existing = venues.get(venue.id);
-          venues.set(venue.id, { ...venue, sourceQueries: venue.source === 'openstreetmap'
-            ? venue.sourceQueries : [...new Set([...(existing?.sourceQueries || []), queries[index]])] });
+          venues.set(venue.id, { ...venue,
+            sourceQueries: [...new Set([...(existing?.sourceQueries || []), queries[index]])] });
         }
-        for (const venue of result.directoryVenues || []) directoryVenues.set(venue.id, venue);
       });
       return { venues: [...venues.values()], batched: true, nextPageToken: null,
-        directoryVenues: [...directoryVenues.values()],
-        directory: results.find(result => result.directory)?.directory,
         quotaExceeded: results.some(result => result.quotaExceeded),
         dataMode: new Set(results.map(result => result.dataMode)).size === 1
           ? results[0].dataMode : 'mixed' };
