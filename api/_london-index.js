@@ -212,7 +212,7 @@ export function createLondonSeeder({
   store, apiKey, consumeBudget, fetchImpl = fetch, now = Date.now,
   arrayUnion, tasks = LONDON_SEED_TASKS, pagesPerQuery = 1,
   paceMs = 3000, wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
-  dailyRequestLimit, customerReserve, planId = '', requirePhoto = false,
+  dailyRequestLimit, customerReserve, planId = '', indexPlanId = planId, requirePhoto = false,
 }) {
   const pageLimit = Math.max(1, Math.min(3, Math.floor(pagesPerQuery) || 1));
   return async ({ manual = false, maxRequests = 4 } = {}) => {
@@ -301,7 +301,7 @@ export function createLondonSeeder({
         const indexed = await indexPlaceIdentities(store, data.places || [], {
           now: now(), context: `${task.name}/${task.category}`, arrayUnion,
           requirePhoto,
-          seedPlan: planId,
+          seedPlan: indexPlanId,
         });
         state.indexed += indexed;
         const coverageKey = `${task.name}/${task.category}`;

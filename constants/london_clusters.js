@@ -19,7 +19,7 @@ const CATEGORY_QUERIES = {
   Shops: 'food shops delicatessens wine shops',
   'Places of Interest': 'tourist attractions museums landmarks',
 };
-export const LONDON_CLUSTERS = [
+const LONDON_BASE_CLUSTERS = [
   { name: 'battersea_nine_elms', lat: 51.4791, lng: -0.1420 },
   { name: 'clapham_wandsworth', lat: 51.4617, lng: -0.1382 },
   { name: 'soho_covent_garden', lat: 51.5137, lng: -0.1312 },
@@ -39,9 +39,27 @@ export const LONDON_CLUSTERS = [
   { name: 'stratford_city', lat: 51.5431, lng: -0.0072 },
   { name: 'kingston_surbiton', lat: 51.4122, lng: -0.3007 },
 ];
-export const LONDON_SEED_TASKS = LONDON_CLUSTERS.flatMap(cluster =>
+
+export const FOCUS_CLUSTERS = [
+  { name: 'battersea', lat: 51.4722, lng: -0.1668 },
+  { name: 'nine_elms', lat: 51.4814, lng: -0.1393 },
+  { name: 'chelsea', lat: 51.4875, lng: -0.1687 },
+  { name: 'victoria', lat: 51.4966, lng: -0.1437 },
+  { name: 'clapham', lat: 51.4636, lng: -0.1376 },
+];
+
+export const LONDON_CLUSTERS = [...LONDON_BASE_CLUSTERS, ...FOCUS_CLUSTERS];
+const tasksForClusters = clusters => clusters.flatMap(cluster =>
   PANDA_CATEGORIES.map(category => ({ ...cluster, category,
+    query: CATEGORY_QUERIES[category] || `${category} restaurants` })));
+
+// Keep the original plan stable so the 5,144 already indexed IDs remain active.
+export const LONDON_SEED_TASKS = tasksForClusters(LONDON_BASE_CLUSTERS);
+export const FOCUS_SEED_TASKS = PANDA_CATEGORIES.flatMap(category =>
+  FOCUS_CLUSTERS.map(cluster => ({ ...cluster, category,
     query: CATEGORY_QUERIES[category] || `${category} restaurants` })));
 // Never resume a cursor against a changed category/cluster ordering.
 export const LONDON_SEED_PLAN = 'google-photo-' + createHash('sha256')
   .update(JSON.stringify({ tasks: LONDON_SEED_TASKS, pages: 1 })).digest('hex').slice(0, 12);
+export const FOCUS_SEED_PLAN = 'google-photo-focus-' + createHash('sha256')
+  .update(JSON.stringify({ tasks: FOCUS_SEED_TASKS, pages: 3 })).digest('hex').slice(0, 12);

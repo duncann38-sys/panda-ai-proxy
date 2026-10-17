@@ -2,7 +2,9 @@
 import { verifySeedJob, SEED_SUBJECT, SEED_AUDIENCE } from '../api/_seed-job-auth.js';
 const audience = SEED_AUDIENCE;
 const backend = process.argv[2];
+const scope = process.argv[3] || 'standard';
 if (!backend || new URL(backend).protocol !== 'https:') throw new Error('Explicit HTTPS backend URL required.');
+if (!['standard', 'focus-areas'].includes(scope)) throw new Error('Unsupported seed scope.');
 async function token() {
   const url = new URL(process.env.ACTIONS_ID_TOKEN_REQUEST_URL);
   url.searchParams.set('audience', audience);
@@ -46,7 +48,7 @@ for (let chunk = 0; chunk < 500; chunk++) {
   }
   const response = await fetch(`${backend.replace(/\/$/, '')}/api/seed-london`, {
     method: 'POST', headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' },
-    body: '{}', signal: AbortSignal.timeout(55000),
+    body: JSON.stringify({ scope }), signal: AbortSignal.timeout(55000),
   });
   if (!response.ok) throw new Error(`Index job HTTP ${response.status}.`);
   const result = await response.json();

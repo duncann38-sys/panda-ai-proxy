@@ -4,7 +4,9 @@ import { testStore } from './index-store-fixture.mjs';
 import { indexPlaceIdentities, createLondonSeeder, ID_COLLECTION, JOB_COLLECTION } from '../api/_london-index.js';
 import { discoveryDailyLimit, TEMPORARY_INDEX_BOOST_END } from '../api/_index-budget.js';
 import { readIndexProgress } from '../api/_index-progress.js';
-import { LONDON_SEED_PLAN, LONDON_SEED_TASKS } from '../constants/london_clusters.js';
+import {
+  FOCUS_SEED_PLAN, FOCUS_SEED_TASKS, LONDON_SEED_PLAN, LONDON_SEED_TASKS,
+} from '../constants/london_clusters.js';
 
 const now = Date.parse('2026-10-16T20:00:00Z');
 const point = { id: 'ChIJphoto', location: { latitude: 51.48, longitude: -.14 },
@@ -58,4 +60,18 @@ test('progress verifies saved unique IDs, photo routes and coordinate expiry', a
   assert.equal(result.uniquePlaceIds, 1);
   assert.deepEqual(result.samples[0], { placeId: point.id, hasPhotoRoute: true,
     coordinatesValid: true, coordinatesUnexpired: true });
+});
+test('focused progress uses its own job cursor while counting IDs in the original active index', async () => {
+  const store = testStore();
+  await indexPlaceIdentities(store, [point], { now, requirePhoto: true, seedPlan: LONDON_SEED_PLAN });
+  store.table(JOB_COLLECTION).set(`2026-10-11_${FOCUS_SEED_PLAN}`, {
+    status: 'complete', taskIndex: FOCUS_SEED_TASKS.length, indexed: 1,
+    categoryCoverage: { 'battersea/All': { indexed: 1 } },
+  });
+  const result = await readIndexProgress(store, now, {
+    jobPlanId: FOCUS_SEED_PLAN, indexPlanId: LONDON_SEED_PLAN, tasks: FOCUS_SEED_TASKS,
+  });
+  assert.equal(result.planId, FOCUS_SEED_PLAN);
+  assert.equal(result.totalTasks, 165);
+  assert.equal(result.uniquePlaceIds, 1);
 });

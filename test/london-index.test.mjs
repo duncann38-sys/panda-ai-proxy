@@ -7,7 +7,10 @@ import {
   createLondonSeeder, indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage,
   londonClock, indexedVenueBaseline, providerQuotaInfo,
 } from '../api/_london-index.js';
-import { LONDON_CLUSTERS, LONDON_SEED_PLAN, PANDA_CATEGORIES, LONDON_SEED_TASKS } from '../constants/london_clusters.js';
+import {
+  FOCUS_CLUSTERS, FOCUS_SEED_PLAN, FOCUS_SEED_TASKS,
+  LONDON_CLUSTERS, LONDON_SEED_PLAN, PANDA_CATEGORIES, LONDON_SEED_TASKS,
+} from '../constants/london_clusters.js';
 import { verifySeedJob, SEED_AUDIENCE, SEED_SUBJECT } from '../api/_seed-job-auth.js';
 import { createDiscoveryService } from '../api/_discovery-lite.js';
 
@@ -29,13 +32,38 @@ function seedFixture(extra = {}) {
   });
   return { store, seed, calls: () => calls };
 }
-test('all 18 clusters and 33 app categories yield 594 tasks', () => {
-  assert.equal(LONDON_CLUSTERS.length, 18);
+test('the original 18-cluster plan stays stable while five focus clusters add all-category tasks', () => {
+  assert.equal(LONDON_CLUSTERS.length, 23);
+  assert.equal(FOCUS_CLUSTERS.length, 5);
   assert.equal(PANDA_CATEGORIES.length, 33);
   assert.equal(LONDON_SEED_TASKS.length, 594);
   assert.equal(new Set(LONDON_SEED_TASKS.map(t => `${t.name}/${t.category}`)).size, 594);
+  assert.equal(FOCUS_SEED_TASKS.length, 165);
+  assert.equal(new Set(FOCUS_SEED_TASKS.map(t => `${t.name}/${t.category}`)).size, 165);
+  assert.deepEqual(FOCUS_CLUSTERS.map(cluster => cluster.name),
+    ['battersea', 'nine_elms', 'chelsea', 'victoria', 'clapham']);
+  assert.ok(FOCUS_SEED_PLAN.startsWith('google-photo-focus-'));
   assert.doesNotMatch(INDEX_FIELDS, /displayName|formattedAddress|rating|currentOpeningHours/);
   assert.match(INDEX_FIELDS, /places.photos.name/);
+});
+test('focus-area pages add IDs under the existing feed plan with a separate resumable job', async () => {
+  const focusPoint = {
+    ...point,
+    photos: [{ name: `places/${point.id}/photos/cover` }],
+  };
+  const s = seedFixture({
+    tasks: [{ ...task, name: 'battersea' }],
+    planId: FOCUS_SEED_PLAN,
+    indexPlanId: LONDON_SEED_PLAN,
+    requirePhoto: true,
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ places: [focusPoint] }) }),
+  });
+  const result = await s.seed({ manual: true });
+  assert.equal(result.status, 'complete');
+  const identity = s.store.table(ID_COLLECTION).get(point.id);
+  assert.equal(identity.seed_plan, LONDON_SEED_PLAN);
+  assert.deepEqual(identity.searchContexts, ['battersea/restaurant']);
+  assert.ok(s.store.table(JOB_COLLECTION).has(`2026-10-18_${FOCUS_SEED_PLAN}`));
 });
 test('index writes whitelist IDs/coordinates and never overwrite paid records', async () => {
   const store = testStore();
