@@ -140,6 +140,55 @@ test('category feed refuses to serve fewer than 200 verified matches', async () 
   assert.equal(response.body.venues, undefined);
 });
 
+
+test('diagnostic hydration limit caps Google lookups and reports verified matches', async () => {
+  const identities = Array.from({ length: 200 }, (_, index) => ({
+    place_id: 'sports-' + index, lat: 51.46, lng: -0.16,
+  }));
+  let hydrationCount = 0;
+  const response = await buildIndexedFeedPage({
+    location: { lat: 51.46, lng: -0.16 },
+    category: 'Sports',
+    pageSize: 200,
+    maxHydrations: 37,
+  }, {
+    maxPageSize: 200,
+    readPage: async ({ pageSize }) => {
+      assert.equal(pageSize, 37);
+      return { identities, nextCursor: 'next-page', indexExhausted: false };
+    },
+    hydratePlace: async placeId => {
+      hydrationCount += 1;
+      return { venue: { id: placeId, name: 'Pub', photoName: 'photo', categories: [] } };
+    },
+  });
+
+  assert.equal(response.status, 503);
+  assert.equal(response.body.error, 'hydration_attempt_limit_reached');
+  assert.equal(response.body.hydrationAttempts, 37);
+  assert.equal(response.body.hydrationLimitReached, true);
+  assert.equal(response.body.matchedCount, 0);
+  assert.equal(hydrationCount, 37);
+});
+
+
+test('diagnostic hydration limit cannot exceed one 200-card page', async () => {
+  const response = await buildIndexedFeedPage({
+    location: { lat: 51.46, lng: -0.16 },
+    category: 'Sports',
+    pageSize: 200,
+    maxHydrations: 201,
+  }, {
+    maxPageSize: 200,
+    readPage: async () => { assert.fail('invalid cap must not read Firestore'); },
+    hydratePlace: async () => { assert.fail('invalid cap must not call Google'); },
+  });
+
+  assert.equal(response.status, 400);
+  assert.equal(response.body.error, 'invalid_hydration_limit');
+  assert.equal(response.body.maxAllowed, 200);
+});
+
 test('Planner All lookup can return a smaller nearby candidate set from the existing index', async () => {
   const identities = Array.from({ length: 24 }, (_, index) => ({
     place_id: `planner-${String(index).padStart(3, '0')}`,

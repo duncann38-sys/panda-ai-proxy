@@ -41,6 +41,13 @@ export async function buildIndexedFeedPage(body, {
     : Number.isFinite(parsedPageSize) && parsedPageSize > 0
       ? Math.max(1, Math.min(maxPageSize, Math.floor(parsedPageSize)))
       : maxPageSize;
+  const hasHydrationLimit = body.maxHydrations !== undefined && body.maxHydrations !== null;
+  const parsedHydrationLimit = Number(body.maxHydrations);
+  if (hasHydrationLimit && (!Number.isInteger(parsedHydrationLimit)
+    || parsedHydrationLimit < 1 || parsedHydrationLimit > maxPageSize)) {
+    return { status: 400, body: { error: 'invalid_hydration_limit', maxAllowed: maxPageSize } };
+  }
+  const maxHydrations = hasHydrationLimit ? parsedHydrationLimit : Number.POSITIVE_INFINITY;
   const parsedRadius = Number(body.radiusMeters);
   const radius = Number.isFinite(parsedRadius)
     ? Math.max(500, Math.min(20_000, parsedRadius))
@@ -51,12 +58,18 @@ export async function buildIndexedFeedPage(body, {
   const venues = [];
   let budgetExceeded = false;
   let providerFailure;
+  let hydrationAttempts = 0;
+  let hydrationLimitReached = false;
 
   // Continue through stored ID pages until the customer page is full or the
   // index, Google budget, or provider makes further hydration unavailable.
   // Failed category/photo checks never count toward the requested page size.
-  while (venues.length < requestedPageSize) {
-    const wanted = Math.min(maxPageSize, requestedPageSize - venues.length);
+  while (venues.length < requestedPageSize && hydrationAttempts < maxHydrations) {
+    const wanted = Math.min(
+      maxPageSize,
+      requestedPageSize - venues.length,
+      maxHydrations - hydrationAttempts,
+    );
     const page = await readPage({
       lat, lng, radius, category, cursor, pageSize: wanted,
     });
@@ -64,7 +77,9 @@ export async function buildIndexedFeedPage(body, {
     indexExhausted = page.indexExhausted;
     expandedArea ||= page.expandedArea === true;
     if (!page.identities.length) break;
-    const batch = await mapWithConcurrency(page.identities, 6, identity =>
+    const identities = page.identities.slice(0, wanted);
+    hydrationAttempts += identities.length;
+    const batch = await mapWithConcurrency(identities, 6, identity =>
       hydratePlace(identity.place_id, identity, category));
     for (const result of batch) {
       if (result.budgetExceeded) budgetExceeded = true;
@@ -84,6 +99,10 @@ export async function buildIndexedFeedPage(body, {
     }
     if (venues.length >= requestedPageSize || indexExhausted
       || budgetExceeded || [403, 429, 500, 502, 503, 504].includes(providerFailure?.providerStatus)) break;
+    if (hydrationAttempts >= maxHydrations && venues.length < requestedPageSize) {
+      hydrationLimitReached = true;
+      break;
+    }
   }
 
   const incompleteCategoryPage = isCategoryFeed && venues.length < requestedPageSize;
@@ -96,7 +115,9 @@ export async function buildIndexedFeedPage(body, {
       ? 'places_daily_budget_exceeded'
       : providerFailure
         ? 'places_card_lookup_failed'
-        : 'insufficient_google_verified_venues';
+        : hydrationLimitReached
+          ? 'hydration_attempt_limit_reached'
+          : 'insufficient_google_verified_venues';
     return {
       status,
       body: {
@@ -106,6 +127,7 @@ export async function buildIndexedFeedPage(body, {
         nextCursor: cursor,
         indexExhausted,
         expandedArea,
+        ...(hasHydrationLimit ? { hydrationAttempts, hydrationLimitReached } : {}),
       },
     };
   }
@@ -116,6 +138,7 @@ export async function buildIndexedFeedPage(body, {
       dataMode: 'indexed_feed_live_google_card_fields',
       expandedArea,
       pageSize: requestedPageSize,
+      ...(hasHydrationLimit ? { hydrationAttempts, hydrationLimitReached } : {}),
       ...(venues.length < requestedPageSize
         ? { partial: true, matchedCount: venues.length, requiredCount: requestedPageSize }
         : {}),
