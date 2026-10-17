@@ -3,13 +3,14 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'Preview tag counts or apply the additive Firestore migration'
+        description: 'Preview, apply source-context tags, or run a read-only type check'
         required: true
         type: choice
         default: dry-run
         options:
           - dry-run
           - apply
+          - verify
 permissions:
   contents: read
   id-token: write

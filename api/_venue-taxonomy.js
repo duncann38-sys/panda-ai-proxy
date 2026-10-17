@@ -16,6 +16,10 @@ const STRICT_CATEGORY_CATEGORIES = new Set([
   'Meat', 'Bar', 'Chicken', 'Pizza', 'Burgers', 'Dessert', 'Coffee',
   'Pubs', 'Clubs', 'Shops', 'Places of Interest',
 ]);
+export const TAXONOMY_VERIFICATION_CATEGORIES = [
+  'Breakfast', 'Brunch', 'Bottomless', 'Dinner', 'Drinks',
+  'Live Music', 'Lunch', 'Nightlife', 'Sports',
+];
 
 const toTag = value => value.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
 
@@ -86,6 +90,157 @@ export function deriveVenueTaxonomy(searchContexts) {
     },
     verification_required_contexts: [...verificationRequiredContexts].sort(),
     unknown_contexts: [...unknownContexts].sort(),
+  };
+}
+
+function stablePlaceHash(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = Math.imul(hash ^ value.charCodeAt(index), 16777619);
+  }
+  return hash >>> 0;
+}
+
+export function selectTaxonomyVerificationSample(documents, { perCategory = 25 } = {}) {
+  const candidateCategories = new Map();
+  for (const category of TAXONOMY_VERIFICATION_CATEGORIES) {
+    const ids = new Set();
+    for (const document of documents) {
+      const placeId = document.get('place_id') || document.id;
+      if (typeof placeId !== 'string' || !placeId) continue;
+      const contexts = document.get('panda_taxonomy_v1.verification_required_contexts');
+      if (!Array.isArray(contexts)) continue;
+      if (contexts.some(context => typeof context === 'string'
+        && context.slice(context.lastIndexOf('/') + 1) === category)) {
+        ids.add(placeId);
+      }
+    }
+    candidateCategories.set(category, [...ids]
+      .sort((a, b) => stablePlaceHash(a) - stablePlaceHash(b) || a.localeCompare(b))
+      .slice(0, perCategory));
+  }
+
+  const selected = new Map();
+  for (const [category, ids] of candidateCategories) {
+    for (const id of ids) {
+      if (!selected.has(id)) selected.set(id, { id, categories: [] });
+      selected.get(id).categories.push(category);
+    }
+  }
+  return {
+    candidates: [...selected.values()].slice(0, TAXONOMY_VERIFICATION_CATEGORIES.length * perCategory),
+    perCategory: Object.fromEntries(candidateCategories),
+  };
+}
+
+export function classifyGoogleTypeCategories(place) {
+  const types = new Set([
+    ...(Array.isArray(place?.types) ? place.types : []),
+    ...(typeof place?.primaryType === 'string' ? [place.primaryType] : []),
+  ].map(type => String(type).toLowerCase()));
+  const verified = [];
+  if (types.has('breakfast_restaurant')) verified.push('Breakfast');
+  if (types.has('brunch_restaurant')) verified.push('Brunch');
+  if (['bar', 'wine_bar', 'pub', 'night_club'].some(type => types.has(type))) {
+    verified.push('Drinks');
+  }
+  if (types.has('night_club') || types.has('dance_hall')) verified.push('Nightlife');
+  if (types.has('sports_bar')) verified.push('Sports');
+  if (types.has('live_music_venue') || types.has('concert_hall')) verified.push('Live Music');
+  // Google place types do not prove bottomless offers or meal service times.
+  return verified;
+}
+
+export async function verifyTaxonomyDetailsBatch({
+  ids,
+  store,
+  apiKey,
+  dailyLimit,
+  consumeBudget,
+  fetchImpl = fetch,
+  waitImpl = ms => new Promise(resolve => setTimeout(resolve, ms)),
+}) {
+  if (!Array.isArray(ids) || ids.length > 25) {
+    throw new Error('A live verification batch must contain at most 25 existing Place IDs.');
+  }
+  if (!apiKey) return { status: 'unavailable', providerStatus: 503, googleRequests: 0, writes: 0 };
+
+  const verificationByCategory = {};
+  for (const category of TAXONOMY_VERIFICATION_CATEGORIES) {
+    verificationByCategory[category] = { eligible: 0, responses: 0, typeMatches: 0 };
+  }
+  let googleRequests = 0;
+  let detailsResponses = 0;
+  let skipped = 0;
+  let providerStatus = null;
+  let status = 'complete';
+  const collection = store.collection(ID_COLLECTION);
+
+  for (const id of [...new Set(ids)]) {
+    if (typeof id !== 'string' || !id || id.length > 255 || id.includes('/')) {
+      skipped += 1;
+      continue;
+    }
+    const snapshot = await collection.doc(id).get();
+    if (!snapshot.exists || snapshot.get('place_id') !== id) {
+      skipped += 1;
+      continue;
+    }
+    const contexts = snapshot.get('panda_taxonomy_v1.verification_required_contexts');
+    const categories = TAXONOMY_VERIFICATION_CATEGORIES.filter(category =>
+      Array.isArray(contexts) && contexts.some(context => typeof context === 'string'
+        && context.slice(context.lastIndexOf('/') + 1) === category));
+    if (!categories.length) {
+      skipped += 1;
+      continue;
+    }
+    for (const category of categories) verificationByCategory[category].eligible += 1;
+
+    const reservedLimit = Math.max(0, dailyLimit - 500);
+    const budget = await consumeBudget(store, 'places', reservedLimit);
+    if (budget.enabled !== true || budget.shared !== true || budget.allowed !== true) {
+      status = 'budget_paused';
+      break;
+    }
+    if (googleRequests > 0) await waitImpl(100);
+    googleRequests += 1;
+    try {
+      const response = await fetchImpl(
+        `https://places.googleapis.com/v1/places/${encodeURIComponent(id)}`,
+        {
+          headers: {
+            'X-Goog-Api-Key': apiKey,
+            'X-Goog-FieldMask': 'id,primaryType,types',
+          },
+        },
+      );
+      if (!response.ok) {
+        providerStatus = response.status;
+        status = response.status === 429 ? 'quota_paused' : 'provider_blocked';
+        break;
+      }
+      const place = await response.json();
+      detailsResponses += 1;
+      const typeMatches = new Set(classifyGoogleTypeCategories(place));
+      for (const category of categories) {
+        verificationByCategory[category].responses += 1;
+        if (typeMatches.has(category)) verificationByCategory[category].typeMatches += 1;
+      }
+    } catch {
+      providerStatus = 'network';
+      status = 'provider_blocked';
+      break;
+    }
+  }
+
+  return {
+    status,
+    verificationByCategory,
+    googleRequests,
+    detailsResponses,
+    skipped,
+    providerStatus,
+    writes: 0,
   };
 }
 

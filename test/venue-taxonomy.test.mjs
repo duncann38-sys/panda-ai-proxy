@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  backfillVenueTaxonomyPage, deriveVenueTaxonomy,
+  backfillVenueTaxonomyPage, classifyGoogleTypeCategories, deriveVenueTaxonomy,
+  selectTaxonomyVerificationSample, verifyTaxonomyDetailsBatch,
 } from '../api/_venue-taxonomy.js';
 
 function migrationStore(records) {
@@ -164,4 +165,126 @@ test('dry-run is read-only and apply updates existing IDs in place without chang
     store.documents.get('ChIJMusic').panda_taxonomy_v1.verification_required_contexts,
     ['battersea/Live Music'],
   );
+});
+
+test('verification sample is balanced across broad contexts and never includes the generic All category', () => {
+  const documents = [
+    {
+      id: 'ChIJOne',
+      get: field => field === 'place_id' ? 'ChIJOne'
+        : field === 'panda_taxonomy_v1.verification_required_contexts'
+          ? ['battersea/Breakfast', 'battersea/Live Music', 'battersea/All'] : undefined,
+    },
+    {
+      id: 'ChIJTwo',
+      get: field => field === 'place_id' ? 'ChIJTwo'
+        : field === 'panda_taxonomy_v1.verification_required_contexts'
+          ? ['battersea/Bottomless'] : undefined,
+    },
+  ];
+  const sample = selectTaxonomyVerificationSample(documents, { perCategory: 1 });
+  assert.equal(sample.candidates.length, 2);
+  assert.deepEqual(sample.candidates.find(candidate => candidate.id === 'ChIJOne').categories,
+    ['Breakfast', 'Live Music']);
+  assert.deepEqual(sample.candidates.find(candidate => candidate.id === 'ChIJTwo').categories,
+    ['Bottomless']);
+  assert.equal(sample.perCategory.All, undefined);
+});
+
+test('live verification uses exact Google place types and does not infer offerings from names', () => {
+  assert.deepEqual(classifyGoogleTypeCategories({
+    primaryType: 'breakfast_restaurant',
+    types: ['restaurant', 'brunch_restaurant', 'night_club', 'sports_bar'],
+    displayName: { text: 'Bottomless Live Music' },
+  }), ['Breakfast', 'Brunch', 'Drinks', 'Nightlife', 'Sports']);
+  assert.deepEqual(classifyGoogleTypeCategories({
+    types: ['bar'],
+    displayName: { text: 'Bottomless Live Music' },
+  }), ['Drinks']);
+  assert.deepEqual(classifyGoogleTypeCategories({ types: ['restaurant'] }), []);
+});
+
+test('read-only verification uses only basic type fields and never stores the Google response', async () => {
+  const stored = {
+    ChIJSports: {
+      place_id: 'ChIJSports',
+      searchContexts: ['battersea/Sports'],
+      panda_taxonomy_v1: { verification_required_contexts: ['battersea/Sports'] },
+      partnerTier: 'banging',
+    },
+    ChIJBottomless: {
+      place_id: 'ChIJBottomless',
+      panda_taxonomy_v1: { verification_required_contexts: ['battersea/Bottomless'] },
+    },
+  };
+  const store = {
+    documents: structuredClone(stored),
+    collection() {
+      return {
+        doc(id) {
+          const data = store.documents[id];
+          return {
+            async get() {
+              return {
+                exists: Boolean(data),
+                get: field => field.split('.').reduce((value, key) => value?.[key], data),
+              };
+            },
+          };
+        },
+      };
+    },
+  };
+  const calls = [];
+  const result = await verifyTaxonomyDetailsBatch({
+    ids: ['ChIJSports', 'ChIJBottomless'],
+    store,
+    apiKey: 'test-only',
+    dailyLimit: 1000,
+    consumeBudget: async (_store, kind, limit) => {
+      assert.equal(kind, 'places');
+      assert.equal(limit, 500);
+      return { allowed: true, enabled: true, shared: true };
+    },
+    waitImpl: async ms => assert.equal(ms, 100),
+    fetchImpl: async (url, init) => {
+      calls.push({ url, headers: init.headers });
+      return new Response(JSON.stringify({ types: ['sports_bar'] }), { status: 200 });
+    },
+  });
+  assert.equal(result.status, 'complete');
+  assert.equal(result.googleRequests, 2);
+  assert.equal(result.writes, 0);
+  assert.equal(result.verificationByCategory.Sports.typeMatches, 1);
+  assert.equal(result.verificationByCategory.Bottomless.typeMatches, 0);
+  assert.deepEqual(Object.keys(calls[0].headers).sort(), ['X-Goog-Api-Key', 'X-Goog-FieldMask']);
+  assert.equal(calls[0].headers['X-Goog-FieldMask'], 'id,primaryType,types');
+  assert.equal(JSON.stringify(result).includes('ChIJSports'), false);
+  assert.deepEqual(store.documents, stored);
+});
+
+test('read-only verification fails closed when the shared daily budget is unavailable', async () => {
+  let requests = 0;
+  const result = await verifyTaxonomyDetailsBatch({
+    ids: ['ChIJOverBudget'],
+    store: {
+      collection: () => ({
+        doc: () => ({
+          get: async () => ({
+            exists: true,
+            get: field => field === 'place_id' ? 'ChIJOverBudget'
+              : field === 'panda_taxonomy_v1.verification_required_contexts'
+                ? ['battersea/Live Music'] : undefined,
+          }),
+        }),
+      }),
+    },
+    apiKey: 'test-only',
+    dailyLimit: 1000,
+    consumeBudget: async () => ({ allowed: false, enabled: true, shared: true }),
+    fetchImpl: async () => { requests += 1; return new Response('{}'); },
+  });
+  assert.equal(result.status, 'budget_paused');
+  assert.equal(result.googleRequests, 0);
+  assert.equal(requests, 0);
 });
