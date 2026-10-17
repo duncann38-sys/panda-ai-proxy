@@ -7,8 +7,7 @@ export const JOB_COLLECTION = 'panda_london_seed_jobs_v1';
 // Expire before the 30-day coordinate allowance; physical TTL cleanup is async.
 export const LOCATION_TTL_MS = 29 * 24 * 60 * 60 * 1000;
 export const INDEX_FIELDS = 'places.id,places.location,places.photos.name,nextPageToken';
-export const MAX_INDEXED_FEED_PAGE_SIZE = 30;
-export const CATEGORY_CANDIDATE_POOL_SIZE = 200;
+export const MAX_INDEXED_FEED_PAGE_SIZE = 200;
 
 export function providerQuotaInfo(error, retryAfter) {
   const metadata = (error?.details || []).map(detail => detail?.metadata || {})
@@ -151,15 +150,15 @@ function orderedSeedClusters(lat, lng, category, radius) {
  * are hydrated by the API route for this page and are never written back.
  */
 export async function nearbySeededPlacePage(store, {
-  lat, lng, radius = 6000, category = 'All', cursor = null, pageSize = 30,
+  lat, lng, radius = 6000, category = 'All', cursor = null, pageSize = MAX_INDEXED_FEED_PAGE_SIZE,
 }, now = Date.now()) {
   if (!store || !Number.isFinite(lat) || !Number.isFinite(lng)
     || !Number.isFinite(radius) || radius < 500 || radius > 20_000
     || typeof category !== 'string' || !category.trim() || category.length > 64) {
     throw new TypeError('A valid location, radius, and category are required.');
   }
-  const size = Math.max(1, Math.min(MAX_INDEXED_FEED_PAGE_SIZE, Math.floor(pageSize) || 30));
-  const poolTarget = category === 'All' ? size : Math.max(size, CATEGORY_CANDIDATE_POOL_SIZE);
+  const size = Math.max(1, Math.min(MAX_INDEXED_FEED_PAGE_SIZE, Math.floor(pageSize) || MAX_INDEXED_FEED_PAGE_SIZE));
+  const pageTarget = size;
   const roundedOrigin = `${lat.toFixed(4)},${lng.toFixed(4)}`;
   const decoded = decodePageCursor(cursor);
   const state = decoded?.version === 2
@@ -178,12 +177,12 @@ export async function nearbySeededPlacePage(store, {
     ...found.map(item => item.place_id),
   ]);
 
-  // Keep a 200-ID candidate pool for category tabs. Read only IDs and expiring
-  // coordinates here; category cards are hydrated from Google by the API route.
-  while (found.length < poolTarget && clusterIndex < clusters.length) {
+  // The stored-ID page and customer-facing page use the same size. Read only IDs
+  // and expiring coordinates here; Google card fields are hydrated by the API.
+  while (found.length < pageTarget && clusterIndex < clusters.length) {
     const cluster = clusters[clusterIndex];
     const context = `${cluster.name}/${category}`;
-    const queryLimit = Math.max(1, Math.min(100, poolTarget - found.length));
+    const queryLimit = Math.max(1, Math.min(100, pageTarget - found.length));
     let query = store.collection(ID_COLLECTION)
       .where('searchContexts', 'array-contains', context);
     if (lastDocId) {
@@ -230,7 +229,7 @@ export async function nearbySeededPlacePage(store, {
         clusterRank: clusterIndex,
         clusterName: cluster.name,
       });
-      if (found.length >= poolTarget) break;
+      if (found.length >= pageTarget) break;
     }
     if (snapshot.docs.length < queryLimit) {
       clusterIndex += 1;
@@ -249,7 +248,6 @@ export async function nearbySeededPlacePage(store, {
       seenIds: [...seen].slice(-2000),
     }) : null,
     indexExhausted: !hasMore,
-    candidatePoolCount: Math.min(found.length, poolTarget),
     expandedArea: category !== 'All' && identities.some(item => item.clusterRank > 0),
   };
 }

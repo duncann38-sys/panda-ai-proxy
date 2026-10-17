@@ -4,7 +4,7 @@ import { generateKeyPairSync, sign } from 'node:crypto';
 import { testStore } from './index-store-fixture.mjs';
 import {
   ID_COLLECTION, LOCATION_COLLECTION, JOB_COLLECTION, LOCATION_TTL_MS, INDEX_FIELDS,
-  MAX_INDEXED_FEED_PAGE_SIZE, CATEGORY_CANDIDATE_POOL_SIZE,
+  MAX_INDEXED_FEED_PAGE_SIZE,
   createLondonSeeder, indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage,
   londonClock, indexedVenueBaseline, providerQuotaInfo,
 } from '../api/_london-index.js';
@@ -161,7 +161,7 @@ test('indexed discovery returns nearby category IDs in small pages and skips exp
   assert.equal(second.identities[0].place_id, 'near-two');
   assert.notEqual(second.identities[0].place_id, first.identities[0].place_id);
 });
-test('category discovery keeps a 200-ID candidate pool but returns 30 venues per cursor page', async () => {
+test('category discovery returns a full 200-ID page and continues with the next stored IDs', async () => {
   const store = testStore();
   const seedContext = (clusterName, count, base) => {
     const cluster = LONDON_CLUSTERS.find(item => item.name === clusterName);
@@ -181,21 +181,19 @@ test('category discovery keeps a 200-ID candidate pool but returns 30 venues per
   seedContext('chelsea', 100, 'che');
   seedContext('nine_elms', 100, 'nine');
   const origin = LONDON_CLUSTERS.find(item => item.name === 'battersea');
-  assert.equal(MAX_INDEXED_FEED_PAGE_SIZE, 30);
-  assert.equal(CATEGORY_CANDIDATE_POOL_SIZE, 200);
+  assert.equal(MAX_INDEXED_FEED_PAGE_SIZE, 200);
   const first = await nearbySeededPlacePage(store, {
-    lat: origin.lat, lng: origin.lng, radius: 10_000, category: 'Italian', pageSize: 30,
+    lat: origin.lat, lng: origin.lng, radius: 10_000, category: 'Italian', pageSize: 200,
   }, now);
-  assert.equal(first.identities.length, 30);
-  assert.equal(first.candidatePoolCount, 200);
+  assert.equal(first.identities.length, 200);
   assert.ok(first.nextCursor);
   assert.deepEqual(first.identities.map(item => item.distanceMeters),
     [...first.identities].map(item => item.distanceMeters).sort((a, b) => a - b));
   const second = await nearbySeededPlacePage(store, {
-    lat: origin.lat, lng: origin.lng, radius: 10_000, category: 'Italian', pageSize: 30, cursor: first.nextCursor,
+    lat: origin.lat, lng: origin.lng, radius: 10_000, category: 'Italian', pageSize: 200, cursor: first.nextCursor,
   }, now);
-  assert.equal(second.identities.length, 30);
-  assert.equal(new Set([...first.identities, ...second.identities].map(item => item.place_id)).size, 60);
+  assert.equal(second.identities.length, 100);
+  assert.equal(new Set([...first.identities, ...second.identities].map(item => item.place_id)).size, 300);
 });
 
 test('category coverage audit flags 200 search-context candidates without claiming Google type verification', async () => {
@@ -232,7 +230,7 @@ test('category discovery excludes indexed candidates outside the requested walki
     });
   }
   const result = await nearbySeededPlacePage(store, {
-    lat: cluster.lat, lng: cluster.lng, radius: 3_200, category: 'Pubs', pageSize: 30,
+    lat: cluster.lat, lng: cluster.lng, radius: 3_200, category: 'Pubs', pageSize: 200,
   }, now);
   assert.deepEqual(result.identities.map(item => item.place_id), ['close-pub']);
 });
@@ -259,19 +257,13 @@ test('Mayfair category expansion returns the nearest indexed central venues firs
   const origin = LONDON_CLUSTERS.find(item => item.name === 'mayfair_marylebone');
   const first = await nearbySeededPlacePage(store, {
     lat: origin.lat, lng: origin.lng, radius: 10_000,
-    category: 'Coffee', pageSize: 30,
+    category: 'Coffee', pageSize: 200,
   }, now);
-  assert.equal(first.candidatePoolCount, 120);
-  assert.equal(first.identities.length, 30);
+  assert.equal(first.identities.length, 120);
+  assert.equal(first.indexExhausted, true);
   assert.deepEqual(first.identities.map(item => item.distanceMeters),
     [...first.identities].map(item => item.distanceMeters).sort((a, b) => a - b));
 
-  const second = await nearbySeededPlacePage(store, {
-    lat: origin.lat, lng: origin.lng, radius: 10_000,
-    category: 'Coffee', pageSize: 30, cursor: first.nextCursor,
-  }, now);
-  assert.deepEqual(second.identities.map(item => item.distanceMeters),
-    [...second.identities].map(item => item.distanceMeters).sort((a, b) => a - b));
 });
 test('a combined Battersea/Nine Elms focus cluster resolves to the nearest neighbourhood first', async () => {
   const store = testStore();

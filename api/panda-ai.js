@@ -12,6 +12,7 @@ import { quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailur
 import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-directory.js';
 import { createDiscoveryService } from './_discovery-lite.js';
 import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage, MAX_INDEXED_FEED_PAGE_SIZE } from './_london-index.js';
+import { buildIndexedFeedPage } from './_indexed-feed-page.js';
 import { googleCategoryTags } from './_google-category-tags.js';
 import {
   boundedInteger,
@@ -244,100 +245,13 @@ async function hydrateIndexedPlace(placeId, fallbackLocation, category) {
   }
 }
 
-async function mapWithConcurrency(items, concurrency, mapper) {
-  const results = new Array(items.length);
-  let nextIndex = 0;
-  const workerCount = Math.min(items.length, Math.max(1, concurrency));
-  await Promise.all(Array.from({ length: workerCount }, async () => {
-    while (nextIndex < items.length) {
-      const index = nextIndex++;
-      results[index] = await mapper(items[index], index);
-    }
-  }));
-  return results;
-}
-
-async function indexedFeedPage(body) {
-  const lat = Number(body.location?.lat);
-  const lng = Number(body.location?.lng);
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-    return { status: 400, body: { error: 'valid_location_required' } };
-  }
-  const category = typeof body.category === 'string' ? body.category.trim() : 'All';
-  const requestedPageSize = Math.max(1, Math.min(MAX_INDEXED_FEED_PAGE_SIZE, Number(body.pageSize) || 30));
-  const radius = Number.isFinite(Number(body.radiusMeters))
-    ? Math.max(500, Math.min(20_000, Number(body.radiusMeters)))
-    : (category === 'All' ? 6000 : 20_000);
-  let cursor = body.cursor || null;
-  let indexExhausted = false;
-  let candidatePoolCount = 0;
-  let expandedArea = false;
-  let attempts = 0;
-  const venues = [];
-  let budgetExceeded = false;
-  let providerFailure;
-
-  // Keep Google hydration bounded to the requested page size. Stale or
-  // mismatched IDs can make a page partial; the next cursor continues safely.
-  while (venues.length < requestedPageSize && attempts < requestedPageSize) {
-    const wanted = Math.min(MAX_INDEXED_FEED_PAGE_SIZE, requestedPageSize - venues.length);
-    const page = await nearbySeededPlacePage(db(), {
-      lat, lng, radius, category, cursor, pageSize: wanted,
-    });
-    cursor = page.nextCursor;
-    indexExhausted = page.indexExhausted;
-    candidatePoolCount = Math.max(candidatePoolCount, page.candidatePoolCount || 0);
-    expandedArea ||= page.expandedArea === true;
-    if (!page.identities.length) break;
-    attempts += page.identities.length;
-    const batch = await mapWithConcurrency(page.identities, 6, identity =>
-      hydrateIndexedPlace(identity.place_id, identity, category));
-    for (const result of batch) {
-      if (result.budgetExceeded) budgetExceeded = true;
-      if (result.providerFailed) {
-        providerFailure ||= result;
-        if ([403, 429, 500, 502, 503, 504].includes(result.providerStatus)) {
-          providerFailure = result;
-          break;
-        }
-      }
-      const matchesCategory = category === 'All'
-        || result.venue?.categories?.includes(category);
-      if (result.venue?.name && result.venue.photoName && matchesCategory) {
-        venues.push(result.venue);
-        if (venues.length >= requestedPageSize) break;
-      }
-    }
-    if (venues.length >= requestedPageSize || !cursor || indexExhausted
-      || budgetExceeded || [403, 429, 500, 502, 503, 504].includes(providerFailure?.providerStatus)) break;
-  }
-
-  if (!venues.length && (budgetExceeded || providerFailure)) {
-    const status = budgetExceeded ? 503
-      : providerFailure.providerStatus === 429 ? 429
-        : providerFailure.providerStatus === 403 ? 403 : 502;
-    return {
-      status,
-      body: {
-        error: budgetExceeded ? 'places_daily_budget_exceeded' : 'places_card_lookup_failed',
-        nextCursor: cursor,
-        indexExhausted,
-        candidatePoolCount,
-        expandedArea,
-      },
-    };
-  }
-  return {
-    status: 200,
-    body: {
-      venues, nextCursor: cursor, indexExhausted,
-      dataMode: 'indexed_candidates_live_card_fields',
-      candidatePoolCount,
-      expandedArea,
-      ...(budgetExceeded ? { budgetExceeded: true } : {}),
-      ...(venues.length < requestedPageSize ? { partial: true } : {}),
-    },
-  };
+function indexedFeedPage(body) {
+  return buildIndexedFeedPage(body, {
+    maxPageSize: MAX_INDEXED_FEED_PAGE_SIZE,
+    readPage: options => nearbySeededPlacePage(db(), options),
+    hydratePlace: (placeId, identity, category) =>
+      hydrateIndexedPlace(placeId, identity, category),
+  });
 }
 async function searchVenues(query,lat,lng,pageToken,openNow){
   if(!MAPS_KEY||!query) return {venues:[],nextPageToken:null};
