@@ -151,6 +151,115 @@ test('indexed discovery returns nearby category IDs in small pages and skips exp
   assert.equal(second.identities[0].place_id, 'near-two');
   assert.notEqual(second.identities[0].place_id, first.identities[0].place_id);
 });
+test('category discovery fills a 100-ID pool across Battersea neighbours and pages 30 in cluster priority order', async () => {
+  const store = testStore();
+  const seedContext = (clusterName, count, base) => {
+    const cluster = LONDON_CLUSTERS.find(item => item.name === clusterName);
+    assert.ok(cluster, `missing test cluster ${clusterName}`);
+    for (let index = 0; index < count; index += 1) {
+      const id = `${base}-${String(index).padStart(3, '0')}`;
+      store.table(ID_COLLECTION).set(id, {
+        place_id: id,
+        searchContexts: [`${clusterName}/Italian`],
+        seed_plan: LONDON_SEED_PLAN,
+        primary_photo_path: `/api/partner/venues/${id}/photos/0/image`,
+      });
+      store.table(LOCATION_COLLECTION).set(id, {
+        place_id: id, lat: cluster.lat, lng: cluster.lng,
+        expiresAt: new Date(now + LOCATION_TTL_MS),
+      });
+    }
+  };
+  seedContext('battersea', 40, 'bat');
+  seedContext('chelsea', 40, 'che');
+  seedContext('nine_elms', 40, 'nine');
+
+  const origin = LONDON_CLUSTERS.find(item => item.name === 'battersea');
+  const first = await nearbySeededPlacePage(store, {
+    lat: origin.lat, lng: origin.lng, radius: 500,
+    category: 'Italian', pageSize: 30,
+  }, now);
+  assert.equal(first.identities.length, 30);
+  assert.equal(first.candidatePoolCount, 100);
+  assert.ok(first.identities.every(item => item.clusterName === 'battersea'));
+
+  const second = await nearbySeededPlacePage(store, {
+    lat: origin.lat, lng: origin.lng, radius: 500,
+    category: 'Italian', pageSize: 30, cursor: first.nextCursor,
+  }, now);
+  assert.equal(second.identities.length, 30);
+  assert.deepEqual(second.identities.slice(0, 10).map(item => item.clusterName),
+    Array(10).fill('battersea'));
+  assert.deepEqual(second.identities.slice(10).map(item => item.clusterName),
+    Array(20).fill('chelsea'));
+  assert.equal(new Set([...first.identities, ...second.identities].map(item => item.place_id)).size, 60);
+});
+test('Mayfair category expansion uses the available central London index contexts before the wider city', async () => {
+  const store = testStore();
+  const seedContext = (clusterName, count, base) => {
+    const cluster = LONDON_CLUSTERS.find(item => item.name === clusterName);
+    assert.ok(cluster, `missing test cluster ${clusterName}`);
+    for (let index = 0; index < count; index += 1) {
+      const id = `${base}-${String(index).padStart(3, '0')}`;
+      store.table(ID_COLLECTION).set(id, {
+        place_id: id, searchContexts: [`${clusterName}/Coffee`],
+        seed_plan: LONDON_SEED_PLAN,
+      });
+      store.table(LOCATION_COLLECTION).set(id, {
+        place_id: id, lat: cluster.lat, lng: cluster.lng,
+        expiresAt: new Date(now + LOCATION_TTL_MS),
+      });
+    }
+  };
+  seedContext('mayfair_marylebone', 40, 'mayfair');
+  seedContext('soho_covent_garden', 40, 'soho');
+  seedContext('chelsea_kensington', 40, 'knightsbridge-proxy');
+  const origin = LONDON_CLUSTERS.find(item => item.name === 'mayfair_marylebone');
+  const first = await nearbySeededPlacePage(store, {
+    lat: origin.lat, lng: origin.lng, radius: 500,
+    category: 'Coffee', pageSize: 30,
+  }, now);
+  assert.equal(first.candidatePoolCount, 100);
+  assert.equal(first.identities.length, 30);
+  assert.ok(first.identities.every(item => item.clusterName === 'mayfair_marylebone'));
+
+  const second = await nearbySeededPlacePage(store, {
+    lat: origin.lat, lng: origin.lng, radius: 500,
+    category: 'Coffee', pageSize: 30, cursor: first.nextCursor,
+  }, now);
+  assert.deepEqual(second.identities.slice(0, 10).map(item => item.clusterName),
+    Array(10).fill('mayfair_marylebone'));
+  assert.deepEqual(second.identities.slice(10).map(item => item.clusterName),
+    Array(20).fill('soho_covent_garden'));
+});
+test('a combined Battersea/Nine Elms focus cluster resolves to the nearest neighbourhood first', async () => {
+  const store = testStore();
+  for (const name of ['battersea', 'nine_elms']) {
+    const cluster = LONDON_CLUSTERS.find(item => item.name === name);
+    const id = `${name}-first`;
+    store.table(ID_COLLECTION).set(id, {
+      place_id: id,
+      searchContexts: [`${name}/Pubs`],
+      seed_plan: LONDON_SEED_PLAN,
+    });
+    store.table(LOCATION_COLLECTION).set(id, {
+      place_id: id,
+      lat: cluster.lat,
+      lng: cluster.lng,
+      expiresAt: new Date(now + LOCATION_TTL_MS),
+    });
+  }
+  const focus = LONDON_CLUSTERS.find(item => item.name === 'battersea_nine_elms');
+  const page = await nearbySeededPlacePage(store, {
+    lat: focus.lat,
+    lng: focus.lng,
+    radius: 500,
+    category: 'Pubs',
+    pageSize: 1,
+  }, now);
+  assert.equal(page.identities[0].place_id, 'nine_elms-first');
+  assert.equal(page.identities[0].clusterName, 'nine_elms');
+});
 test('one seed page is checkpointed and a completed round is idempotent', async () => {
   const s = seedFixture();
   assert.equal((await s.seed()).status, 'complete');

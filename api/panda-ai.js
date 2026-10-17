@@ -285,6 +285,19 @@ async function hydrateIndexedPlace(placeId, fallbackLocation, category) {
   }
 }
 
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(items.length, Math.max(1, concurrency));
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex++;
+      results[index] = await mapper(items[index], index);
+    }
+  }));
+  return results;
+}
+
 async function indexedFeedPage(body) {
   const lat = Number(body.location?.lat);
   const lng = Number(body.location?.lng);
@@ -292,23 +305,58 @@ async function indexedFeedPage(body) {
     return { status: 400, body: { error: 'valid_location_required' } };
   }
   const category = typeof body.category === 'string' ? body.category.trim() : 'All';
-  const page = await nearbySeededPlacePage(db(), {
-    lat, lng,
-    radius: Number.isFinite(Number(body.radiusMeters))
-      ? Math.max(500, Math.min(20_000, Number(body.radiusMeters)))
-      : (category === 'All' ? 6000 : 20_000),
-    category,
-    cursor: body.cursor || null,
-    pageSize: Math.max(1, Math.min(6, Number(body.pageSize) || 6)),
-  });
-  const hydrated = await Promise.all(page.identities.map(identity =>
-    hydrateIndexedPlace(identity.place_id, identity, category)));
-  const venues = hydrated.flatMap(result => result.venue?.name && result.venue.photoName
-    ? [{ ...result.venue, primaryPhotoPath: page.identities.find(identity =>
-        identity.place_id === result.venue.id)?.primary_photo_path }]
-    : []);
-  const budgetExceeded = hydrated.some(result => result.budgetExceeded);
-  const providerFailure = hydrated.find(result => result.providerFailed);
+  const requestedPageSize = Math.max(1, Math.min(30, Number(body.pageSize) || 30));
+  const radius = Number.isFinite(Number(body.radiusMeters))
+    ? Math.max(500, Math.min(20_000, Number(body.radiusMeters)))
+    : (category === 'All' ? 6000 : 20_000);
+  let cursor = body.cursor || null;
+  let indexExhausted = false;
+  let candidatePoolCount = 0;
+  let expandedArea = false;
+  let attempts = 0;
+  const venues = [];
+  let budgetExceeded = false;
+  let providerFailure;
+
+  // Some indexed IDs can go stale or lose their cover photo. Hydrate forward
+  // from the same cursor until the page is full, the index ends, or the
+  // bounded two-page recovery budget is reached.
+  while (venues.length < requestedPageSize && attempts < requestedPageSize * 2) {
+    const wanted = Math.min(30, requestedPageSize - venues.length);
+    const page = await nearbySeededPlacePage(db(), {
+      lat, lng, radius, category, cursor, pageSize: wanted,
+    });
+    cursor = page.nextCursor;
+    indexExhausted = page.indexExhausted;
+    candidatePoolCount = Math.max(candidatePoolCount, page.candidatePoolCount || 0);
+    expandedArea ||= page.expandedArea === true;
+    if (!page.identities.length) break;
+    attempts += page.identities.length;
+    const batch = await mapWithConcurrency(page.identities, 6, identity =>
+      hydrateIndexedPlace(identity.place_id, identity, category));
+    const identityById = new Map(page.identities.map(identity => [identity.place_id, identity]));
+    for (const result of batch) {
+      if (result.budgetExceeded) budgetExceeded = true;
+      if (result.providerFailed) {
+        providerFailure ||= result;
+        if ([403, 429, 500, 502, 503, 504].includes(result.providerStatus)) {
+          providerFailure = result;
+          break;
+        }
+      }
+      if (result.venue?.name && result.venue.photoName) {
+        const identity = identityById.get(result.venue.id);
+        venues.push({
+          ...result.venue,
+          primaryPhotoPath: identity?.primary_photo_path,
+        });
+        if (venues.length >= requestedPageSize) break;
+      }
+    }
+    if (venues.length >= requestedPageSize || !cursor || indexExhausted
+      || budgetExceeded || [403, 429, 500, 502, 503, 504].includes(providerFailure?.providerStatus)) break;
+  }
+
   if (!venues.length && (budgetExceeded || providerFailure)) {
     const status = budgetExceeded ? 503
       : providerFailure.providerStatus === 429 ? 429
@@ -317,18 +365,22 @@ async function indexedFeedPage(body) {
       status,
       body: {
         error: budgetExceeded ? 'places_daily_budget_exceeded' : 'places_card_lookup_failed',
-        nextCursor: page.nextCursor,
-        indexExhausted: page.indexExhausted,
+        nextCursor: cursor,
+        indexExhausted,
+        candidatePoolCount,
+        expandedArea,
       },
     };
   }
   return {
     status: 200,
     body: {
-      venues, nextCursor: page.nextCursor, indexExhausted: page.indexExhausted,
+      venues, nextCursor: cursor, indexExhausted,
       dataMode: 'indexed_candidates_live_card_fields',
+      candidatePoolCount,
+      expandedArea,
       ...(budgetExceeded ? { budgetExceeded: true } : {}),
-      ...(hydrated.some(result => result.providerFailed) ? { partial: true } : {}),
+      ...(venues.length < requestedPageSize ? { partial: true } : {}),
     },
   };
 }

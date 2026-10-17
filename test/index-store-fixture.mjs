@@ -10,17 +10,19 @@ export function testStore() {
   return {
     table,
     collection(name) {
-      const query = (conditions = [], maximum = Infinity) => ({
+      const query = (conditions = [], maximum = Infinity, afterId = null) => ({
         doc(id) { return {
           collection: name, id,
           async get() {
             const data = table(name).get(id);
-            return { exists: data != null, data: () => data };
+            return { exists: data != null, id, data: () => data };
           },
         }; },
-        where(field, op, value) { return query([...conditions, [field, op, value]], maximum); },
-        limit(count) { return query(conditions, count); },
-        async get() { return { docs: [...table(name)].filter(([, row]) => conditions.every(([f, op, value]) =>
+        where(field, op, value) { return query([...conditions, [field, op, value]], maximum, afterId); },
+        limit(count) { return query(conditions, count, afterId); },
+        startAfter(snapshot) { return query(conditions, maximum, snapshot?.id || null); },
+        async get() { return { docs: [...table(name)].sort(([a], [b]) => a.localeCompare(b))
+          .filter(([id, row]) => (!afterId || id.localeCompare(afterId) > 0) && conditions.every(([f, op, value]) =>
           op === '>=' ? row[f] >= value : op === '<=' ? row[f] <= value
             : op === 'array-contains' ? Array.isArray(row[f]) && row[f].includes(value)
               : row[f] === value))

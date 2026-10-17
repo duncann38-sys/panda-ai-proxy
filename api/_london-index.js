@@ -75,7 +75,7 @@ function encodePageCursor(value) {
   return Buffer.from(JSON.stringify(value)).toString('base64url');
 }
 function decodePageCursor(value) {
-  if (!value || typeof value !== 'string' || value.length > 12_000) return null;
+  if (!value || typeof value !== 'string' || value.length > 100_000) return null;
   try {
     const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
     return parsed && typeof parsed === 'object' ? parsed : null;
@@ -84,78 +84,173 @@ function decodePageCursor(value) {
   }
 }
 
+const AREA_CLUSTER_ORDER = {
+  battersea: [
+    'battersea', 'chelsea', 'nine_elms', 'victoria', 'clapham',
+    'battersea_nine_elms', 'chelsea_kensington', 'clapham_wandsworth',
+  ],
+  nine_elms: [
+    'nine_elms', 'battersea', 'chelsea', 'victoria', 'clapham',
+    'battersea_nine_elms', 'chelsea_kensington', 'clapham_wandsworth',
+  ],
+  chelsea: [
+    'chelsea', 'victoria', 'battersea', 'nine_elms', 'clapham',
+    'chelsea_kensington', 'battersea_nine_elms', 'clapham_wandsworth',
+  ],
+  victoria: [
+    'victoria', 'battersea', 'nine_elms', 'chelsea', 'clapham',
+    'battersea_nine_elms', 'chelsea_kensington', 'clapham_wandsworth',
+  ],
+  clapham: [
+    'clapham', 'battersea', 'nine_elms', 'chelsea', 'victoria',
+    'clapham_wandsworth', 'battersea_nine_elms', 'chelsea_kensington',
+  ],
+  mayfair_marylebone: [
+    'mayfair_marylebone', 'soho_covent_garden', 'chelsea_kensington',
+    'camden_kentish_town', 'southbank_london_bridge',
+  ],
+  soho_covent_garden: [
+    'soho_covent_garden', 'mayfair_marylebone', 'southbank_london_bridge',
+    'chelsea_kensington', 'camden_kentish_town',
+  ],
+};
+const PRIMARY_AREA_ALIASES = {
+  battersea_nine_elms: ['battersea', 'nine_elms'],
+  chelsea_kensington: ['chelsea', 'victoria'],
+  clapham_wandsworth: ['clapham', 'battersea'],
+};
+
+function orderedSeedClusters(lat, lng, category, radius) {
+  const nearestFirst = LONDON_CLUSTERS
+    .map(cluster => ({
+      ...cluster,
+      centerDistance: distanceMeters(lat, lng, cluster.lat, cluster.lng),
+    }))
+    .sort((a, b) => a.centerDistance - b.centerDistance);
+  if (category === 'All') {
+    return nearestFirst.filter(cluster => cluster.centerDistance <= radius + 3000);
+  }
+  const byName = new Map(nearestFirst.map(cluster => [cluster.name, cluster]));
+  const nearest = nearestFirst[0];
+  const primaryName = (PRIMARY_AREA_ALIASES[nearest?.name] || [])
+    .map(name => byName.get(name))
+    .filter(Boolean)
+    .sort((a, b) => a.centerDistance - b.centerDistance)[0]?.name || nearest?.name;
+  const preferredNames = AREA_CLUSTER_ORDER[primaryName] || [primaryName];
+  const preferred = [...new Set(preferredNames)]
+    .flatMap(name => byName.has(name) ? [byName.get(name)] : []);
+  const preferredSet = new Set(preferred.map(cluster => cluster.name));
+  return [...preferred, ...nearestFirst.filter(cluster => !preferredSet.has(cluster.name))];
+}
+
 /**
  * Reads a small, category-tagged page from the permitted Place ID index.
  * Only IDs and expiring coordinates are read from Firestore; Google fields
  * are hydrated by the API route for this page and are never written back.
  */
 export async function nearbySeededPlacePage(store, {
-  lat, lng, radius = 6000, category = 'All', cursor = null, pageSize = 6,
+  lat, lng, radius = 6000, category = 'All', cursor = null, pageSize = 30,
 }, now = Date.now()) {
   if (!store || !Number.isFinite(lat) || !Number.isFinite(lng)
     || !Number.isFinite(radius) || radius < 500 || radius > 20_000
     || typeof category !== 'string' || !category.trim() || category.length > 64) {
     throw new TypeError('A valid location, radius, and category are required.');
   }
-  const size = Math.max(1, Math.min(8, Math.floor(pageSize) || 6));
+  const size = Math.max(1, Math.min(30, Math.floor(pageSize) || 30));
+  const poolTarget = category === 'All' ? size : Math.max(size, 100);
   const roundedOrigin = `${lat.toFixed(4)},${lng.toFixed(4)}`;
   const decoded = decodePageCursor(cursor);
-  const state = decoded?.category === category && decoded?.origin === roundedOrigin
+  const state = decoded?.version === 2
+    && decoded?.category === category && decoded?.origin === roundedOrigin
     ? decoded
-    : { clusterIndex: 0, pending: [] };
-  const nearbyClusters = LONDON_CLUSTERS
-    .map(cluster => ({ ...cluster, centerDistance: distanceMeters(lat, lng, cluster.lat, cluster.lng) }))
-    .filter(cluster => cluster.centerDistance <= radius + 3000)
-    .sort((a, b) => a.centerDistance - b.centerDistance);
-  let clusterIndex = Math.max(0, Math.min(nearbyClusters.length, Number(state.clusterIndex) || 0));
+    : { clusterIndex: 0, lastDocId: null, pending: [], seenIds: [] };
+  const clusters = orderedSeedClusters(lat, lng, category, radius);
+  let clusterIndex = Math.max(0, Math.min(clusters.length, Number(state.clusterIndex) || 0));
+  let lastDocId = typeof state.lastDocId === 'string' ? state.lastDocId : null;
   const found = Array.isArray(state.pending)
     ? state.pending.filter(item => typeof item?.place_id === 'string'
       && Number.isFinite(item.lat) && Number.isFinite(item.lng))
     : [];
-  const seen = new Set(found.map(item => item.place_id));
+  const seen = new Set([
+    ...(Array.isArray(state.seenIds) ? state.seenIds.filter(id => typeof id === 'string') : []),
+    ...found.map(item => item.place_id),
+  ]);
 
-  // Pull from the nearest cluster contexts until there is enough to return
-  // a useful page plus a small look-ahead for distance ordering.
-  while (found.length < size * 2 && clusterIndex < nearbyClusters.length) {
-    const cluster = nearbyClusters[clusterIndex++];
+  // Keep a 100-ID candidate pool for category tabs. Read only IDs and expiring
+  // coordinates here; category cards are hydrated from Google by the API route.
+  while (found.length < poolTarget && clusterIndex < clusters.length) {
+    const cluster = clusters[clusterIndex];
     const context = `${cluster.name}/${category}`;
-    const snapshot = await store.collection(ID_COLLECTION)
-      .where('searchContexts', 'array-contains', context).limit(20).get();
-    const positions = await Promise.all(snapshot.docs.map(async identityDoc => {
+    const queryLimit = Math.max(1, Math.min(100, poolTarget - found.length));
+    let query = store.collection(ID_COLLECTION)
+      .where('searchContexts', 'array-contains', context);
+    if (lastDocId) {
+      const afterDoc = await store.collection(ID_COLLECTION).doc(lastDocId).get();
+      if (afterDoc.exists && typeof query.startAfter === 'function') {
+        query = query.startAfter(afterDoc);
+      } else if (typeof query.startAfter !== 'function') {
+        throw new Error('Indexed cursor pagination is unavailable.');
+      } else {
+        lastDocId = null;
+      }
+    }
+    const snapshot = await query.limit(queryLimit).get();
+    if (!snapshot.docs.length) {
+      clusterIndex += 1;
+      lastDocId = null;
+      continue;
+    }
+    lastDocId = snapshot.docs[snapshot.docs.length - 1].id;
+    const positionRefs = snapshot.docs.map(identityDoc =>
+      store.collection(LOCATION_COLLECTION).doc(identityDoc.id));
+    const positionDocs = typeof store.getAll === 'function'
+      ? await store.getAll(...positionRefs)
+      : await Promise.all(positionRefs.map(ref => ref.get()));
+    for (let index = 0; index < snapshot.docs.length; index += 1) {
+      const identityDoc = snapshot.docs[index];
+      if (seen.has(identityDoc.id)) continue;
+      seen.add(identityDoc.id);
       const identity = identityDoc.data();
-      if (identity.seed_plan !== LONDON_SEED_PLAN || seen.has(identityDoc.id)) return null;
-      const positionDoc = await store.collection(LOCATION_COLLECTION).doc(identityDoc.id).get();
-      if (!positionDoc.exists) return null;
+      if (identity.seed_plan !== LONDON_SEED_PLAN) continue;
+      const positionDoc = positionDocs[index];
+      if (!positionDoc?.exists) continue;
       const position = positionDoc.data();
       const expiry = position.expiresAt?.toMillis?.() ?? new Date(position.expiresAt).getTime();
       if (!Number.isFinite(expiry) || expiry <= now
-        || !Number.isFinite(position.lat) || !Number.isFinite(position.lng)) return null;
+        || !Number.isFinite(position.lat) || !Number.isFinite(position.lng)) continue;
       const distance = distanceMeters(lat, lng, position.lat, position.lng);
-      if (!Number.isFinite(distance) || distance > radius) return null;
-      return {
+      if (!Number.isFinite(distance) || (category === 'All' && distance > radius)) continue;
+      found.push({
         place_id: identityDoc.id, lat: position.lat, lng: position.lng,
         distanceMeters: Math.round(distance),
         primary_photo_path: identity.primary_photo_path
           || `/api/partner/venues/${encodeURIComponent(identityDoc.id)}/photos/0/image`,
-      };
-    }));
-    for (const position of positions) {
-      if (!position || seen.has(position.place_id)) continue;
-      seen.add(position.place_id);
-      found.push(position);
+        clusterRank: clusterIndex,
+        clusterName: cluster.name,
+      });
+      if (found.length >= poolTarget) break;
+    }
+    if (snapshot.docs.length < queryLimit) {
+      clusterIndex += 1;
+      lastDocId = null;
     }
   }
 
-  found.sort((a, b) => a.distanceMeters - b.distanceMeters);
+  found.sort((a, b) => category === 'All'
+    ? a.distanceMeters - b.distanceMeters
+    : a.clusterRank - b.clusterRank || a.distanceMeters - b.distanceMeters);
   const identities = found.slice(0, size);
   const pending = found.slice(size);
-  const hasMore = pending.length > 0 || clusterIndex < nearbyClusters.length;
+  const hasMore = pending.length > 0 || clusterIndex < clusters.length;
   return {
     identities,
     nextCursor: hasMore ? encodePageCursor({
-      category, origin: roundedOrigin, clusterIndex, pending,
+      version: 2, category, origin: roundedOrigin, clusterIndex, lastDocId, pending,
+      seenIds: [...seen].slice(-2000),
     }) : null,
     indexExhausted: !hasMore,
+    candidatePoolCount: Math.min(found.length, poolTarget),
+    expandedArea: category !== 'All' && identities.some(item => item.clusterRank > 0),
   };
 }
 
