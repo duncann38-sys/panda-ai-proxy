@@ -4,6 +4,7 @@ import { generateKeyPairSync, sign } from 'node:crypto';
 import { testStore } from './index-store-fixture.mjs';
 import {
   ID_COLLECTION, LOCATION_COLLECTION, JOB_COLLECTION, LOCATION_TTL_MS, INDEX_FIELDS,
+  MAX_INDEXED_FEED_PAGE_SIZE,
   createLondonSeeder, indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage,
   londonClock, indexedVenueBaseline, providerQuotaInfo,
 } from '../api/_london-index.js';
@@ -153,7 +154,7 @@ test('indexed discovery returns nearby category IDs in small pages and skips exp
   assert.equal(second.identities[0].place_id, 'near-two');
   assert.notEqual(second.identities[0].place_id, first.identities[0].place_id);
 });
-test('category discovery fills a 100-ID pool and pages venues in distance order', async () => {
+test('category discovery returns up to 200 indexed venues per cursor page in distance order', async () => {
   const store = testStore();
   const seedContext = (clusterName, count, base) => {
     const cluster = LONDON_CLUSTERS.find(item => item.name === clusterName);
@@ -172,28 +173,29 @@ test('category discovery fills a 100-ID pool and pages venues in distance order'
       });
     }
   };
-  seedContext('battersea', 40, 'bat');
-  seedContext('chelsea', 40, 'che');
-  seedContext('nine_elms', 40, 'nine');
+  seedContext('battersea', 100, 'bat');
+  seedContext('chelsea', 100, 'che');
+  seedContext('nine_elms', 100, 'nine');
 
   const origin = LONDON_CLUSTERS.find(item => item.name === 'battersea');
+  assert.equal(MAX_INDEXED_FEED_PAGE_SIZE, 200);
   const first = await nearbySeededPlacePage(store, {
     lat: origin.lat, lng: origin.lng, radius: 10_000,
-    category: 'Italian', pageSize: 30,
+    category: 'Italian', pageSize: 250,
   }, now);
-  assert.equal(first.identities.length, 30);
-  assert.equal(first.candidatePoolCount, 100);
+  assert.equal(first.identities.length, 200);
+  assert.equal(first.candidatePoolCount, 200);
   assert.deepEqual(first.identities.map(item => item.distanceMeters),
     [...first.identities].map(item => item.distanceMeters).sort((a, b) => a - b));
 
   const second = await nearbySeededPlacePage(store, {
     lat: origin.lat, lng: origin.lng, radius: 10_000,
-    category: 'Italian', pageSize: 30, cursor: first.nextCursor,
+    category: 'Italian', pageSize: 200, cursor: first.nextCursor,
   }, now);
-  assert.equal(second.identities.length, 30);
+  assert.equal(second.identities.length, 100);
   assert.deepEqual(second.identities.map(item => item.distanceMeters),
     [...second.identities].map(item => item.distanceMeters).sort((a, b) => a - b));
-  assert.equal(new Set([...first.identities, ...second.identities].map(item => item.place_id)).size, 60);
+  assert.equal(new Set([...first.identities, ...second.identities].map(item => item.place_id)).size, 300);
 });
 test('category discovery excludes indexed candidates outside the requested walking radius', async () => {
   const store = testStore();
@@ -236,7 +238,7 @@ test('Mayfair category expansion returns the nearest indexed central venues firs
     lat: origin.lat, lng: origin.lng, radius: 10_000,
     category: 'Coffee', pageSize: 30,
   }, now);
-  assert.equal(first.candidatePoolCount, 100);
+  assert.equal(first.candidatePoolCount, 120);
   assert.equal(first.identities.length, 30);
   assert.deepEqual(first.identities.map(item => item.distanceMeters),
     [...first.identities].map(item => item.distanceMeters).sort((a, b) => a - b));

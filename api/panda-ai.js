@@ -11,7 +11,7 @@ import { applyGuard } from './_guard.js';
 import { quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues } from './_panda-chat-policy.js';
 import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-directory.js';
 import { createDiscoveryService } from './_discovery-lite.js';
-import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage } from './_london-index.js';
+import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage, MAX_INDEXED_FEED_PAGE_SIZE } from './_london-index.js';
 import { googleCategoryTags } from './_google-category-tags.js';
 import {
   boundedInteger,
@@ -264,7 +264,7 @@ async function indexedFeedPage(body) {
     return { status: 400, body: { error: 'valid_location_required' } };
   }
   const category = typeof body.category === 'string' ? body.category.trim() : 'All';
-  const requestedPageSize = Math.max(1, Math.min(30, Number(body.pageSize) || 30));
+  const requestedPageSize = Math.max(1, Math.min(MAX_INDEXED_FEED_PAGE_SIZE, Number(body.pageSize) || 30));
   const radius = Number.isFinite(Number(body.radiusMeters))
     ? Math.max(500, Math.min(20_000, Number(body.radiusMeters)))
     : (category === 'All' ? 6000 : 20_000);
@@ -277,11 +277,10 @@ async function indexedFeedPage(body) {
   let budgetExceeded = false;
   let providerFailure;
 
-  // Some indexed IDs can go stale or lose their cover photo. Hydrate forward
-  // from the same cursor until the page is full, the index ends, or the
-  // bounded two-page recovery budget is reached.
-  while (venues.length < requestedPageSize && attempts < requestedPageSize * 2) {
-    const wanted = Math.min(30, requestedPageSize - venues.length);
+  // Keep Google hydration bounded to the requested page size. Stale or
+  // mismatched IDs can make a page partial; the next cursor continues safely.
+  while (venues.length < requestedPageSize && attempts < requestedPageSize) {
+    const wanted = Math.min(MAX_INDEXED_FEED_PAGE_SIZE, requestedPageSize - venues.length);
     const page = await nearbySeededPlacePage(db(), {
       lat, lng, radius, category, cursor, pageSize: wanted,
     });
