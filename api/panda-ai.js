@@ -12,7 +12,7 @@ import { quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailur
 import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-directory.js';
 import { createDiscoveryService } from './_discovery-lite.js';
 import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage, MAX_INDEXED_FEED_PAGE_SIZE } from './_london-index.js';
-import { buildIndexedFeedPage } from './_indexed-feed-page.js';
+import { buildIndexedFeedPage, buildIndexedIdCandidatePage } from './_indexed-feed-page.js';
 import { googleCategoryTags } from './_google-category-tags.js';
 import {
   boundedInteger,
@@ -262,6 +262,21 @@ async function indexedFeedPage(body) {
     readPage: options => nearbySeededPlacePage(db(), options),
     hydratePlace: (placeId, identity, category) =>
       hydrateIndexedPlace(placeId, identity, category),
+  });
+}
+async function indexedIdCandidatePage(body) {
+  let feedBody = body;
+  const lat = Number(body.location?.lat);
+  const lng = Number(body.location?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    const area = typeof body.area === 'string' ? body.area.trim() : '';
+    const resolved = area ? await geocodeArea(area) : null;
+    if (!resolved) return { status: 400, body: { error: 'valid_location_or_area_required' } };
+    feedBody = { ...body, location: resolved };
+  }
+  return buildIndexedIdCandidatePage(feedBody, {
+    maxPageSize: MAX_INDEXED_FEED_PAGE_SIZE,
+    readPage: options => nearbySeededPlacePage(db(), options),
   });
 }
 async function searchVenues(query,lat,lng,pageToken,openNow){
@@ -695,6 +710,16 @@ export default async function handler(req,res){
     const {contents,generationConfig,location}=body;
     const lat=location?.lat??DEFAULT_LAT, lng=location?.lng??DEFAULT_LNG;
     if(body.venuesOnly){
+      if(body.discoveryMode === 'indexed-id-page'){
+        try{
+          const result=await indexedIdCandidatePage(body);
+          res.setHeader('Cache-Control','private, no-store');
+          res.status(result.status).json(result.body);
+        }catch(error){
+          res.status(503).json({error:'indexed_id_discovery_unavailable'});
+        }
+        return;
+      }
       if(body.discoveryMode === 'indexed-feed'){
         try{
           const result=await indexedFeedPage(body);

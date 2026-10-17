@@ -131,41 +131,10 @@ async function writeSharedVenuePhotos(placeId, photos) {
   }
 }
 
-export async function getVenuePhotos(placeId, { refresh = false, invalidReference = false } = {}) {
-  const cached = photoCache.get(placeId);
-  if (cached && cached.expiresAt > Date.now() && !invalidReference
-    && (!refresh || Date.now() - cached.sourceTimestamp < 60_000)) {
-    recordCostEvent('photo_metadata_cache_hit', { layer: 'memory' });
-    return cached.photos;
-  }
-
+export async function getVenuePhotos(placeId) {
   const active = inFlightPhotos.get(placeId);
   if (active) return active;
-
-  const request = (async () => {
-      const shared = await readSharedVenuePhotos(placeId);
-      if (shared && !invalidReference
-        && Date.now() - shared.ts < (refresh ? 60_000 : SHARED_CACHE_TTL_MS)) {
-        cacheInMemory(placeId, shared.photos, shared.ts);
-        recordCostEvent('photo_metadata_cache_hit', { layer: 'firestore' });
-        return shared.photos;
-      }
-      try {
-        const photos = await loadVenuePhotos(placeId);
-        cacheInMemory(placeId, photos);
-        await writeSharedVenuePhotos(placeId, photos);
-        return photos;
-      } catch (error) {
-        if (shared && !invalidReference && Date.now() - shared.ts < STALE_CACHE_TTL_MS) {
-          cacheInMemory(placeId, shared.photos, shared.ts, STALE_CACHE_TTL_MS);
-          recordCostEvent('photo_metadata_stale_hit', { layer: 'firestore' });
-          return shared.photos;
-        }
-        throw error;
-      }
-    })()
-    .finally(() => inFlightPhotos.delete(placeId));
-
+  const request = loadVenuePhotos(placeId).finally(() => inFlightPhotos.delete(placeId));
   inFlightPhotos.set(placeId, request);
   return request;
 }

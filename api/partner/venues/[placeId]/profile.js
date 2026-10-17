@@ -20,7 +20,7 @@ export default async function handler(req, res) {
       res.status(404).json({ error: 'Google does not have a current profile for this venue.' });
       return;
     }
-    res.setHeader('Cache-Control', 'public, max-age=900, s-maxage=900, stale-while-revalidate=3600');
+    res.setHeader('Cache-Control', 'private, no-store');
     res.status(200).json(profile);
   } catch (error) {
     if ([403, 429, 500, 502, 503, 504].includes(error?.status)) {

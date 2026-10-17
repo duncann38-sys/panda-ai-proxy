@@ -19,7 +19,7 @@ export default async function handler(req, res) {
 
   try {
     const image = await getVenuePhotoImage(placeId, photoIndex);
-    res.setHeader('Cache-Control', 'public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400');
+    res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('Content-Type', image.contentType);
     res.status(200).send(image.body);
   } catch (error) {

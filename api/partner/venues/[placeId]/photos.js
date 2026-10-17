@@ -19,8 +19,7 @@ export default async function handler(req, res) {
     const refresh = req.query.refresh === '1';
     const photos = await getVenuePhotos(placeId, { refresh });
     const encodedPlaceId = encodeURIComponent(placeId);
-    res.setHeader('Cache-Control', refresh ? 'private, no-store'
-      : 'public, max-age=3600, s-maxage=21600, stale-while-revalidate=604800');
+    res.setHeader('Cache-Control', 'private, no-store');
     res.status(200).json({
       photos: photos.map((photo, index) => ({
         path: '/api/partner/venues/' + encodedPlaceId + '/photos/' + index + '/image?revision='

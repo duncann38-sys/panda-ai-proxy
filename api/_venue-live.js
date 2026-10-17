@@ -13,7 +13,6 @@ const CACHE_TTL_MS = 15 * 60 * 1000;
 const SEARCH_CACHE_TTL_MS = 30 * 60 * 1000;
 const VALID_PLACE_ID = /^[A-Za-z0-9_-]{8,256}$/;
 const searchCache = new Map();
-const profileCache = new Map();
 const inFlightSearches = new Map();
 const inFlightProfiles = new Map();
 
@@ -450,17 +449,6 @@ export async function searchVenueListings(query, locationBias = null, { ttlMs = 
 }
 
 export async function getVenueProfile(placeId) {
-  const cached = profileCache.get(placeId);
-  if (cached && cached.expiresAt > Date.now()) return cached.profile;
-  const shared = await readSharedCache('venue_profile_cache_v1', placeId, CACHE_TTL_MS);
-  if (shared?.value && typeof shared.value === 'object') {
-    recordCostEvent('venue_profile_cache_hit', { layer: 'firestore' });
-    profileCache.set(placeId, {
-      profile: shared.value,
-      expiresAt: boundedCacheExpiry(Date.now(), CACHE_TTL_MS, shared.ts, CACHE_TTL_MS),
-    });
-    return shared.value;
-  }
   if (inFlightProfiles.has(placeId)) return inFlightProfiles.get(placeId);
   const request = (async () => {
 
@@ -531,8 +519,6 @@ export async function getVenueProfile(placeId) {
     source: 'google_places',
   };
 
-  profileCache.set(placeId, { profile, expiresAt: Date.now() + CACHE_TTL_MS });
-  await writeSharedCache('venue_profile_cache_v1', placeId, profile);
   return profile;
   })();
   inFlightProfiles.set(placeId, request);
