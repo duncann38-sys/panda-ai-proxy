@@ -292,7 +292,6 @@ async function indexedFeedPage(body) {
     attempts += page.identities.length;
     const batch = await mapWithConcurrency(page.identities, 6, identity =>
       hydrateIndexedPlace(identity.place_id, identity, category));
-    const identityById = new Map(page.identities.map(identity => [identity.place_id, identity]));
     for (const result of batch) {
       if (result.budgetExceeded) budgetExceeded = true;
       if (result.providerFailed) {
@@ -305,11 +304,7 @@ async function indexedFeedPage(body) {
       const matchesCategory = category === 'All'
         || result.venue?.categories?.includes(category);
       if (result.venue?.name && result.venue.photoName && matchesCategory) {
-        const identity = identityById.get(result.venue.id);
-        venues.push({
-          ...result.venue,
-          primaryPhotoPath: identity?.primary_photo_path,
-        });
+        venues.push(result.venue);
         if (venues.length >= requestedPageSize) break;
       }
     }

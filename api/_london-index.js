@@ -7,7 +7,8 @@ export const JOB_COLLECTION = 'panda_london_seed_jobs_v1';
 // Expire before the 30-day coordinate allowance; physical TTL cleanup is async.
 export const LOCATION_TTL_MS = 29 * 24 * 60 * 60 * 1000;
 export const INDEX_FIELDS = 'places.id,places.location,places.photos.name,nextPageToken';
-export const MAX_INDEXED_FEED_PAGE_SIZE = 200;
+export const MAX_INDEXED_FEED_PAGE_SIZE = 30;
+export const CATEGORY_CANDIDATE_POOL_SIZE = 200;
 
 export function providerQuotaInfo(error, retryAfter) {
   const metadata = (error?.details || []).map(detail => detail?.metadata || {})
@@ -158,7 +159,7 @@ export async function nearbySeededPlacePage(store, {
     throw new TypeError('A valid location, radius, and category are required.');
   }
   const size = Math.max(1, Math.min(MAX_INDEXED_FEED_PAGE_SIZE, Math.floor(pageSize) || 30));
-  const poolTarget = category === 'All' ? size : Math.max(size, MAX_INDEXED_FEED_PAGE_SIZE);
+  const poolTarget = category === 'All' ? size : Math.max(size, CATEGORY_CANDIDATE_POOL_SIZE);
   const roundedOrigin = `${lat.toFixed(4)},${lng.toFixed(4)}`;
   const decoded = decodePageCursor(cursor);
   const state = decoded?.version === 2

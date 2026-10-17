@@ -1,11 +1,14 @@
 import { createHash } from 'node:crypto';
-export const PANDA_CATEGORIES = [
+export const LEGACY_PANDA_CATEGORIES = [
   'All', 'Indian', 'Italian', 'Chinese', 'Spanish', 'French', 'British',
   'Japanese', 'Mexican', 'Turkish', 'American', 'Meat', 'Bar', 'Lebanese',
   'Thai', 'Chicken', 'Pizza', 'Burgers', 'Dessert', 'Coffee', 'Breakfast',
   'Lunch', 'Brunch', 'Bottomless', 'Pubs', 'Dinner', 'Drinks', 'Sports',
   'Live Music', 'Nightlife', 'Clubs', 'Shops', 'Places of Interest',
 ];
+export const REMOVED_DISCOVERY_CATEGORIES = ['Dessert', 'Brunch', 'Clubs'];
+export const PANDA_CATEGORIES = LEGACY_PANDA_CATEGORIES
+  .filter(category => !REMOVED_DISCOVERY_CATEGORIES.includes(category));
 const CATEGORY_QUERIES = {
   All: 'restaurants bars pubs cafes', Meat: 'steakhouses barbecue restaurants',
   Bar: 'bars cocktail bars', Chicken: 'chicken restaurants', Pizza: 'pizzerias',
@@ -49,12 +52,15 @@ export const FOCUS_CLUSTERS = [
 ];
 
 export const LONDON_CLUSTERS = [...LONDON_BASE_CLUSTERS, ...FOCUS_CLUSTERS];
-const tasksForClusters = clusters => clusters.flatMap(cluster =>
-  PANDA_CATEGORIES.map(category => ({ ...cluster, category,
+const tasksForClusters = (clusters, categories = PANDA_CATEGORIES) => clusters.flatMap(cluster =>
+  categories.map(category => ({ ...cluster, category,
     query: CATEGORY_QUERIES[category] || `${category} restaurants` })));
 
-// Keep the original plan stable so the 5,144 already indexed IDs remain active.
-export const LONDON_SEED_TASKS = tasksForClusters(LONDON_BASE_CLUSTERS);
+// Keep the original 33-category identity plan stable so existing IDs remain active.
+export const LONDON_SEED_TASKS = tasksForClusters(LONDON_BASE_CLUSTERS, LEGACY_PANDA_CATEGORIES);
+export const ACTIVE_LONDON_SEED_TASKS = tasksForClusters(LONDON_BASE_CLUSTERS, PANDA_CATEGORIES);
+export const ACTIVE_LONDON_SEED_PLAN = 'google-photo-active-' + createHash('sha256')
+  .update(JSON.stringify({ tasks: ACTIVE_LONDON_SEED_TASKS, pages: 1 })).digest('hex').slice(0, 12);
 export const FOCUS_SEED_TASKS = PANDA_CATEGORIES.flatMap(category =>
   FOCUS_CLUSTERS.map(cluster => ({ ...cluster, category,
     query: CATEGORY_QUERIES[category] || `${category} restaurants` })));

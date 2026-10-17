@@ -3,8 +3,9 @@ import { consumeDailyBudget } from './_cost-controls.js';
 import { createLondonSeeder } from './_london-index.js';
 import { verifySeedJob } from './_seed-job-auth.js';
 import {
+  ACTIVE_LONDON_SEED_PLAN, ACTIVE_LONDON_SEED_TASKS,
   FOCUS_CLUSTERS, FOCUS_SEED_PLAN, FOCUS_SEED_TASKS,
-  LONDON_SEED_TASKS, LONDON_SEED_PLAN,
+  LONDON_SEED_PLAN,
 } from '../constants/london_clusters.js';
 import { discoveryDailyLimit, TEMPORARY_INDEX_BOOST_END } from './_index-budget.js';
 import { readCategoryCoverage, readIndexProgress } from './_index-progress.js';
@@ -25,7 +26,9 @@ export default async function handler(req, res) {
     try {
       return res.status(200).json(await readIndexProgress(storage(), Date.now(), focus ? {
         jobPlanId: FOCUS_SEED_PLAN, indexPlanId: LONDON_SEED_PLAN, tasks: FOCUS_SEED_TASKS,
-      } : {}));
+      } : {
+        jobPlanId: ACTIVE_LONDON_SEED_PLAN, indexPlanId: LONDON_SEED_PLAN, tasks: ACTIVE_LONDON_SEED_TASKS,
+      }));
     }
     catch { return res.status(503).json({ error: 'Index progress storage unavailable.' }); }
   }
@@ -33,8 +36,8 @@ export default async function handler(req, res) {
     return res.status(200).json({
       service: 'panda-london-index', version: 1,
       schedule: 'Standard: Sunday 03:00 Europe/London, daily resume at 03:00/09:00. Focus areas: weekly Sunday 04:00 Europe/London; daily resume if incomplete.',
-      tasks: LONDON_SEED_TASKS.length, pagesPerTask: 1, maxRequestsPerChunk: 4,
-      planId: LONDON_SEED_PLAN, dailyLimit: discoveryDailyLimit(),
+      tasks: ACTIVE_LONDON_SEED_TASKS.length, pagesPerTask: 1, maxRequestsPerChunk: 4,
+      planId: ACTIVE_LONDON_SEED_PLAN, dailyLimit: discoveryDailyLimit(),
       customerReserve: 500, temporaryBoostEnds: new Date(TEMPORARY_INDEX_BOOST_END).toISOString(),
       focusAreas: FOCUS_CLUSTERS.map(cluster => cluster.name),
       focusTasks: FOCUS_SEED_TASKS.length, focusPagesPerTask: 3,
@@ -65,8 +68,8 @@ export default async function handler(req, res) {
       apiKey: process.env.GOOGLE_MAPS_API_KEY,
       consumeBudget: consumeDailyBudget,
       arrayUnion: admin.firestore.FieldValue.arrayUnion,
-      tasks: focus ? FOCUS_SEED_TASKS : LONDON_SEED_TASKS,
-      planId: focus ? FOCUS_SEED_PLAN : LONDON_SEED_PLAN,
+      tasks: focus ? FOCUS_SEED_TASKS : ACTIVE_LONDON_SEED_TASKS,
+      planId: focus ? FOCUS_SEED_PLAN : ACTIVE_LONDON_SEED_PLAN,
       indexPlanId: LONDON_SEED_PLAN,
       pagesPerQuery: focus ? 3 : 1,
       requirePhoto: true,

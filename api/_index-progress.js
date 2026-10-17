@@ -1,14 +1,15 @@
 import { ID_COLLECTION, LOCATION_COLLECTION, JOB_COLLECTION, londonClock } from './_london-index.js';
-import { LONDON_SEED_TASKS, LONDON_SEED_PLAN, PANDA_CATEGORIES } from '../constants/london_clusters.js';
+import { ACTIVE_LONDON_SEED_TASKS, ACTIVE_LONDON_SEED_PLAN, LONDON_SEED_PLAN, PANDA_CATEGORIES } from '../constants/london_clusters.js';
 
 export async function readCategoryCoverage(store, now = Date.now(), {
   indexPlanId = LONDON_SEED_PLAN,
-  minimum = 100,
+  minimum = 200,
 } = {}) {
   const snapshot = await store.collection(ID_COLLECTION)
     .where('seed_plan', '==', indexPlanId).get();
   const documents = snapshot.docs || [];
-  const categoryCounts = new Map(PANDA_CATEGORIES.map(category => [category, {
+  const feedCategories = PANDA_CATEGORIES.filter(category => category !== 'All');
+  const categoryCounts = new Map(feedCategories.map(category => [category, {
     storedIdCount: 0,
     feedReadyIdCount: 0,
   }]));
@@ -35,7 +36,7 @@ export async function readCategoryCoverage(store, now = Date.now(), {
         && Number.isFinite(expiry) && expiry > now;
       if (feedReady) feedReadyUniquePlaceIds += 1;
 
-      for (const category of PANDA_CATEGORIES) {
+      for (const category of feedCategories) {
         const contextSuffix = `/${category}`;
         if (![...contexts].some(context => context.endsWith(contextSuffix))) continue;
         const counts = categoryCounts.get(category);
@@ -57,7 +58,7 @@ export async function readCategoryCoverage(store, now = Date.now(), {
     targetPerCategory: minimum,
     uniquePlaceIds: documents.length,
     feedReadyUniquePlaceIds,
-    coverageBasis: 'unique IDs with category search context and first-party photo route; feed-ready additionally requires unexpired coordinates',
+    coverageBasis: 'search-context candidate IDs only; this audit does not verify live Google types. Feed cards verify category on live detail hydration.',
     categories,
     belowStoredTarget: categories.filter(item => !item.meetsStoredMinimum).map(item => item.category),
     belowFeedReadyTarget: categories.filter(item => !item.meetsFeedReadyMinimum).map(item => item.category),
@@ -65,9 +66,9 @@ export async function readCategoryCoverage(store, now = Date.now(), {
 }
 
 export async function readIndexProgress(store, now = Date.now(), {
-  jobPlanId = LONDON_SEED_PLAN,
+  jobPlanId = ACTIVE_LONDON_SEED_PLAN,
   indexPlanId = LONDON_SEED_PLAN,
-  tasks = LONDON_SEED_TASKS,
+  tasks = ACTIVE_LONDON_SEED_TASKS,
 } = {}) {
   const current = londonClock(new Date(now)).week;
   const previous = new Date(Date.parse(current + 'T00:00:00Z') - 7 * 86400000).toISOString().slice(0, 10);

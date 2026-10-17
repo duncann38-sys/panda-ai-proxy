@@ -4,11 +4,12 @@ import { generateKeyPairSync, sign } from 'node:crypto';
 import { testStore } from './index-store-fixture.mjs';
 import {
   ID_COLLECTION, LOCATION_COLLECTION, JOB_COLLECTION, LOCATION_TTL_MS, INDEX_FIELDS,
-  MAX_INDEXED_FEED_PAGE_SIZE,
+  MAX_INDEXED_FEED_PAGE_SIZE, CATEGORY_CANDIDATE_POOL_SIZE,
   createLondonSeeder, indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage,
   londonClock, indexedVenueBaseline, providerQuotaInfo,
 } from '../api/_london-index.js';
 import {
+  ACTIVE_LONDON_SEED_PLAN, ACTIVE_LONDON_SEED_TASKS, LEGACY_PANDA_CATEGORIES,
   FOCUS_CLUSTERS, FOCUS_SEED_PLAN, FOCUS_SEED_TASKS,
   LONDON_CLUSTERS, LONDON_SEED_PLAN, PANDA_CATEGORIES, LONDON_SEED_TASKS,
 } from '../constants/london_clusters.js';
@@ -16,6 +17,7 @@ import {
   verifySeedJob, SEED_AUDIENCE, SEED_SUBJECT, TAXONOMY_WORKFLOW,
 } from '../api/_seed-job-auth.js';
 import { createDiscoveryService } from '../api/_discovery-lite.js';
+import { readCategoryCoverage } from '../api/_index-progress.js';
 
 const now = Date.parse('2026-10-18T02:00:00Z'); // Sunday 03:00 London BST
 const point = { id: 'ChIJunit', location: { latitude: 51.48, longitude: -0.14 } };
@@ -35,14 +37,19 @@ function seedFixture(extra = {}) {
   });
   return { store, seed, calls: () => calls };
 }
-test('the original 18-cluster plan stays stable while five focus clusters add all-category tasks', () => {
+test('retired categories disappear while the existing index plan remains stable', () => {
   assert.equal(LONDON_CLUSTERS.length, 23);
   assert.equal(FOCUS_CLUSTERS.length, 5);
-  assert.equal(PANDA_CATEGORIES.length, 33);
+  assert.equal(LEGACY_PANDA_CATEGORIES.length, 33);
+  assert.equal(PANDA_CATEGORIES.length, 30);
+  assert.deepEqual(PANDA_CATEGORIES.filter(category => ['Dessert', 'Brunch', 'Clubs'].includes(category)), []);
   assert.equal(LONDON_SEED_TASKS.length, 594);
   assert.equal(new Set(LONDON_SEED_TASKS.map(t => `${t.name}/${t.category}`)).size, 594);
-  assert.equal(FOCUS_SEED_TASKS.length, 165);
-  assert.equal(new Set(FOCUS_SEED_TASKS.map(t => `${t.name}/${t.category}`)).size, 165);
+  assert.equal(ACTIVE_LONDON_SEED_TASKS.length, 540);
+  assert.ok(ACTIVE_LONDON_SEED_PLAN.startsWith('google-photo-active-'));
+  assert.equal(LONDON_SEED_PLAN, 'google-photo-719bfbae5546');
+  assert.equal(FOCUS_SEED_TASKS.length, 150);
+  assert.equal(new Set(FOCUS_SEED_TASKS.map(t => `${t.name}/${t.category}`)).size, 150);
   assert.deepEqual(FOCUS_CLUSTERS.map(cluster => cluster.name),
     ['battersea', 'nine_elms', 'chelsea', 'victoria', 'clapham']);
   assert.ok(FOCUS_SEED_PLAN.startsWith('google-photo-focus-'));
@@ -154,7 +161,7 @@ test('indexed discovery returns nearby category IDs in small pages and skips exp
   assert.equal(second.identities[0].place_id, 'near-two');
   assert.notEqual(second.identities[0].place_id, first.identities[0].place_id);
 });
-test('category discovery returns up to 200 indexed venues per cursor page in distance order', async () => {
+test('category discovery keeps a 200-ID candidate pool but returns 30 venues per cursor page', async () => {
   const store = testStore();
   const seedContext = (clusterName, count, base) => {
     const cluster = LONDON_CLUSTERS.find(item => item.name === clusterName);
@@ -162,40 +169,56 @@ test('category discovery returns up to 200 indexed venues per cursor page in dis
     for (let index = 0; index < count; index += 1) {
       const id = `${base}-${String(index).padStart(3, '0')}`;
       store.table(ID_COLLECTION).set(id, {
-        place_id: id,
-        searchContexts: [`${clusterName}/Italian`],
-        seed_plan: LONDON_SEED_PLAN,
+        place_id: id, searchContexts: [`${clusterName}/Italian`], seed_plan: LONDON_SEED_PLAN,
         primary_photo_path: `/api/partner/venues/${id}/photos/0/image`,
       });
       store.table(LOCATION_COLLECTION).set(id, {
-        place_id: id, lat: cluster.lat, lng: cluster.lng,
-        expiresAt: new Date(now + LOCATION_TTL_MS),
+        place_id: id, lat: cluster.lat, lng: cluster.lng, expiresAt: new Date(now + LOCATION_TTL_MS),
       });
     }
   };
   seedContext('battersea', 100, 'bat');
   seedContext('chelsea', 100, 'che');
   seedContext('nine_elms', 100, 'nine');
-
   const origin = LONDON_CLUSTERS.find(item => item.name === 'battersea');
-  assert.equal(MAX_INDEXED_FEED_PAGE_SIZE, 200);
+  assert.equal(MAX_INDEXED_FEED_PAGE_SIZE, 30);
+  assert.equal(CATEGORY_CANDIDATE_POOL_SIZE, 200);
   const first = await nearbySeededPlacePage(store, {
-    lat: origin.lat, lng: origin.lng, radius: 10_000,
-    category: 'Italian', pageSize: 250,
+    lat: origin.lat, lng: origin.lng, radius: 10_000, category: 'Italian', pageSize: 30,
   }, now);
-  assert.equal(first.identities.length, 200);
+  assert.equal(first.identities.length, 30);
   assert.equal(first.candidatePoolCount, 200);
+  assert.ok(first.nextCursor);
   assert.deepEqual(first.identities.map(item => item.distanceMeters),
     [...first.identities].map(item => item.distanceMeters).sort((a, b) => a - b));
-
   const second = await nearbySeededPlacePage(store, {
-    lat: origin.lat, lng: origin.lng, radius: 10_000,
-    category: 'Italian', pageSize: 200, cursor: first.nextCursor,
+    lat: origin.lat, lng: origin.lng, radius: 10_000, category: 'Italian', pageSize: 30, cursor: first.nextCursor,
   }, now);
-  assert.equal(second.identities.length, 100);
-  assert.deepEqual(second.identities.map(item => item.distanceMeters),
-    [...second.identities].map(item => item.distanceMeters).sort((a, b) => a - b));
-  assert.equal(new Set([...first.identities, ...second.identities].map(item => item.place_id)).size, 300);
+  assert.equal(second.identities.length, 30);
+  assert.equal(new Set([...first.identities, ...second.identities].map(item => item.place_id)).size, 60);
+});
+
+test('category coverage audit flags 200 search-context candidates without claiming Google type verification', async () => {
+  const store = testStore();
+  const cluster = LONDON_CLUSTERS.find(item => item.name === 'battersea');
+  for (let index = 0; index < 200; index += 1) {
+    const id = `italian-${index}`;
+    store.table(ID_COLLECTION).set(id, {
+      place_id: id, searchContexts: ['battersea/Italian'], seed_plan: LONDON_SEED_PLAN,
+      primary_photo_path: `/api/partner/venues/${id}/photos/0/image`,
+    });
+    store.table(LOCATION_COLLECTION).set(id, {
+      place_id: id, lat: cluster.lat, lng: cluster.lng, expiresAt: new Date(now + LOCATION_TTL_MS),
+    });
+  }
+  const report = await readCategoryCoverage(store, now);
+  const italian = report.categories.find(item => item.category === 'Italian');
+  assert.equal(report.targetPerCategory, 200);
+  assert.equal(report.categories.length, 29);
+  assert.equal(italian.storedIdCount, 200);
+  assert.equal(italian.feedReadyIdCount, 200);
+  assert.match(report.coverageBasis, /does not verify live Google types/);
+  assert.ok(!report.categories.some(item => ['Dessert', 'Brunch', 'Clubs'].includes(item.category)));
 });
 test('category discovery excludes indexed candidates outside the requested walking radius', async () => {
   const store = testStore();
