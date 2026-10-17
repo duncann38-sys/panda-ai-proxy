@@ -260,20 +260,21 @@ test('London local 03:00 scheduling handles summer and winter', async () => {
 test('focused area schedule starts at its own London hour and skips completed daily retries', async () => {
   const store = testStore();
   const sunday = seedFixture({
-    store, now: () => Date.parse('2026-10-18T04:00:00Z'), scheduleHours: [4, 5],
+    store, now: () => Date.parse('2026-10-18T03:00:00Z'), scheduleHours: [4],
   });
-  assert.equal(londonClock(new Date(Date.parse('2026-10-18T04:00:00Z'))).hour, 5);
+  assert.equal(londonClock(new Date(Date.parse('2026-10-18T03:00:00Z'))).hour, 4);
   assert.equal((await sunday.seed({ manual: false })).status, 'complete');
   const monday = seedFixture({
-    store, now: () => Date.parse('2026-10-19T04:00:00Z'), scheduleHours: [4, 5],
+    store, now: () => Date.parse('2026-10-19T03:00:00Z'), scheduleHours: [4],
   });
   assert.equal((await monday.seed({ manual: false })).status, 'complete');
   assert.equal(monday.calls(), 0);
   const wrongHour = seedFixture({
-    now: () => Date.parse('2026-10-18T02:00:00Z'), scheduleHours: [4, 5],
+    now: () => Date.parse('2026-10-18T04:00:00Z'), scheduleHours: [4],
   });
   assert.equal((await wrongHour.seed({ manual: false })).status, 'outside_schedule_window');
   assert.equal(wrongHour.calls(), 0);
+  assert.equal(londonClock(new Date(Date.parse('2026-10-25T04:00:00Z'))).hour, 4);
 });
 test('new scheduled rounds do not start on a weekday, but manual runs can', async () => {
   const s = seedFixture({ now: () => Date.parse('2026-10-19T02:00:00Z') });

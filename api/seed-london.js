@@ -32,7 +32,7 @@ export default async function handler(req, res) {
   if (req.method === 'GET') {
     return res.status(200).json({
       service: 'panda-london-index', version: 1,
-      schedule: 'Standard: Sunday 03:00 Europe/London, daily resume at 03:00/09:00. Focus areas: weekly Sunday 04:00 UTC; daily resume if incomplete.',
+      schedule: 'Standard: Sunday 03:00 Europe/London, daily resume at 03:00/09:00. Focus areas: weekly Sunday 04:00 Europe/London; daily resume if incomplete.',
       tasks: LONDON_SEED_TASKS.length, pagesPerTask: 1, maxRequestsPerChunk: 4,
       planId: LONDON_SEED_PLAN, dailyLimit: discoveryDailyLimit(),
       customerReserve: 500, temporaryBoostEnds: new Date(TEMPORARY_INDEX_BOOST_END).toISOString(),
@@ -71,7 +71,7 @@ export default async function handler(req, res) {
       customerReserve: 500,
       customerReserveOverride: focus ? 500 : undefined,
       paceMs: auth.manual ? 1000 : 3000,
-      scheduleHours: focus ? [4, 5] : [3, 9],
+      scheduleHours: focus ? [4] : [3, 9],
     });
     return res.status(200).json({ scope, ...await seed({ manual: auth.manual, maxRequests: 4 }) });
   } catch {

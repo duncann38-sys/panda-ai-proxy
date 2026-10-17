@@ -4,9 +4,9 @@ on:
     # Both UTC slots handle London DST. The backend accepts only local 03:00.
     # Sunday starts the weekly round; other days resume only unfinished rounds.
     - cron: '0 2,3,8,9 * * *'
-    # Focus areas start a new weekly round on Sunday; daily attempts resume it
-    # only if it remains incomplete. Completed rounds do not spend Places calls.
-    - cron: '0 4 * * *'
+    # Both UTC slots handle London DST for a local 04:00 focus-area run.
+    # The backend rejects the unused UTC slot; retries resume only incomplete work.
+    - cron: '0 3,4 * * *'
   workflow_dispatch:
     inputs:
       scope:
@@ -34,5 +34,5 @@ jobs:
           node-version: '24'
       - name: Seed or resume the external Panda index
         env:
-          SEED_SCOPE: ${{ github.event_name == 'schedule' && github.event.schedule == '0 4 * * *' && 'focus-areas' || github.event.inputs.scope || 'standard' }}
+          SEED_SCOPE: ${{ github.event_name == 'schedule' && github.event.schedule == '0 3,4 * * *' && 'focus-areas' || github.event.inputs.scope || 'standard' }}
         run: node scripts/seed-london.mjs https://panda-ai-proxy.vercel.app "$SEED_SCOPE"

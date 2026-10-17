@@ -25,7 +25,7 @@ sent redundantly to phones.
 
 The standard round starts Sunday at 03:00 London time, with daily attempts at
 03:00 and 09:00 to resume incomplete work. A separate focused-area round starts
-weekly at 04:00 UTC and is retried daily only while incomplete. It covers
+weekly at 04:00 Europe/London and is retried daily only while incomplete. It covers
 Battersea, Nine Elms, Chelsea, Victoria and Clapham across all 33 categories.
 The two plans keep separate cursors and write into the same permitted ID index.
 An unfinished previous week resumes before a new round starts. Daily Google
@@ -62,7 +62,7 @@ cache code below is a dormant prototype, not the active deployment path.
   photo/profile/routes costs. It is not a guarantee that all Maps spending stays
   within the credit and is not a per-customer or registration limit.
 - GitHub Actions starts the standard round Sunday at 03:00 London. It starts the
-  focused round Sunday at 04:00 UTC and retries it daily only if incomplete.
+  focused round Sunday at 04:00 London and retries it daily only if incomplete.
   Both use the shared 500-request customer reserve.
 - The seeding endpoint requires a verified, short-lived GitHub OIDC token from
   this exact repository/main branch/workflow. No new shared secret is copied.
