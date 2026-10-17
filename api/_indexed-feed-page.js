@@ -28,9 +28,19 @@ export async function buildIndexedFeedPage(body, {
   }
   const category = typeof body.category === 'string' ? body.category.trim() : 'All';
   const parsedPageSize = Number(body.pageSize);
-  const requestedPageSize = Number.isFinite(parsedPageSize) && parsedPageSize > 0
-    ? Math.max(1, Math.min(maxPageSize, Math.floor(parsedPageSize)))
-    : maxPageSize;
+  const isCategoryFeed = category !== 'All';
+  if (isCategoryFeed && Number.isFinite(parsedPageSize) && parsedPageSize > 0
+    && Math.floor(parsedPageSize) !== maxPageSize) {
+    return {
+      status: 400,
+      body: { error: 'category_feed_page_size_must_be_200', requiredCount: maxPageSize },
+    };
+  }
+  const requestedPageSize = isCategoryFeed
+    ? maxPageSize
+    : Number.isFinite(parsedPageSize) && parsedPageSize > 0
+      ? Math.max(1, Math.min(maxPageSize, Math.floor(parsedPageSize)))
+      : maxPageSize;
   const parsedRadius = Number(body.radiusMeters);
   const radius = Number.isFinite(parsedRadius)
     ? Math.max(500, Math.min(20_000, parsedRadius))
@@ -76,14 +86,23 @@ export async function buildIndexedFeedPage(body, {
       || budgetExceeded || [403, 429, 500, 502, 503, 504].includes(providerFailure?.providerStatus)) break;
   }
 
-  if (!venues.length && (budgetExceeded || providerFailure)) {
+  const incompleteCategoryPage = isCategoryFeed && venues.length < requestedPageSize;
+  if (incompleteCategoryPage || (!venues.length && (budgetExceeded || providerFailure))) {
     const status = budgetExceeded ? 503
-      : providerFailure.providerStatus === 429 ? 429
-        : providerFailure.providerStatus === 403 ? 403 : 502;
+      : providerFailure?.providerStatus === 429 ? 429
+        : providerFailure?.providerStatus === 403 ? 403
+          : providerFailure ? 502 : 503;
+    const error = budgetExceeded
+      ? 'places_daily_budget_exceeded'
+      : providerFailure
+        ? 'places_card_lookup_failed'
+        : 'insufficient_google_verified_venues';
     return {
       status,
       body: {
-        error: budgetExceeded ? 'places_daily_budget_exceeded' : 'places_card_lookup_failed',
+        error,
+        ...(isCategoryFeed ? { requiredCount: requestedPageSize } : {}),
+        matchedCount: venues.length,
         nextCursor: cursor,
         indexExhausted,
         expandedArea,
@@ -96,8 +115,10 @@ export async function buildIndexedFeedPage(body, {
       venues, nextCursor: cursor, indexExhausted,
       dataMode: 'indexed_feed_live_google_card_fields',
       expandedArea,
-      ...(budgetExceeded ? { budgetExceeded: true } : {}),
-      ...(venues.length < requestedPageSize ? { partial: true } : {}),
+      pageSize: requestedPageSize,
+      ...(venues.length < requestedPageSize
+        ? { partial: true, matchedCount: venues.length, requiredCount: requestedPageSize }
+        : {}),
     },
   };
 }

@@ -106,7 +106,7 @@ test('indexed feed continues through stored IDs until 200 valid cards are found'
     venue.photoName && venue.categories.includes('Pubs')));
 });
 
-test('indexed feed returns only valid matches when the stored index is exhausted', async () => {
+test('category feed refuses to serve fewer than 200 verified matches', async () => {
   const identities = Array.from({ length: 200 }, (_, index) => ({
     place_id: `place-${String(index).padStart(3, '0')}`,
     lat: 51.46,
@@ -133,9 +133,62 @@ test('indexed feed returns only valid matches when the stored index is exhausted
     }),
   });
 
+  assert.equal(response.status, 503);
+  assert.equal(response.body.error, 'insufficient_google_verified_venues');
+  assert.equal(response.body.requiredCount, 200);
+  assert.equal(response.body.matchedCount, 100);
+  assert.equal(response.body.venues, undefined);
+});
+
+test('Planner All lookup can return a smaller nearby candidate set from the existing index', async () => {
+  const identities = Array.from({ length: 24 }, (_, index) => ({
+    place_id: `planner-${String(index).padStart(3, '0')}`,
+    lat: 51.46,
+    lng: -0.16,
+  }));
+  const response = await buildIndexedFeedPage({
+    location: { lat: 51.46, lng: -0.16 },
+    category: 'All',
+    pageSize: 60,
+    radiusMeters: 20_000,
+  }, {
+    maxPageSize: 200,
+    readPage: async ({ pageSize }) => {
+      assert.equal(pageSize, 60);
+      return { identities, nextCursor: null, indexExhausted: true };
+    },
+    hydratePlace: async (placeId) => ({
+      venue: {
+        id: placeId,
+        name: `Venue ${placeId}`,
+        photoName: `places/${placeId}/photos/cover`,
+        categories: ['Coffee'],
+      },
+    }),
+  });
+
   assert.equal(response.status, 200);
-  assert.equal(response.body.venues.length, 100);
+  assert.equal(response.body.venues.length, 24);
+  assert.equal(response.body.pageSize, 60);
   assert.equal(response.body.partial, true);
-  assert.ok(response.body.venues.every(venue =>
-    venue.photoName && venue.categories.includes('Pubs')));
+  assert.equal(response.body.indexExhausted, true);
+});
+
+test('category feeds cannot bypass the 200-result floor with a smaller request', async () => {
+  const response = await buildIndexedFeedPage({
+    location: { lat: 51.46, lng: -0.16 },
+    category: 'Pubs',
+    pageSize: 60,
+  }, {
+    maxPageSize: 200,
+    readPage: async () => {
+      assert.fail('A non-200 category request must be rejected before reading the index.');
+    },
+    hydratePlace: async () => {
+      assert.fail('A non-200 category request must be rejected before Google hydration.');
+    },
+  });
+
+  assert.equal(response.status, 400);
+  assert.equal(response.body.error, 'category_feed_page_size_must_be_200');
 });

@@ -245,8 +245,19 @@ async function hydrateIndexedPlace(placeId, fallbackLocation, category) {
   }
 }
 
-function indexedFeedPage(body) {
-  return buildIndexedFeedPage(body, {
+async function indexedFeedPage(body) {
+  let feedBody = body;
+  const lat = Number(body.location?.lat);
+  const lng = Number(body.location?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    const area = typeof body.area === 'string' ? body.area.trim() : '';
+    const resolved = area ? await geocodeArea(area) : null;
+    if (!resolved) {
+      return { status: 400, body: { error: 'valid_location_or_area_required' } };
+    }
+    feedBody = { ...body, location: resolved };
+  }
+  return buildIndexedFeedPage(feedBody, {
     maxPageSize: MAX_INDEXED_FEED_PAGE_SIZE,
     readPage: options => nearbySeededPlacePage(db(), options),
     hydratePlace: (placeId, identity, category) =>
