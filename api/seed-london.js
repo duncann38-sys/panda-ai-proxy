@@ -35,8 +35,7 @@ export default async function handler(req, res) {
       schedule: 'Sunday 03:00 Europe/London; daily resume at 03:00 and 09:00 if incomplete',
       tasks: LONDON_SEED_TASKS.length, pagesPerTask: 1, maxRequestsPerChunk: 4,
       planId: LONDON_SEED_PLAN, dailyLimit: discoveryDailyLimit(),
-      customerReserve: 500, focusCustomerReserveOverride: 356,
-      temporaryBoostEnds: new Date(TEMPORARY_INDEX_BOOST_END).toISOString(),
+      customerReserve: 500, temporaryBoostEnds: new Date(TEMPORARY_INDEX_BOOST_END).toISOString(),
       focusAreas: FOCUS_CLUSTERS.map(cluster => cluster.name),
       focusTasks: FOCUS_SEED_TASKS.length, focusPagesPerTask: 3,
       focusMaximumRequests: FOCUS_SEED_TASKS.length * 3,
@@ -69,9 +68,7 @@ export default async function handler(req, res) {
       pagesPerQuery: focus ? 3 : 1,
       requirePhoto: true,
       dailyRequestLimit: () => discoveryDailyLimit(),
-      customerReserve: 500,
-      customerReserveOverride: focus && auth.manual ? 356 : undefined,
-      paceMs: auth.manual ? 1000 : 3000,
+      customerReserve: 500, paceMs: auth.manual ? 1000 : 3000,
     });
     return res.status(200).json({ scope, ...await seed({ manual: auth.manual, maxRequests: 4 }) });
   } catch {
