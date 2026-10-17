@@ -27,7 +27,7 @@ if (!localAuth?.manual || localAuth.workflowRef !== TAXONOMY_WORKFLOW) {
 }
 
 if (mode === 'verify') {
-  const endpoint = `${backend.replace(/\/$/, '')}/api/verify-venue-taxonomy`;
+  const endpoint = `${backend.replace(/\/$/, '')}/api/backfill-venue-taxonomy`;
   let bearer = token;
   let tokenIssuedAt = Date.now();
   const postJson = async payload => {
