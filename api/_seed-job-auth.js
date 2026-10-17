@@ -8,7 +8,9 @@ const OWNER_ID = '266837386';
 // Pinned to this repository's GitHub OIDC customization settings:
 // use_immutable_subject=true. Stable IDs prevent name-reuse impersonation.
 export const SEED_SUBJECT = `repo:duncann38-sys@${OWNER_ID}/panda-ai-proxy@${REPOSITORY_ID}:ref:refs/heads/main`;
-const WORKFLOW = `${REPOSITORY}/.github/workflows/seed-london.yml@refs/heads/main`;
+const SEED_WORKFLOW = `${REPOSITORY}/.github/workflows/seed-london.yml@refs/heads/main`;
+export const TAXONOMY_WORKFLOW = `${REPOSITORY}/.github/workflows/backfill-venue-taxonomy.yml@refs/heads/main`;
+const AUTHORIZED_WORKFLOWS = new Set([SEED_WORKFLOW, TAXONOMY_WORKFLOW]);
 let cachedKeys;
 let cachedUntil = 0;
 let lastKeyRefresh = -Infinity;
@@ -26,7 +28,7 @@ export async function verifySeedJob(token, { fetchImpl = fetch, now = Date.now }
       || claims.repository !== REPOSITORY || claims.ref !== 'refs/heads/main'
       || claims.repository_id !== REPOSITORY_ID || claims.repository_owner_id !== OWNER_ID
       || claims.sub !== SEED_SUBJECT
-      || claims.workflow_ref !== WORKFLOW
+      || !AUTHORIZED_WORKFLOWS.has(claims.workflow_ref)
       || !['schedule', 'workflow_dispatch'].includes(claims.event_name)
       || !Number.isFinite(claims.exp) || claims.exp <= seconds || claims.exp > seconds + 900
       || !Number.isFinite(claims.iat) || claims.iat > seconds + 30
@@ -49,6 +51,7 @@ export async function verifySeedJob(token, { fetchImpl = fetch, now = Date.now }
     return {
       manual: claims.event_name === 'workflow_dispatch',
       scheduled: claims.event_name === 'schedule',
+      workflowRef: claims.workflow_ref,
       runId: claims.run_id,
     };
   } catch { return null; }

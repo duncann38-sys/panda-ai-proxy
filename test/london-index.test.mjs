@@ -11,7 +11,9 @@ import {
   FOCUS_CLUSTERS, FOCUS_SEED_PLAN, FOCUS_SEED_TASKS,
   LONDON_CLUSTERS, LONDON_SEED_PLAN, PANDA_CATEGORIES, LONDON_SEED_TASKS,
 } from '../constants/london_clusters.js';
-import { verifySeedJob, SEED_AUDIENCE, SEED_SUBJECT } from '../api/_seed-job-auth.js';
+import {
+  verifySeedJob, SEED_AUDIENCE, SEED_SUBJECT, TAXONOMY_WORKFLOW,
+} from '../api/_seed-job-auth.js';
 import { createDiscoveryService } from '../api/_discovery-lite.js';
 
 const now = Date.parse('2026-10-18T02:00:00Z'); // Sunday 03:00 London BST
@@ -475,9 +477,18 @@ test('authorized main-branch workflow signature is accepted', async () => {
   const manual = await verifySeedJob(jwt(), authOptions);
   assert.equal(manual.manual, true);
   assert.equal(manual.scheduled, false);
+  assert.equal(manual.workflowRef, claims.workflow_ref);
   const scheduled = await verifySeedJob(jwt({ event_name: 'schedule' }), authOptions);
   assert.equal(scheduled.manual, false);
   assert.equal(scheduled.scheduled, true);
+});
+test('the dedicated manual taxonomy workflow is authorized without enabling pull-request callers', async () => {
+  const auth = await verifySeedJob(jwt({ workflow_ref: TAXONOMY_WORKFLOW }), authOptions);
+  assert.equal(auth.manual, true);
+  assert.equal(auth.workflowRef, TAXONOMY_WORKFLOW);
+  assert.equal(await verifySeedJob(jwt({
+    workflow_ref: TAXONOMY_WORKFLOW, event_name: 'pull_request',
+  }), authOptions), null);
 });
 test('different repositories, branches, workflows and audiences cannot seed', async () => {
   for (const change of [{ repository: 'attacker/repo' }, { ref: 'refs/heads/dev' },

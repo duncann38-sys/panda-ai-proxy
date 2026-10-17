@@ -1,0 +1,31 @@
+name: Panda venue taxonomy backfill
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Preview tag counts or apply the additive Firestore migration'
+        required: true
+        type: choice
+        default: dry-run
+        options:
+          - dry-run
+          - apply
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: panda-venue-taxonomy-backfill
+  cancel-in-progress: false
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Backfill taxonomy on existing IDs only
+        env:
+          BACKFILL_MODE: ${{ github.event.inputs.mode || 'dry-run' }}
+        run: node scripts/backfill-venue-taxonomy.mjs https://panda-ai-proxy.vercel.app "$BACKFILL_MODE"
