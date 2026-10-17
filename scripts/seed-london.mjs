@@ -4,7 +4,7 @@ const audience = SEED_AUDIENCE;
 const backend = process.argv[2];
 const scope = process.argv[3] || 'standard';
 if (!backend || new URL(backend).protocol !== 'https:') throw new Error('Explicit HTTPS backend URL required.');
-if (!['standard', 'focus-areas'].includes(scope)) throw new Error('Unsupported seed scope.');
+if (!['standard', 'focus-areas', 'coverage-audit'].includes(scope)) throw new Error('Unsupported seed scope.');
 async function token() {
   const url = new URL(process.env.ACTIONS_ID_TOKEN_REQUEST_URL);
   url.searchParams.set('audience', audience);

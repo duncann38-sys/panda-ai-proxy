@@ -17,6 +17,7 @@ on:
         options:
           - standard
           - focus-areas
+          - coverage-audit
 permissions:
   contents: read
   id-token: write

@@ -7,7 +7,7 @@ import {
   LONDON_SEED_TASKS, LONDON_SEED_PLAN,
 } from '../constants/london_clusters.js';
 import { discoveryDailyLimit, TEMPORARY_INDEX_BOOST_END } from './_index-budget.js';
-import { readIndexProgress } from './_index-progress.js';
+import { readCategoryCoverage, readIndexProgress } from './_index-progress.js';
 
 function storage() {
   if (!admin.apps.length) {
@@ -45,7 +45,7 @@ export default async function handler(req, res) {
   }
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed.' });
   const scope = typeof req.body?.scope === 'string' ? req.body.scope : 'standard';
-  if (!['standard', 'focus-areas'].includes(scope)) {
+  if (!['standard', 'focus-areas', 'coverage-audit'].includes(scope)) {
     return res.status(400).json({ error: 'Unknown indexing scope.' });
   }
   const token = String(req.headers.authorization || '').replace(/^Bearer /, '');
@@ -56,6 +56,9 @@ export default async function handler(req, res) {
   }
   try {
     const store = storage();
+    if (scope === 'coverage-audit') {
+      return res.status(200).json(await readCategoryCoverage(store));
+    }
     const focus = scope === 'focus-areas';
     const seed = createLondonSeeder({
       store,

@@ -219,7 +219,7 @@ export async function nearbySeededPlacePage(store, {
       if (!Number.isFinite(expiry) || expiry <= now
         || !Number.isFinite(position.lat) || !Number.isFinite(position.lng)) continue;
       const distance = distanceMeters(lat, lng, position.lat, position.lng);
-      if (!Number.isFinite(distance) || (category === 'All' && distance > radius)) continue;
+       if (!Number.isFinite(distance) || distance > radius) continue;
       found.push({
         place_id: identityDoc.id, lat: position.lat, lng: position.lng,
         distanceMeters: Math.round(distance),
@@ -236,9 +236,7 @@ export async function nearbySeededPlacePage(store, {
     }
   }
 
-  found.sort((a, b) => category === 'All'
-    ? a.distanceMeters - b.distanceMeters
-    : a.clusterRank - b.clusterRank || a.distanceMeters - b.distanceMeters);
+  found.sort((a, b) => a.distanceMeters - b.distanceMeters);
   const identities = found.slice(0, size);
   const pending = found.slice(size);
   const hasMore = pending.length > 0 || clusterIndex < clusters.length;
