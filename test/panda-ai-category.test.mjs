@@ -23,3 +23,24 @@ test('an actual Google pub type remains in the Pubs category', () => {
   };
   assert.equal(googleCategoryTags(pub, '').includes('Pubs'), true);
 });
+
+test('category-scoped indexed candidates use their saved search intent, gated by hospitality types', () => {
+  const pub = {
+    displayName: { text: 'The Riverside' },
+    primaryType: 'pub',
+    primaryTypeDisplayName: { text: 'Pub' },
+    types: ['pub', 'bar'],
+  };
+  assert.equal(googleCategoryTags(pub, 'Sports').includes('Sports'), true);
+  assert.equal(googleCategoryTags(pub, 'Sports').includes('Live Music'), false);
+  assert.equal(googleCategoryTags(pub, 'Live Music').includes('Live Music'), true);
+  assert.equal(googleCategoryTags(pub, 'Live Music').includes('Sports'), false);
+
+  const park = {
+    displayName: { text: 'Battersea Park' },
+    primaryType: 'park',
+    primaryTypeDisplayName: { text: 'Park' },
+    types: ['park'],
+  };
+  assert.equal(googleCategoryTags(park, 'Sports').includes('Sports'), false);
+});

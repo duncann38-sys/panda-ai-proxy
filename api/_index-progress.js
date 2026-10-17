@@ -1,5 +1,18 @@
 import { ID_COLLECTION, LOCATION_COLLECTION, JOB_COLLECTION, londonClock } from './_london-index.js';
-import { ACTIVE_LONDON_SEED_TASKS, ACTIVE_LONDON_SEED_PLAN, LONDON_SEED_PLAN, PANDA_CATEGORIES } from '../constants/london_clusters.js';
+import { ACTIVE_LONDON_SEED_TASKS, ACTIVE_LONDON_SEED_PLAN, FOCUS_CLUSTERS, LONDON_SEED_PLAN, PANDA_CATEGORIES } from '../constants/london_clusters.js';
+
+const BATTERSEA_COVERAGE_RADIUS_METERS = 20_000;
+const BATTERSEA_COVERAGE_TARGET = 300;
+const BATTERSEA_COVERAGE_ORIGIN = FOCUS_CLUSTERS.find(cluster => cluster.name === 'battersea');
+
+function distanceMeters(aLat, aLng, bLat, bLng) {
+  const toRadians = value => value * Math.PI / 180;
+  const deltaLat = toRadians(bLat - aLat);
+  const deltaLng = toRadians(bLng - aLng);
+  const arc = Math.sin(deltaLat / 2) ** 2
+    + Math.cos(toRadians(aLat)) * Math.cos(toRadians(bLat)) * Math.sin(deltaLng / 2) ** 2;
+  return 6_371_000 * 2 * Math.asin(Math.sqrt(arc));
+}
 
 export async function readCategoryCoverage(store, now = Date.now(), {
   indexPlanId = LONDON_SEED_PLAN,
@@ -12,6 +25,8 @@ export async function readCategoryCoverage(store, now = Date.now(), {
   const categoryCounts = new Map(feedCategories.map(category => [category, {
     storedIdCount: 0,
     feedReadyIdCount: 0,
+    batterseaStoredIdCount: 0,
+    batterseaFeedReadyIdCount: 0,
   }]));
   let feedReadyUniquePlaceIds = 0;
 
@@ -35,13 +50,19 @@ export async function readCategoryCoverage(store, now = Date.now(), {
       const feedReady = Number.isFinite(position.lat) && Number.isFinite(position.lng)
         && Number.isFinite(expiry) && expiry > now;
       if (feedReady) feedReadyUniquePlaceIds += 1;
+      const inBatterseaRadius = BATTERSEA_COVERAGE_ORIGIN
+        && Number.isFinite(position.lat) && Number.isFinite(position.lng)
+        && distanceMeters(position.lat, position.lng, BATTERSEA_COVERAGE_ORIGIN.lat, BATTERSEA_COVERAGE_ORIGIN.lng)
+          <= BATTERSEA_COVERAGE_RADIUS_METERS;
 
       for (const category of feedCategories) {
-        const contextSuffix = `/${category}`;
+        const contextSuffix = '/' + category;
         if (![...contexts].some(context => context.endsWith(contextSuffix))) continue;
         const counts = categoryCounts.get(category);
         counts.storedIdCount += 1;
         if (feedReady) counts.feedReadyIdCount += 1;
+        if (inBatterseaRadius) counts.batterseaStoredIdCount += 1;
+        if (inBatterseaRadius && feedReady) counts.batterseaFeedReadyIdCount += 1;
       }
     }
   }
@@ -51,6 +72,8 @@ export async function readCategoryCoverage(store, now = Date.now(), {
     ...counts,
     meetsStoredMinimum: counts.storedIdCount >= minimum,
     meetsFeedReadyMinimum: counts.feedReadyIdCount >= minimum,
+    meetsBatterseaStoredTarget: counts.batterseaStoredIdCount >= BATTERSEA_COVERAGE_TARGET,
+    meetsBatterseaFeedReadyTarget: counts.batterseaFeedReadyIdCount >= BATTERSEA_COVERAGE_TARGET,
   }));
   return {
     status: 'complete',
@@ -58,10 +81,17 @@ export async function readCategoryCoverage(store, now = Date.now(), {
     targetPerCategory: minimum,
     uniquePlaceIds: documents.length,
     feedReadyUniquePlaceIds,
+    batterseaCoverageOrigin: BATTERSEA_COVERAGE_ORIGIN
+      ? { name: BATTERSEA_COVERAGE_ORIGIN.name, lat: BATTERSEA_COVERAGE_ORIGIN.lat, lng: BATTERSEA_COVERAGE_ORIGIN.lng }
+      : null,
+    batterseaCoverageRadiusMeters: BATTERSEA_COVERAGE_RADIUS_METERS,
+    batterseaTargetPerCategory: BATTERSEA_COVERAGE_TARGET,
     coverageBasis: 'search-context candidate IDs only; this audit does not verify live Google types. Feed cards verify category on live detail hydration.',
     categories,
     belowStoredTarget: categories.filter(item => !item.meetsStoredMinimum).map(item => item.category),
     belowFeedReadyTarget: categories.filter(item => !item.meetsFeedReadyMinimum).map(item => item.category),
+    belowBatterseaStoredTarget: categories.filter(item => !item.meetsBatterseaStoredTarget).map(item => item.category),
+    belowBatterseaFeedReadyTarget: categories.filter(item => !item.meetsBatterseaFeedReadyTarget).map(item => item.category),
   };
 }
 

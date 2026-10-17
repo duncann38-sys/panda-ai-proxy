@@ -233,10 +233,10 @@ async function hydrateIndexedPlace(placeId, fallbackLocation, category) {
           .map(item => item.displayName).filter(Boolean).join(' · '),
         photoCount: Math.min(10, photos.length),
         detailsDeferred: true,
-          // The query that surfaced a place is not proof that it belongs in
-          // the category. Classify this venue from Google’s returned place
-          // types and name, then let the feed reject non-matches.
-          categories: googleCategoryTags(place, ''),
+          // This ID was read from the exact persisted category search context.
+          // Combine that evidence with Google's live place data; the classifier
+          // still rejects non-hospitality places and unrelated category matches.
+          categories: googleCategoryTags(place, category),
         sourceQueries: [`indexed:${category}`],
       },
     };
