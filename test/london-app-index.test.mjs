@@ -7,6 +7,7 @@ import {
 import { discoveryDailyLimit, TEMPORARY_INDEX_BOOST_END } from '../api/_index-budget.js';
 import { readCategoryCoverage, readIndexProgress } from '../api/_index-progress.js';
 import {
+  ACTIVE_LONDON_SEED_PLAN, ACTIVE_LONDON_SEED_TASKS,
   FOCUS_SEED_PLAN, FOCUS_SEED_TASKS, LONDON_SEED_PLAN, LONDON_SEED_TASKS,
 } from '../constants/london_clusters.js';
 
@@ -39,8 +40,8 @@ test('new matrix does not reuse completed old cursors and reports genuine empty 
   store.table(JOB_COLLECTION).set('2026-10-11', { status: 'complete', taskIndex: 126 });
   const seed = createLondonSeeder({
     store, apiKey: 'fixture', now: () => now, paceMs: 0,
-    planId: LONDON_SEED_PLAN, requirePhoto: true,
-    tasks: LONDON_SEED_TASKS.slice(0, 2), dailyRequestLimit: () => 2000, customerReserve: 500,
+    planId: ACTIVE_LONDON_SEED_PLAN, indexPlanId: LONDON_SEED_PLAN, requirePhoto: true,
+    tasks: ACTIVE_LONDON_SEED_TASKS.slice(0, 2), dailyRequestLimit: () => 2000, customerReserve: 500,
     consumeBudget: async (_, kind, limit) => {
       assert.equal(limit, 1500); return { allowed: true, shared: true };
     },
@@ -57,7 +58,7 @@ test('new matrix does not reuse completed old cursors and reports genuine empty 
 test('progress verifies saved unique IDs, photo routes and coordinate expiry', async () => {
   const store = testStore();
   await indexPlaceIdentities(store, [point, point], { now, requirePhoto: true, seedPlan: LONDON_SEED_PLAN });
-  store.table(JOB_COLLECTION).set(`2026-10-11_${LONDON_SEED_PLAN}`, { status: 'complete' });
+  store.table(JOB_COLLECTION).set(`2026-10-11_${ACTIVE_LONDON_SEED_PLAN}`, { status: 'complete' });
   const result = await readIndexProgress(store, now);
   assert.equal(result.uniquePlaceIds, 1);
   assert.deepEqual(result.samples[0], { placeId: point.id, hasPhotoRoute: true,
@@ -95,6 +96,6 @@ test('focused progress uses its own job cursor while counting IDs in the origina
     jobPlanId: FOCUS_SEED_PLAN, indexPlanId: LONDON_SEED_PLAN, tasks: FOCUS_SEED_TASKS,
   });
   assert.equal(result.planId, FOCUS_SEED_PLAN);
-  assert.equal(result.totalTasks, 165);
+  assert.equal(result.totalTasks, 150);
   assert.equal(result.uniquePlaceIds, 1);
 });
