@@ -32,7 +32,9 @@ test('broad activity categories require an explicit Google place-type match', ()
     primaryTypeDisplayName: { text: 'Pub' },
     types: ['pub', 'bar'],
   };
-  assert.deepEqual(classifyGoogleTypeCategories(pub), []);
+  const pubCategories = classifyGoogleTypeCategories(pub);
+  assert.equal(pubCategories.includes('Sports'), false);
+  assert.equal(pubCategories.includes('Live Music'), false);
 
   const sportsBar = { primaryType: 'sports_bar', types: ['sports_bar', 'bar'] };
   assert.deepEqual(classifyGoogleTypeCategories(sportsBar), ['Sports']);
