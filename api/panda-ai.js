@@ -15,6 +15,7 @@ import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage, MAX
 import { buildIndexedFeedPage, buildIndexedIdCandidatePage } from './_indexed-feed-page.js';
 import { currentWeatherResponse } from './_current-weather.js';
 import { googleCategoryTags } from './_google-category-tags.js';
+import { classifyGoogleTypeCategories, TAXONOMY_VERIFICATION_CATEGORIES } from './_venue-taxonomy.js';
 import {
   boundedInteger,
   cacheablePlacesResult,
@@ -233,10 +234,11 @@ async function hydrateIndexedPlace(placeId, fallbackLocation, category) {
           .map(item => item.displayName).filter(Boolean).join(' · '),
         photoCount: Math.min(10, photos.length),
         detailsDeferred: true,
-          // This ID was read from the exact persisted category search context.
-          // Combine that evidence with Google's live place data; the classifier
-          // still rejects non-hospitality places and unrelated category matches.
-          categories: googleCategoryTags(place, category),
+          // Use exact Google type verification for meal, offer, and activity
+          // categories; only strict categories may rely on their saved search context.
+          categories: TAXONOMY_VERIFICATION_CATEGORIES.includes(category)
+            ? classifyGoogleTypeCategories(place)
+            : googleCategoryTags(place, category),
         sourceQueries: [`indexed:${category}`],
       },
     };
