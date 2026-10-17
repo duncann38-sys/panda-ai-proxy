@@ -187,7 +187,7 @@ async function googleSearch(query,lat,lng,pageToken,openNow){
   }catch{return {venues:[],nextPageToken:null,providerFailed:true}}
 }
 
-async function hydrateIndexedPlace(placeId, fallbackLocation, category) {
+async function hydrateIndexedPlace(placeId, identity, category) {
   if (!MAPS_KEY) return { providerFailed: true, providerStatus: 503 };
   if (Date.now() < placesQuotaBlockedUntil) {
     return { providerFailed: true, providerStatus: 429 };
@@ -227,8 +227,8 @@ async function hydrateIndexedPlace(placeId, fallbackLocation, category) {
         types,
         address: place.shortFormattedAddress || place.formattedAddress || '',
         fullAddress: place.formattedAddress || '',
-        lat: location.latitude ?? fallbackLocation.lat,
-        lng: location.longitude ?? fallbackLocation.lng,
+        lat: location.latitude ?? identity.lat,
+        lng: location.longitude ?? identity.lng,
         photoName: primaryPhoto?.name || '',
         photoAttribution: (primaryPhoto?.authorAttributions || [])
           .map(item => item.displayName).filter(Boolean).join(' · '),
@@ -237,7 +237,7 @@ async function hydrateIndexedPlace(placeId, fallbackLocation, category) {
           // Use exact Google type verification for meal, offer, and activity
           // categories; only strict categories may rely on their saved search context.
           categories: TAXONOMY_VERIFICATION_CATEGORIES.includes(category)
-            ? classifyGoogleTypeCategories(place)
+            ? classifyGoogleTypeCategories(place, identity.searchContexts)
             : googleCategoryTags(place, category),
         sourceQueries: [`indexed:${category}`],
       },

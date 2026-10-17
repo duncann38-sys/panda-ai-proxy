@@ -196,12 +196,22 @@ test('live verification uses exact Google place types and does not infer offerin
     primaryType: 'breakfast_restaurant',
     types: ['restaurant', 'brunch_restaurant', 'night_club', 'sports_bar'],
     displayName: { text: 'Bottomless Live Music' },
-  }), ['Breakfast', 'Drinks', 'Nightlife', 'Sports']);
+  }), ['Breakfast', 'Drinks', 'Nightlife']);
   assert.deepEqual(classifyGoogleTypeCategories({
     types: ['bar'],
     displayName: { text: 'Bottomless Live Music' },
   }), ['Drinks']);
   assert.deepEqual(classifyGoogleTypeCategories({ types: ['restaurant'] }), []);
+});
+
+test('Sports accepts sport-specific pub contexts and dedicated sports types, not generic pubs or parent malls', () => {
+  const pub = { primaryType: 'pub', types: ['pub'] };
+  assert.deepEqual(classifyGoogleTypeCategories(pub, ['battersea/Sports']), ['Drinks', 'Sports']);
+  assert.deepEqual(classifyGoogleTypeCategories(pub, ['battersea/Pubs']), ['Drinks']);
+  assert.ok(classifyGoogleTypeCategories({ primaryType: 'golf_course', types: ['golf_course'] }).includes('Sports'));
+  assert.equal(classifyGoogleTypeCategories({
+    primaryType: 'shopping_mall', types: ['shopping_mall', 'pub', 'sports_bar'],
+  }, ['battersea/Sports']).includes('Sports'), false);
 });
 
 test('read-only verification uses only basic type fields and never stores the Google response', async () => {
@@ -249,7 +259,7 @@ test('read-only verification uses only basic type fields and never stores the Go
     waitImpl: async ms => assert.equal(ms, 100),
     fetchImpl: async (url, init) => {
       calls.push({ url, headers: init.headers });
-      return new Response(JSON.stringify({ types: ['sports_bar'] }), { status: 200 });
+      return new Response(JSON.stringify({ primaryType: 'pub', types: ['pub'] }), { status: 200 });
     },
   });
   assert.equal(result.status, 'complete');

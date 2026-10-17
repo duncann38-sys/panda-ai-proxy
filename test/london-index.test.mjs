@@ -260,6 +260,7 @@ test('Mayfair category expansion returns the nearest indexed central venues firs
     category: 'Coffee', pageSize: 200,
   }, now);
   assert.equal(first.identities.length, 120);
+  assert.deepEqual(first.identities[0].searchContexts, ['mayfair_marylebone/Coffee']);
   assert.equal(first.indexExhausted, true);
   assert.deepEqual(first.identities.map(item => item.distanceMeters),
     [...first.identities].map(item => item.distanceMeters).sort((a, b) => a - b));

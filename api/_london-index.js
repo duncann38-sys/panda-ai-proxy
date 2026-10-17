@@ -223,6 +223,7 @@ export async function nearbySeededPlacePage(store, {
        if (!Number.isFinite(distance) || distance > radius) continue;
       found.push({
         place_id: identityDoc.id, lat: position.lat, lng: position.lng,
+        searchContexts: [context],
         distanceMeters: Math.round(distance),
         primary_photo_path: identity.primary_photo_path
           || `/api/partner/venues/${encodeURIComponent(identityDoc.id)}/photos/0/image`,

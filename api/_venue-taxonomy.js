@@ -133,18 +133,40 @@ export function selectTaxonomyVerificationSample(documents, { perCategory = 25 }
   };
 }
 
-export function classifyGoogleTypeCategories(place) {
+function hasSportsSearchEvidence(searchContexts) {
+  return (Array.isArray(searchContexts) ? searchContexts : []).some(context => {
+    if (typeof context !== 'string') return false;
+    const task = TASKS_BY_CONTEXT.get(context);
+    return task?.category === 'Sports'
+      && /\b(sport|sports|football|rugby|cricket|darts|golf)\b/i.test(task.query || '');
+  });
+}
+
+export function classifyGoogleTypeCategories(place, searchContexts = []) {
   const types = new Set([
     ...(Array.isArray(place?.types) ? place.types : []),
     ...(typeof place?.primaryType === 'string' ? [place.primaryType] : []),
   ].map(type => String(type).toLowerCase()));
+  const primaryType = String(place?.primaryType || place?.types?.[0] || '').toLowerCase();
+  const sportsVenueTypes = new Set([
+    'sports_bar', 'sports_complex', 'sports_club', 'stadium', 'golf_course',
+    'athletic_field', 'sports_activity_location',
+  ]);
+  const sportsHospitalityTypes = new Set(['pub', 'bar', 'wine_bar']);
+  const sportsContext = hasSportsSearchEvidence(searchContexts);
   const verified = [];
   if (types.has('breakfast_restaurant')) verified.push('Breakfast');
   if (['bar', 'wine_bar', 'pub', 'night_club'].some(type => types.has(type))) {
     verified.push('Drinks');
   }
   if (types.has('night_club') || types.has('dance_hall')) verified.push('Nightlife');
-  if (types.has('sports_bar')) verified.push('Sports');
+  // Dedicated sports types qualify directly. A pub/bar needs saved Sports-search
+  // provenance, so generic pubs remain in Pubs/Drinks rather than Sports.
+  if (sportsVenueTypes.has(primaryType)
+    || (sportsContext && sportsHospitalityTypes.has(primaryType))
+    || (types.has('sports_bar') && sportsHospitalityTypes.has(primaryType))) {
+    verified.push('Sports');
+  }
   if (types.has('live_music_venue') || types.has('concert_hall')) verified.push('Live Music');
   // Google place types do not prove bottomless offers or meal service times.
   return verified;
@@ -220,7 +242,7 @@ export async function verifyTaxonomyDetailsBatch({
       }
       const place = await response.json();
       detailsResponses += 1;
-      const typeMatches = new Set(classifyGoogleTypeCategories(place));
+      const typeMatches = new Set(classifyGoogleTypeCategories(place, contexts));
       for (const category of categories) {
         verificationByCategory[category].responses += 1;
         if (typeMatches.has(category)) verificationByCategory[category].typeMatches += 1;
