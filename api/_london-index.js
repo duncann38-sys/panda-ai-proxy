@@ -213,13 +213,13 @@ export function createLondonSeeder({
   arrayUnion, tasks = LONDON_SEED_TASKS, pagesPerQuery = 1,
   paceMs = 3000, wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
   dailyRequestLimit, customerReserve, customerReserveOverride,
-  planId = '', indexPlanId = planId, requirePhoto = false,
+  planId = '', indexPlanId = planId, requirePhoto = false, scheduleHours = [3, 9],
 }) {
   const pageLimit = Math.max(1, Math.min(3, Math.floor(pagesPerQuery) || 1));
   return async ({ manual = false, maxRequests = 4 } = {}) => {
     if (!store || !apiKey) return { status: 'not_configured' };
     const clock = londonClock(new Date(now()));
-    if (!manual && clock.hour !== 3 && clock.hour !== 9) return { status: 'outside_schedule_window' };
+    if (!manual && !scheduleHours.includes(clock.hour)) return { status: 'outside_schedule_window' };
     const previousWeek = new Date(Date.parse(`${clock.week}T00:00:00Z`) - 7 * 86400000)
       .toISOString().slice(0, 10);
     const key = week => planId ? `${week}_${planId}` : week;

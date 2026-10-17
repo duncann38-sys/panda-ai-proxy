@@ -257,6 +257,24 @@ test('London local 03:00 scheduling handles summer and winter', async () => {
   assert.equal((await s.seed()).status, 'outside_schedule_window');
   assert.equal(s.calls(), 0);
 });
+test('focused area schedule starts at its own London hour and skips completed daily retries', async () => {
+  const store = testStore();
+  const sunday = seedFixture({
+    store, now: () => Date.parse('2026-10-18T04:00:00Z'), scheduleHours: [4, 5],
+  });
+  assert.equal(londonClock(new Date(Date.parse('2026-10-18T04:00:00Z'))).hour, 5);
+  assert.equal((await sunday.seed({ manual: false })).status, 'complete');
+  const monday = seedFixture({
+    store, now: () => Date.parse('2026-10-19T04:00:00Z'), scheduleHours: [4, 5],
+  });
+  assert.equal((await monday.seed({ manual: false })).status, 'complete');
+  assert.equal(monday.calls(), 0);
+  const wrongHour = seedFixture({
+    now: () => Date.parse('2026-10-18T02:00:00Z'), scheduleHours: [4, 5],
+  });
+  assert.equal((await wrongHour.seed({ manual: false })).status, 'outside_schedule_window');
+  assert.equal(wrongHour.calls(), 0);
+});
 test('new scheduled rounds do not start on a weekday, but manual runs can', async () => {
   const s = seedFixture({ now: () => Date.parse('2026-10-19T02:00:00Z') });
   assert.equal((await s.seed()).status, 'nothing_to_resume');
@@ -329,7 +347,12 @@ const authOptions = {
   fetchImpl: async () => ({ ok: true, json: async () => ({ keys: [jwk] }) }),
 };
 test('authorized main-branch workflow signature is accepted', async () => {
-  assert.equal((await verifySeedJob(jwt(), authOptions)).manual, true);
+  const manual = await verifySeedJob(jwt(), authOptions);
+  assert.equal(manual.manual, true);
+  assert.equal(manual.scheduled, false);
+  const scheduled = await verifySeedJob(jwt({ event_name: 'schedule' }), authOptions);
+  assert.equal(scheduled.manual, false);
+  assert.equal(scheduled.scheduled, true);
 });
 test('different repositories, branches, workflows and audiences cannot seed', async () => {
   for (const change of [{ repository: 'attacker/repo' }, { ref: 'refs/heads/dev' },

@@ -46,6 +46,10 @@ export async function verifySeedJob(token, { fetchImpl = fetch, now = Date.now }
       && (!item.use || item.use === 'sig') && (!item.alg || item.alg === 'RS256'));
     if (!key || !verify('RSA-SHA256', Buffer.from(`${parts[0]}.${parts[1]}`),
       createPublicKey({ key, format: 'jwk' }), Buffer.from(parts[2], 'base64url'))) return null;
-    return { manual: claims.event_name === 'workflow_dispatch', runId: claims.run_id };
+    return {
+      manual: claims.event_name === 'workflow_dispatch',
+      scheduled: claims.event_name === 'schedule',
+      runId: claims.run_id,
+    };
   } catch { return null; }
 }

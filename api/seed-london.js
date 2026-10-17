@@ -32,7 +32,7 @@ export default async function handler(req, res) {
   if (req.method === 'GET') {
     return res.status(200).json({
       service: 'panda-london-index', version: 1,
-      schedule: 'Sunday 03:00 Europe/London; daily resume at 03:00 and 09:00 if incomplete',
+      schedule: 'Standard: Sunday 03:00 Europe/London, daily resume at 03:00/09:00. Focus areas: weekly Sunday 04:00 UTC; daily resume if incomplete.',
       tasks: LONDON_SEED_TASKS.length, pagesPerTask: 1, maxRequestsPerChunk: 4,
       planId: LONDON_SEED_PLAN, dailyLimit: discoveryDailyLimit(),
       customerReserve: 500, temporaryBoostEnds: new Date(TEMPORARY_INDEX_BOOST_END).toISOString(),
@@ -51,8 +51,8 @@ export default async function handler(req, res) {
   const token = String(req.headers.authorization || '').replace(/^Bearer /, '');
   const auth = await verifySeedJob(token);
   if (!auth) return res.status(401).json({ error: 'Authorized indexing job required.' });
-  if (scope === 'focus-areas' && !auth.manual) {
-    return res.status(403).json({ error: 'Focused area indexing requires a manual workflow run.' });
+  if (scope === 'focus-areas' && !auth.manual && !auth.scheduled) {
+    return res.status(403).json({ error: 'Focused area indexing requires an authorized workflow run.' });
   }
   try {
     const store = storage();
@@ -68,7 +68,10 @@ export default async function handler(req, res) {
       pagesPerQuery: focus ? 3 : 1,
       requirePhoto: true,
       dailyRequestLimit: () => discoveryDailyLimit(),
-      customerReserve: 500, paceMs: auth.manual ? 1000 : 3000,
+      customerReserve: 500,
+      customerReserveOverride: focus ? 500 : undefined,
+      paceMs: auth.manual ? 1000 : 3000,
+      scheduleHours: focus ? [4, 5] : [3, 9],
     });
     return res.status(200).json({ scope, ...await seed({ manual: auth.manual, maxRequests: 4 }) });
   } catch {
