@@ -13,6 +13,7 @@ import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-director
 import { createDiscoveryService } from './_discovery-lite.js';
 import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage, MAX_INDEXED_FEED_PAGE_SIZE } from './_london-index.js';
 import { buildIndexedFeedPage, buildIndexedIdCandidatePage } from './_indexed-feed-page.js';
+import { currentWeatherResponse } from './_current-weather.js';
 import { googleCategoryTags } from './_google-category-tags.js';
 import {
   boundedInteger,
@@ -709,6 +710,19 @@ export default async function handler(req,res){
     const body=req.body||{};
     const {contents,generationConfig,location}=body;
     const lat=location?.lat??DEFAULT_LAT, lng=location?.lng??DEFAULT_LNG;
+    if(body.weatherOnly===true){
+      const result=await currentWeatherResponse({
+        location,
+        store:db(),
+        apiKey:MAPS_KEY,
+        limit:process.env.PANDA_DAILY_WEATHER_LIMIT||25,
+        fetchImpl:fetch,
+        recordUsage:recordCostEvent,
+      });
+      res.setHeader('Cache-Control','private, no-store');
+      res.status(result.status).json(result.body);
+      return;
+    }
     if(body.venuesOnly){
       if(body.discoveryMode === 'indexed-id-page'){
         try{
