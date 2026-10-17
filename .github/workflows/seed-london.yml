@@ -5,6 +5,15 @@ on:
     # Sunday starts the weekly round; other days resume only unfinished rounds.
     - cron: '0 2,3,8,9 * * *'
   workflow_dispatch:
+    inputs:
+      scope:
+        description: 'Seed the standard London schedule or the priority south-west clusters'
+        required: true
+        type: choice
+        default: standard
+        options:
+          - standard
+          - focus-areas
 permissions:
   contents: read
   id-token: write
@@ -21,4 +30,4 @@ jobs:
         with:
           node-version: '24'
       - name: Seed or resume the external Panda index
-        run: node scripts/seed-london.mjs https://panda-ai-proxy.vercel.app
+        run: node scripts/seed-london.mjs https://panda-ai-proxy.vercel.app "${{ github.event.inputs.scope || 'standard' }}"
