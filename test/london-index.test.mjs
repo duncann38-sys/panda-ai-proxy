@@ -65,6 +65,22 @@ test('focus-area pages add IDs under the existing feed plan with a separate resu
   assert.deepEqual(identity.searchContexts, ['battersea/restaurant']);
   assert.ok(s.store.table(JOB_COLLECTION).has(`2026-10-18_${FOCUS_SEED_PLAN}`));
 });
+test('a one-time explicit seeder reserve override leaves the rest of the daily budget available', async () => {
+  const store = testStore();
+  const limits = [];
+  const seed = createLondonSeeder({
+    store, apiKey: 'test-only', now: () => now, tasks: [task],
+    dailyRequestLimit: () => 1000, customerReserve: 500, customerReserveOverride: 356,
+    paceMs: 0,
+    consumeBudget: async (_store, _kind, limit) => {
+      limits.push(limit);
+      return { allowed: true, shared: true };
+    },
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ places: [] }) }),
+  });
+  assert.equal((await seed({ manual: true })).status, 'complete');
+  assert.deepEqual(limits, [644]);
+});
 test('index writes whitelist IDs/coordinates and never overwrite paid records', async () => {
   const store = testStore();
   store.table('partner_venues').set(point.id, { tier: 'banging', active: true });

@@ -212,7 +212,8 @@ export function createLondonSeeder({
   store, apiKey, consumeBudget, fetchImpl = fetch, now = Date.now,
   arrayUnion, tasks = LONDON_SEED_TASKS, pagesPerQuery = 1,
   paceMs = 3000, wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
-  dailyRequestLimit, customerReserve, planId = '', indexPlanId = planId, requirePhoto = false,
+  dailyRequestLimit, customerReserve, customerReserveOverride,
+  planId = '', indexPlanId = planId, requirePhoto = false,
 }) {
   const pageLimit = Math.max(1, Math.min(3, Math.floor(pagesPerQuery) || 1));
   return async ({ manual = false, maxRequests = 4 } = {}) => {
@@ -256,9 +257,11 @@ export function createLondonSeeder({
       while (state.taskIndex < tasks.length && requests < Math.min(4, Math.max(1, maxRequests))) {
         const dailyLimit = dailyRequestLimit ? dailyRequestLimit() :
           Math.max(1, Number.parseInt(process.env.PANDA_DAILY_PLACES_LIMIT || '500', 10) || 500);
+        const reserveSetting = customerReserveOverride ??
+          process.env.PANDA_SEED_CUSTOMER_RESERVE ??
+          String(customerReserve ?? Math.floor(dailyLimit / 2));
         const reserve = Math.max(0, Math.min(dailyLimit,
-          Number.parseInt(process.env.PANDA_SEED_CUSTOMER_RESERVE ||
-            String(customerReserve ?? Math.floor(dailyLimit / 2)), 10) || 0));
+          Number.parseInt(String(reserveSetting), 10) || 0));
         // Background indexing must not consume all interactive discovery headroom.
         if (dailyLimit <= reserve) {
           failure = 'quota_paused'; state.pauseReason = 'customer_reserve'; break;
