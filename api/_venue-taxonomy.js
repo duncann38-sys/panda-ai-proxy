@@ -13,11 +13,11 @@ const CUISINE_CATEGORIES = new Set([
 ]);
 const STRICT_CATEGORY_CATEGORIES = new Set([
   ...CUISINE_CATEGORIES,
-  'Meat', 'Bar', 'Chicken', 'Pizza', 'Burgers', 'Dessert', 'Coffee',
-  'Pubs', 'Clubs', 'Shops', 'Places of Interest',
+  'Meat', 'Bar', 'Chicken', 'Pizza', 'Burgers', 'Coffee',
+  'Pubs', 'Shops', 'Places of Interest',
 ]);
 export const TAXONOMY_VERIFICATION_CATEGORIES = [
-  'Breakfast', 'Brunch', 'Bottomless', 'Dinner', 'Drinks',
+  'Breakfast', 'Bottomless', 'Dinner', 'Drinks',
   'Live Music', 'Lunch', 'Nightlife', 'Sports',
 ];
 
@@ -140,7 +140,6 @@ export function classifyGoogleTypeCategories(place) {
   ].map(type => String(type).toLowerCase()));
   const verified = [];
   if (types.has('breakfast_restaurant')) verified.push('Breakfast');
-  if (types.has('brunch_restaurant')) verified.push('Brunch');
   if (['bar', 'wine_bar', 'pub', 'night_club'].some(type => types.has(type))) {
     verified.push('Drinks');
   }

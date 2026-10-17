@@ -196,7 +196,7 @@ test('live verification uses exact Google place types and does not infer offerin
     primaryType: 'breakfast_restaurant',
     types: ['restaurant', 'brunch_restaurant', 'night_club', 'sports_bar'],
     displayName: { text: 'Bottomless Live Music' },
-  }), ['Breakfast', 'Brunch', 'Drinks', 'Nightlife', 'Sports']);
+  }), ['Breakfast', 'Drinks', 'Nightlife', 'Sports']);
   assert.deepEqual(classifyGoogleTypeCategories({
     types: ['bar'],
     displayName: { text: 'Bottomless Live Music' },
