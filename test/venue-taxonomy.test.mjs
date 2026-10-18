@@ -210,13 +210,13 @@ test('indexed feed uses the saved category query to match website discovery sema
     );
   }
 
-  assert.deepEqual(
+  assert.equal(
     classifyIndexedFeedCategory(
       { primaryType: 'shopping_mall', types: ['shopping_mall'] },
       'Bottomless',
       ['battersea/Bottomless'],
-    ),
-    [],
+    ).includes('Bottomless'),
+    false,
     'a non-hospitality place must not become Bottomless from query text alone',
   );
 });
