@@ -54,3 +54,15 @@ test('a strict cuisine search context adds only its own tag to a Google restaura
   assert.equal(tags.includes('French'), true);
   assert.equal(tags.includes('Indian'), false);
 });
+
+test('official Google venue types cover the additional typed search categories', () => {
+  const sample = (type) => ({ displayName: { text: 'Example' }, primaryType: type, types: [type] });
+  assert.ok(googleCategoryTags(sample('beer_garden'), '').includes('Pubs'));
+  assert.ok(googleCategoryTags(sample('sports_complex'), '').includes('Sports'));
+  assert.ok(googleCategoryTags(sample('bowling_alley'), '').includes('Sports'));
+  assert.ok(googleCategoryTags(sample('concert_hall'), '').includes('Live Music'));
+  assert.ok(googleCategoryTags(sample('karaoke'), '').includes('Nightlife'));
+  assert.ok(googleCategoryTags(sample('amphitheatre'), '').includes('Places of Interest'));
+  assert.ok(googleCategoryTags(sample('supermarket'), '').includes('Shops'));
+  assert.equal(googleCategoryTags(sample('bar'), '').includes('Live Music'), false);
+});

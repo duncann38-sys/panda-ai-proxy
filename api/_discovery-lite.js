@@ -8,6 +8,7 @@ export const DISCOVERY_FIELDS = [
   'places.primaryType', 'places.types', 'places.photos.name',
   'places.photos.authorAttributions', 'nextPageToken',
 ].join(',');
+export const DISCOVERY_NEARBY_FIELDS = DISCOVERY_FIELDS.split(',').filter(field => field !== 'nextPageToken').join(',');
 export const DISCOVERY_TTL_MS = 24 * 60 * 60 * 1000;
 // This records an operator's verified agreement; it does not create permission.
 // Keep this false until Google has approved the fields, cross-user reuse and
@@ -39,19 +40,39 @@ export function discoveryRequest(body) {
   if (query.length < 2 || query.length > 160 || Array.isArray(body.queries)) {
     throw Object.assign(new Error('Use one discovery query per request.'), { status: 400 });
   }
+  const searchMode = body.searchMode ?? 'text';
+  if (searchMode !== 'text' && searchMode !== 'nearby') {
+    throw Object.assign(new Error('Use text or nearby discovery mode.'), { status: 400 });
+  }
+  const rawTypes = body.includedTypes;
+  if (rawTypes !== undefined && (!Array.isArray(rawTypes) || rawTypes.length > 50
+      || rawTypes.some(type => typeof type !== 'string' || !/^[a-z][a-z0-9_]{0,79}$/i.test(type)))) {
+    throw Object.assign(new Error('Nearby search requires up to 50 valid Google place types.'), { status: 400 });
+  }
+  const includedTypes = [...new Set((rawTypes || []).map(type => type.toLowerCase()))];
+  const includedType = body.includedType === undefined ? '' : String(body.includedType).toLowerCase();
+  if (includedType && !/^[a-z][a-z0-9_]{0,79}$/.test(includedType)) {
+    throw Object.assign(new Error('Invalid Google place type.'), { status: 400 });
+  }
   const radius = Number(body.radius_meters ?? (body.expansionRingKm ? Number(body.expansionRingKm) * 1000 + 1500 : 6000));
   if (!Number.isFinite(radius) || radius < 100 || radius > 25000) {
     throw Object.assign(new Error('Invalid discovery radius.'), { status: 400 });
   }
   const pageToken = typeof body.pageToken === 'string' ? body.pageToken : '';
   if (pageToken.length > 2000) throw Object.assign(new Error('Invalid page token.'), { status: 400 });
-  return { lat, lng, query, radius, pageToken };
+  if (searchMode === 'nearby' && (!includedTypes.length || pageToken || includedType)) {
+    throw Object.assign(new Error('Nearby search requires includedTypes and does not accept page tokens.'), { status: 400 });
+  }
+  if (searchMode === 'text' && includedTypes.length) {
+    throw Object.assign(new Error('Text Search accepts one includedType, not an includedTypes array.'), { status: 400 });
+  }
+  return { lat, lng, query, radius, pageToken, searchMode, includedType, includedTypes };
 }
 
 export function discoveryKey(request) {
   return createHash('sha256').update(JSON.stringify([
-    'cover-v1', request.query.toLowerCase(),
-    request.lat.toFixed(3), request.lng.toFixed(3), request.radius, request.pageToken,
+    'cover-v2', request.searchMode, request.query.toLowerCase(), request.includedType,
+    [...request.includedTypes].sort(), request.lat.toFixed(3), request.lng.toFixed(3), request.radius, request.pageToken,
   ])).digest('hex');
 }
 
@@ -134,10 +155,12 @@ export function createDiscoveryService({
     const venues = located([...candidates.values()], request);
     // Filter category fallbacks rather than silently substituting unrelated venues.
     const terms = request.query.toLowerCase().replace(/\b(near me|nearby|restaurants?|venues?|in)\b/g, ' ').trim().split(/\s+/).filter(Boolean);
-    const matches = terms.length ? venues.filter(v => {
-      const text = `${v.name} ${v.type} ${(v.types || []).join(' ')} ${v.address}`.toLowerCase().replaceAll('_', ' ');
-      return terms.every(term => text.includes(term.replace(/s$/, '')));
-    }) : venues;
+    const matches = request.searchMode === 'nearby'
+      ? venues.filter(v => (v.types || []).some(type => request.includedTypes.includes(String(type).toLowerCase())))
+      : terms.length ? venues.filter(v => {
+        const text = `${v.name} ${v.type} ${(v.types || []).join(' ')} ${v.address}`.toLowerCase().replaceAll('_', ' ');
+        return terms.every(term => text.includes(term.replace(/s$/, '')));
+      }) : venues;
     return { venues: matches, nextPageToken: null, cached: true, quotaExceeded: reason === 'quota',
       dataMode: matches.length ? 'cached' : 'unavailable', fallbackReason: reason };
   }
@@ -176,18 +199,31 @@ export function createDiscoveryService({
     if (budget.shared !== true) return localFallback(request, 'budget_storage_unavailable');
     let data;
     try {
-      const response = await fetchImpl('https://places.googleapis.com/v1/places:searchText', {
+      const nearby = request.searchMode === 'nearby';
+      const googleBody = nearby ? {
+        includedTypes: request.includedTypes,
+        maxResultCount: 20,
+        rankPreference: 'DISTANCE',
+        languageCode: 'en-GB',
+        locationRestriction: { circle: { center: { latitude: request.lat, longitude: request.lng }, radius: request.radius } },
+      } : {
+        textQuery: request.query, pageSize: 20,
+        rankPreference: 'DISTANCE', languageCode: 'en-GB',
+        locationBias: { circle: { center: { latitude: request.lat, longitude: request.lng }, radius: request.radius } },
+        ...(request.includedType ? { includedType: request.includedType } : {}),
+        ...(request.pageToken ? { pageToken: request.pageToken } : {}),
+      };
+      const response = await fetchImpl(nearby
+        ? 'https://places.googleapis.com/v1/places:searchNearby'
+        : 'https://places.googleapis.com/v1/places:searchText', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': DISCOVERY_FIELDS },
+        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey,
+          'X-Goog-FieldMask': nearby ? DISCOVERY_NEARBY_FIELDS : DISCOVERY_FIELDS },
         signal: AbortSignal.timeout(8000),
-        body: JSON.stringify({
-          textQuery: request.query, pageSize: 20,
-          rankPreference: 'DISTANCE', languageCode: 'en-GB',
-          locationBias: { circle: { center: { latitude: request.lat, longitude: request.lng }, radius: request.radius } },
-          ...(request.pageToken ? { pageToken: request.pageToken } : {}),
-        }),
+        body: JSON.stringify(googleBody),
       });
       data = await response.json();
+      if (!response.ok || data.error)
       if (!response.ok || data.error) {
         const quota = response.status === 429 || data.error?.status === 'RESOURCE_EXHAUSTED' || data.error?.code === 429;
         warn(quota ? 'Google Places quota exhausted. Activating local fallback.' : 'Google discovery provider unavailable.');
@@ -195,17 +231,21 @@ export function createDiscoveryService({
       }
     } catch { return localFallback(request, 'provider_unavailable'); }
     if (!Array.isArray(data.places) && data.places != null) return localFallback(request, 'provider_unavailable');
-    const venues = located((data.places || []).map(coverVenue).filter(Boolean), request);
+    const googleVenues = (data.places || []).map(coverVenue).filter(Boolean);
+    const matchingVenues = request.searchMode === 'nearby'
+      ? googleVenues.filter(venue => [...(venue.types || []), venue.primaryType].some(type => type && request.includedTypes.includes(String(type).toLowerCase())))
+      : googleVenues;
+    const venues = located(matchingVenues, request);
     if (!persistFullContent) {
       try { if (indexIdentities) await indexIdentities(venues); }
       catch { warn('Live discovery served, but identity indexing failed.'); }
       return {
-        venues, nextPageToken: data.nextPageToken || null, cached: false,
+        venues, nextPageToken: request.searchMode === 'nearby' ? null : data.nextPageToken || null, cached: false,
         dataMode: 'google', indexedNearbyCount,
       };
     }
     const ts = now();
-    const entry = { ts, venues, nextPageToken: data.nextPageToken || null };
+    const entry = { ts, venues, nextPageToken: request.searchMode === 'nearby' ? null : data.nextPageToken || null };
     memory.delete(key);
     memory.set(key, entry);
     while (memory.size > 200) memory.delete(memory.keys().next().value);

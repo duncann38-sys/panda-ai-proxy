@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createDiscoveryService, DISCOVERY_FIELDS, DISCOVERY_TTL_MS, discoveryKey, discoveryRequest, sharedDiscoveryCacheApproved } from '../api/_discovery-lite.js';
+import { createDiscoveryService, DISCOVERY_FIELDS, DISCOVERY_NEARBY_FIELDS, DISCOVERY_TTL_MS, discoveryKey, discoveryRequest, sharedDiscoveryCacheApproved } from '../api/_discovery-lite.js';
 
 test('shared Google-content cache stays off without explicit approval and an auditable reference', () => {
   assert.equal(sharedDiscoveryCacheApproved(), false);
@@ -73,7 +73,10 @@ function setup(options = {}) {
     store, apiKey: 'test-only', consumeBudget: allowed, warn: () => {},
     fetchImpl: async (url, init) => {
       calls++; last = {url, init};
-      return {ok: true, status: 200, json: async () => ({places: [place]})};
+      const request = JSON.parse(init.body);
+      const nearbyType = request.includedTypes?.[0];
+      const responsePlace = nearbyType ? { ...place, primaryType: nearbyType, types: [nearbyType] } : place;
+      return {ok: true, status: 200, json: async () => ({places: [responsePlace]})};
     },
     ...options,
   });
@@ -161,4 +164,33 @@ test('unavailable distributed budget storage never sends an unmetered request', 
   const result = await s.search(body);
   assert.equal(s.calls(),0);
   assert.equal(result.fallbackReason,'budget_storage_unavailable');
+});
+
+test('typed Nearby Search uses one valid includedTypes request and a cover-only field mask', async () => {
+  assert.doesNotMatch(DISCOVERY_NEARBY_FIELDS, /nextPageToken|rating|openingHours|reviews|priceLevel/);
+  const s = setup();
+  const result = await s.search({ ...body, searchMode: 'nearby', includedTypes: ['pub', 'bar', 'beer_garden'] });
+  assert.equal(s.calls(), 1);
+  assert.match(s.last().url, /places:searchNearby$/);
+  const request = JSON.parse(s.last().init.body);
+  assert.deepEqual(request.includedTypes, ['pub', 'bar', 'beer_garden']);
+  assert.equal(request.maxResultCount, 20);
+  assert.equal(request.locationRestriction.circle.radius, 6000);
+  assert.equal(request.textQuery, undefined);
+  assert.equal(s.last().init.headers['X-Goog-FieldMask'], DISCOVERY_NEARBY_FIELDS);
+  assert.equal(result.nextPageToken, null);
+});
+test('Nearby Search validates type lists and cannot take Text Search page tokens', async () => {
+  const s = setup();
+  await assert.rejects(s.search({ ...body, searchMode: 'nearby' }), /includedTypes/);
+  await assert.rejects(s.search({ ...body, searchMode: 'nearby', includedTypes: ['pub'], pageToken: 'x' }), /page tokens/);
+  await assert.rejects(s.search({ ...body, searchMode: 'nearby', includedTypes: ['pub;bad'] }), /valid Google place types/);
+  await assert.rejects(s.search({ ...body, includedTypes: ['pub', 'bar'] }), /Text Search accepts one includedType/);
+  assert.equal(s.calls(), 0);
+});
+test('discovery cache keys distinguish type-fallback categories', () => {
+  const key = value => discoveryKey(discoveryRequest(value));
+  assert.notEqual(key({ ...body, searchMode: 'nearby', includedTypes: ['pub'] }),
+    key({ ...body, searchMode: 'nearby', includedTypes: ['sports_complex'] }));
+  assert.notEqual(key(body), key({ ...body, searchMode: 'nearby', includedTypes: ['pub'] }));
 });
