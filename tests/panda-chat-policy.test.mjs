@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { localGreeting, quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues } from '../api/_panda-chat-policy.js';
+import { localGreeting, localMoment, quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues } from '../api/_panda-chat-policy.js';
 const chat = texts => texts.map(text => ({role:'user',parts:[{text}]}));
 test('greetings use current user timezone, including London DST and invalid zone fallback', () => {
   const now = new Date('2026-10-10T11:30:00Z');
@@ -88,4 +88,19 @@ test('pure conversation and explicit no-search requests never trigger paid venue
   assert.equal(maySearchVenues('What is a pub crawl?'),false);
   assert.equal(maySearchVenues('How are you?'),false);
   assert.equal(maySearchVenues('Find pubs near me'),true);
+});
+
+test('local moment exposes the actual weekday, date, time and daypart in the requested zone', () => {
+  const moment = localMoment({ timeZone: 'Europe/London' }, new Date('2026-10-18T07:00:00Z'));
+  assert.deepEqual(moment, {
+    timeZone: 'Europe/London',
+    greeting: 'Good morning',
+    weekday: 'Sunday',
+    date: '18 October 2026',
+    localTime: '08:00',
+    daypart: 'morning',
+  });
+  const newYork = localMoment({ timeZone: 'America/New_York' }, new Date('2026-10-18T07:00:00Z'));
+  assert.equal(newYork.weekday, 'Sunday');
+  assert.equal(newYork.daypart, 'late night');
 });

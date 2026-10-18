@@ -9,6 +9,7 @@ import { GoogleAuth } from 'google-auth-library';
 import admin from 'firebase-admin';
 import { applyGuard } from './_guard.js';
 import { quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues, isSessionVenueTransitFollowUp } from './_panda-chat-policy.js';
+import { detectItineraryStages, collectItineraryVenues, itineraryReply } from './_panda-itinerary.js';
 import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-directory.js';
 import { createDiscoveryService } from './_discovery-lite.js';
 import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage, MAX_INDEXED_FEED_PAGE_SIZE } from './_london-index.js';
@@ -820,6 +821,25 @@ export default async function handler(req,res){
           }else weatherStatus=safeProviderFailure(data)||'weather_unavailable';
         }catch{weatherStatus='weather_unavailable';}
       }else weatherStatus='weather_unavailable';
+    }
+    const itineraryStages = maySearchVenues(userText) ? detectItineraryStages(userText) : null;
+    if(itineraryStages){
+      const area=extractArea(userText);
+      const result=await collectItineraryVenues(itineraryStages,async stage=>{
+        const query=sessionVenueQuery(stage.query,contents);
+        const found=await searchChatVenues(query,lat,lng,area,false,true);
+        return filterSessionVenues(found,contents);
+      });
+      res.status(200).json({
+        text:itineraryReply({stages:itineraryStages,venues:result.venues,missing:result.missing,area,weather}),
+        venues:result.venues,
+        richMetadata:true,
+        customItinerary:true,
+        itineraryMissing:result.missing,
+        weatherStatus,
+        weather,
+      });
+      return;
     }
     async function degrade(reason='unknown'){
       if(prefetchedVenues!==null){
