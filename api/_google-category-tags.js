@@ -74,7 +74,7 @@ export function googleCategoryTags(place, query) {
     || (hasHospitality && /\b(cocktail|drinks?|wine bar)\b/.test(q)));
   add('Nightlife', [...types].some(type => nightlifeTypes.has(type)) || types.has('event_venue')
     || types.has('performing_arts_theater')
-    || (hasHospitality && /\b(nightlife|night ?clubs?|clubs?|dance halls?|live music|sports bars?|entertainment|karaoke)\b/.test(q)));
+    || (hasHospitality && /\b(nightlife|night ?clubs?|clubs?|dance halls?|entertainment|karaoke)\b/.test(q)));
   add('Live Music', [...types].some(type => liveMusicTypes.has(type)) || place.hasMusic === true || /\b(live music|music venue|concert|karaoke)\b/.test(text)
     || (hasHospitality && /\b(live music|dj)\b/.test(q)));
   add('Sports', [...types].some(type => sportsTypes.has(type)) || /\b(sports bar|football bar)\b/.test(text)

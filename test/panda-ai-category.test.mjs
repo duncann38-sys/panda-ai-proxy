@@ -55,6 +55,18 @@ test('a strict cuisine search context adds only its own tag to a Google restaura
   assert.equal(tags.includes('Indian'), false);
 });
 
+test('sports and live-music text searches do not cross-tag as nightlife', () => {
+  const sportsBar = { primaryType: 'bar', types: ['bar'] };
+  const sports = googleCategoryTags(sportsBar, 'sports bars showing live football');
+  assert.equal(sports.includes('Sports'), true);
+  assert.equal(sports.includes('Nightlife'), false);
+
+  const musicBar = { primaryType: 'bar', types: ['bar'] };
+  const music = googleCategoryTags(musicBar, 'live music venues bars');
+  assert.equal(music.includes('Live Music'), true);
+  assert.equal(music.includes('Nightlife'), false);
+});
+
 test('official Google venue types cover the additional typed search categories', () => {
   const sample = (type) => ({ displayName: { text: 'Example' }, primaryType: type, types: [type] });
   assert.ok(googleCategoryTags(sample('beer_garden'), '').includes('Pubs'));
