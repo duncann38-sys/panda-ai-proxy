@@ -8,7 +8,7 @@
 import { GoogleAuth } from 'google-auth-library';
 import admin from 'firebase-admin';
 import { applyGuard } from './_guard.js';
-import { quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues } from './_panda-chat-policy.js';
+import { quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues, isSessionVenueTransitFollowUp } from './_panda-chat-policy.js';
 import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-directory.js';
 import { createDiscoveryService } from './_discovery-lite.js';
 import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage, MAX_INDEXED_FEED_PAGE_SIZE } from './_london-index.js';
@@ -787,6 +787,7 @@ export default async function handler(req,res){
       return;
     }
     const userText=latestUserText(contents);
+    const sessionVenueTransitFollowUp=isSessionVenueTransitFollowUp(userText,body.sessionVenueContext);
     const quick=quickChatReply(userText,body.chatContext,contents);
     if(quick){res.status(200).json({text:quick,venues:[],aiMode:'quick'});return;}
     if(maySearchVenues(userText)&&ambiguousClub(userText,contents)){
@@ -861,9 +862,9 @@ export default async function handler(req,res){
     const projectId=credentials.project_id;
     const convo=compactConversation(contents,{maxItems:12,maxChars:7000});
     const baseBody={contents:convo,tools:[FIND_PLACES_TOOL]};
-    baseBody.systemInstruction={parts:[{text:buildChatInstruction(contents,body.chatContext,weather,body.sessionPreferences)}]};
+    baseBody.systemInstruction={parts:[{text:buildChatInstruction(contents,body.chatContext,weather,body.sessionPreferences,body.sessionVenueContext)}]};
     if(isWeatherQuestion(userText)&&!isDirectVenueRequest(userText))delete baseBody.tools;
-    if(!maySearchVenues(userText))delete baseBody.tools;
+    if(!maySearchVenues(userText)||sessionVenueTransitFollowUp)delete baseBody.tools;
     const maxOutputTokens=boundedInteger(process.env.PANDA_MAX_OUTPUT_TOKENS,320,96,512);
     if(generationConfig||maxOutputTokens){
       baseBody.generationConfig={...(generationConfig||{})};
@@ -877,7 +878,7 @@ export default async function handler(req,res){
     let venues=[];
     // An explicit venue request needs one grounded model reply, not a model decision plus
     // a second/third inference. Keep the established guarded, shared Places search.
-    if(maySearchVenues(userText)&&isDirectVenueRequest(userText)&&!isWeatherQuestion(userText)){
+    if(maySearchVenues(userText)&&isDirectVenueRequest(userText)&&!isWeatherQuestion(userText)&&!sessionVenueTransitFollowUp){
       const area=extractArea(userText);
       const q=sessionVenueQuery(fallbackQuery(userText),contents);
       prefetchedVenues=filterSessionVenues(limitChatVenues(await searchChatVenues(q,lat,lng,area,/\bopen\b/i.test(userText),!/\b(all|more|another|different)\b/i.test(userText)),userText,q),contents);
