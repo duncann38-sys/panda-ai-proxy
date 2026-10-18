@@ -10,6 +10,7 @@ import admin from 'firebase-admin';
 import { applyGuard } from './_guard.js';
 import { quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues, isSessionVenueTransitFollowUp } from './_panda-chat-policy.js';
 import { detectItineraryStages, collectItineraryVenues, itineraryReply } from './_panda-itinerary.js';
+import { findRecentOpeningVenues, isNewOpeningRequest } from './_panda-new-openings.js';
 import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-directory.js';
 import { createDiscoveryService } from './_discovery-lite.js';
 import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage, MAX_INDEXED_FEED_PAGE_SIZE } from './_london-index.js';
@@ -788,6 +789,25 @@ export default async function handler(req,res){
       return;
     }
     const userText=latestUserText(contents);
+    if(isNewOpeningRequest(userText)){
+      const requestedArea=extractArea(userText);
+      const hasLocation=location&&Number.isFinite(Number(location.lat))&&Number.isFinite(Number(location.lng));
+      if(!requestedArea&&!hasLocation){
+        res.status(200).json({newOpeningsSearch:true,sourceStatus:'location_required',venues:[],text:'Turn on location or tell me the London area you want, and I’ll check recent openings there.'});
+        return;
+      }
+      const openingResult=await findRecentOpeningVenues({
+        fetchImpl:globalThis.fetch,
+        now:Date.now(),
+        seenPlaceIds:body.openingSeenPlaceIds,
+        rotation:body.openingRotation,
+        searchCandidate:(query)=>searchVenuesSmart(query,lat,lng,requestedArea,false),
+        sleep:ms=>new Promise(resolve=>setTimeout(resolve,ms)),
+      });
+      res.setHeader('Cache-Control','private, no-store');
+      res.status(200).json(openingResult);
+      return;
+    }
     const sessionVenueTransitFollowUp=isSessionVenueTransitFollowUp(userText,body.sessionVenueContext);
     const quick=quickChatReply(userText,body.chatContext,contents);
     if(quick){res.status(200).json({text:quick,venues:[],aiMode:'quick'});return;}
