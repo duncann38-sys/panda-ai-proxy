@@ -1,5 +1,6 @@
 import { ID_COLLECTION } from './_london-index.js';
 import { FOCUS_SEED_TASKS, LONDON_SEED_TASKS, PANDA_CATEGORIES } from '../constants/london_clusters.js';
+import { googleCategoryTags } from './_google-category-tags.js';
 
 export const VENUE_TAXONOMY_VERSION = 1;
 
@@ -20,6 +21,21 @@ export const TAXONOMY_VERIFICATION_CATEGORIES = [
   'Breakfast', 'Bottomless', 'Dinner', 'Drinks',
   'Live Music', 'Lunch', 'Nightlife', 'Sports',
 ];
+
+/**
+ * Classify an indexed live Google result with the exact category query that
+ * produced its saved cluster/category context. This keeps discovery parity
+ * with the website without persisting Google venue details.
+ */
+export function classifyIndexedFeedCategory(place, category, searchContexts = []) {
+  const contexts = Array.isArray(searchContexts) ? searchContexts : [];
+  const task = contexts
+    .map(context => typeof context === 'string' ? TASKS_BY_CONTEXT.get(context) : null)
+    .find(candidate => candidate?.category === category);
+
+  if (TAXONOMY_VERIFICATION_CATEGORIES.includes(category) && !task) return [];
+  return googleCategoryTags(place, task?.query || category);
+}
 
 const toTag = value => value.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
 

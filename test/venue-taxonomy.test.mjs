@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  backfillVenueTaxonomyPage, classifyGoogleTypeCategories, deriveVenueTaxonomy,
+  backfillVenueTaxonomyPage, classifyGoogleTypeCategories, classifyIndexedFeedCategory, deriveVenueTaxonomy,
   selectTaxonomyVerificationSample, verifyTaxonomyDetailsBatch,
 } from '../api/_venue-taxonomy.js';
 
@@ -189,6 +189,36 @@ test('verification sample is balanced across broad contexts and never includes t
   assert.deepEqual(sample.candidates.find(candidate => candidate.id === 'ChIJTwo').categories,
     ['Bottomless']);
   assert.equal(sample.perCategory.All, undefined);
+});
+
+test('indexed feed uses the saved category query to match website discovery semantics', () => {
+  const restaurant = { primaryType: 'restaurant', types: ['restaurant'] };
+  const categories = [
+    'Breakfast', 'Bottomless', 'Dinner', 'Drinks',
+    'Live Music', 'Lunch', 'Nightlife', 'Sports',
+  ];
+
+  for (const category of categories) {
+    const matched = classifyIndexedFeedCategory(
+      restaurant, category, [`battersea/${category}`],
+    );
+    assert.ok(matched.includes(category), `${category} should match its own saved search context`);
+    assert.deepEqual(
+      classifyIndexedFeedCategory(restaurant, category, ['battersea/Pubs']),
+      [],
+      `${category} must not borrow a different category context`,
+    );
+  }
+
+  assert.deepEqual(
+    classifyIndexedFeedCategory(
+      { primaryType: 'shopping_mall', types: ['shopping_mall'] },
+      'Bottomless',
+      ['battersea/Bottomless'],
+    ),
+    [],
+    'a non-hospitality place must not become Bottomless from query text alone',
+  );
 });
 
 test('live verification uses exact Google place types and does not infer offerings from names', () => {

@@ -15,7 +15,7 @@ import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage, MAX
 import { buildIndexedFeedPage, buildIndexedIdCandidatePage } from './_indexed-feed-page.js';
 import { currentWeatherResponse } from './_current-weather.js';
 import { googleCategoryTags } from './_google-category-tags.js';
-import { classifyGoogleTypeCategories, TAXONOMY_VERIFICATION_CATEGORIES } from './_venue-taxonomy.js';
+import { classifyIndexedFeedCategory } from './_venue-taxonomy.js';
 import {
   boundedInteger,
   cacheablePlacesResult,
@@ -236,9 +236,7 @@ async function hydrateIndexedPlace(placeId, identity, category) {
         detailsDeferred: true,
           // Use exact Google type verification for meal, offer, and activity
           // categories; only strict categories may rely on their saved search context.
-          categories: TAXONOMY_VERIFICATION_CATEGORIES.includes(category)
-            ? classifyGoogleTypeCategories(place, identity.searchContexts)
-            : googleCategoryTags(place, category),
+          categories: classifyIndexedFeedCategory(place, category, identity.searchContexts),
         sourceQueries: [`indexed:${category}`],
       },
     };
