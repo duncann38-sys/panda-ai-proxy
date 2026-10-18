@@ -151,7 +151,7 @@ export function isSessionVenueTransitFollowUp(text, value) {
     venue.name.length >= 3 && normalizedText.includes(venue.name.toLocaleLowerCase('en-GB')),
   );
   const refersToVenue = namesVenue
-    || /\b(?:that|this)\s+(?:place|venue|restaurant|pub|bar|cafe|café|spot|one)\b|\b(?:there|it|that one)\b/i.test(normalizedText);
+    || /\b(?:that|this)\s+(?:place|venue|restaurant|pub|bar|cafe|café|spot|one)\b|\b(?:there|that one)\b|\b(?:near|at|to|from|around|outside|inside)\s+it\b/i.test(normalizedText);
   return refersToVenue && /\b(?:station|tube|underground|train|rail|directions?|route|get there|walk)\b/i.test(normalizedText);
 }
 
