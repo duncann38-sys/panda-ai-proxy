@@ -89,20 +89,27 @@ import {
       let request = inFlightTransitRoutes.get(cacheKey);
       if (!request) {
         request = (async () => {
-          const venue = await getVenueProfile(placeId);
-          if (!venue || venue.latitude === null || venue.longitude === null) {
+          // Google Routes resolves the verified Place ID itself. Planner already
+          // has the venue's price/rating facts; a second Place Details request
+          // adds latency and couples every journey to an unrelated method quota.
+          const signal = planner ? AbortSignal.timeout(13_000) : undefined;
+          const venue = planner ? null : await getVenueProfile(placeId);
+          if (!planner && (!venue || venue.latitude === null || venue.longitude === null)) {
             const error = new Error('Google does not have coordinates for this venue.');
             error.status = 404;
             throw error;
           }
-          const destination = { latitude: venue.latitude, longitude: venue.longitude };
-          const nearbyMetres = Math.hypot(
+          const destination = planner ? { placeId } : { latitude: venue.latitude, longitude: venue.longitude };
+          const nearbyMetres = planner ? Infinity : Math.hypot(
             (location.latitude - destination.latitude) * 111320,
             (location.longitude - destination.longitude) * 111320 *
               Math.cos((location.latitude + destination.latitude) * Math.PI / 360),
           );
           const directWalk = nearbyMetres <= 100 && !planner ? null :
-            await getWalkingRoute(location, destination).catch(() => null);
+            await getWalkingRoute(location, destination, { signal }).catch(error => {
+              if (planner && (error?.status === 429 || signal.aborted)) throw error;
+              return null;
+            });
           const walkingResult = (reason) => ({
             recommendation: 'walk',
             recommendationReason: reason,
@@ -123,11 +130,13 @@ import {
             transitCache.set(cacheKey, { expiresAt: Date.now() + TRANSIT_CACHE_TTL_MS, result });
             return result;
           }
-          const transitRoute = await getTransitRoute(location, destination, { includeLive: !planner, maxMinutes }).catch(error => {
+          const transitRoute = await getTransitRoute(location, destination, { includeLive: !planner, maxMinutes, signal }).catch(error => {
+            if (planner && (error?.status === 429 || signal.aborted)) throw error;
             if (directWalk) return null;
             throw error;
           });
-          if (directWalk && ((!transitRoute && directWalk.durationMinutes <= 60) ||
+          if (directWalk && (!planner || directWalk.durationMinutes <= maxMinutes) &&
+            ((!transitRoute && directWalk.durationMinutes <= 60) ||
             (transitRoute && directWalk.durationMinutes <= transitRoute.durationMinutes))) {
             const result = walkingResult(transitRoute ? 'Walking is quicker than the available public transport route' :
               'No public transport route is available; a walking route was found');
@@ -140,6 +149,11 @@ import {
             : -1;
           if (!transitRoute || firstTransitIndex < 0 || lastTransitIndex < firstTransitIndex) {
             const error = new Error('A complete public transport route was not found.');
+            error.status = 404;
+            throw error;
+          }
+          if (planner && transitRoute.durationMinutes > maxMinutes) {
+            const error = new Error(`No verified journey within ${maxMinutes} minutes was found.`);
             error.status = 404;
             throw error;
           }
@@ -166,7 +180,7 @@ import {
             originWalk: walkingRouteFromSteps(transitRoute.steps.slice(0, firstTransitIndex)),
             transitRoute,
             venueWalk: walkingRouteFromSteps(transitRoute.steps.slice(lastTransitIndex + 1)),
-            source: 'google_places',
+            source: planner ? 'google_routes' : 'google_places',
             updatedAt,
             timingSource: transitRoute.timingSource || 'google_estimate',
           };
@@ -179,6 +193,10 @@ import {
       res.setHeader('Cache-Control', result.timingSource === 'tfl_live' ? 'private, max-age=0' : 'private, max-age=30');
       res.status(200).json(result);
     } catch (error) {
+      if (planner && ['AbortError', 'TimeoutError'].includes(error?.name)) {
+        res.status(504).json({ error: 'The live journey check timed out. Please retry.' });
+        return;
+      }
       if (Number.isInteger(error?.status)) {
         res.status(error.status).json({ error: error.message });
         return;

@@ -241,7 +241,7 @@ function getTodayHours(place) {
 async function googleJson(url, options, fallbackMessage) {
   const response = await fetch(url, {
     ...options,
-    signal: AbortSignal.timeout(10_000),
+    signal: options.signal ?? AbortSignal.timeout(10_000),
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -584,9 +584,24 @@ export async function findNearestTransitStation(latitude, longitude) {
 }
 
 const walkingRouteCache = new Map();
-export async function getWalkingRoute(origin, destination) {
-    const cacheKey = [origin.latitude, origin.longitude, destination.latitude, destination.longitude]
-      .map(value => value.toFixed(5)).join(':');
+function routeWaypoint(point) {
+  if (point?.placeId !== undefined) {
+    if (!isValidPlaceId(point.placeId)) throw requestError('Choose a valid Google venue.', 400);
+    return { placeId: point.placeId };
+  }
+  if (!Number.isFinite(point?.latitude) || Math.abs(point.latitude) > 90 ||
+      !Number.isFinite(point?.longitude) || Math.abs(point.longitude) > 180) {
+    throw requestError('A valid route location is required.', 400);
+  }
+  return { location: { latLng: { latitude: point.latitude, longitude: point.longitude } } };
+}
+
+export async function getWalkingRoute(origin, destination, { signal } = {}) {
+    const originWaypoint = routeWaypoint(origin);
+    const destinationWaypoint = routeWaypoint(destination);
+    const destinationKey = destinationWaypoint.placeId ||
+      [destination.latitude, destination.longitude].map(value => value.toFixed(5)).join(':');
+    const cacheKey = `${origin.latitude.toFixed(5)}:${origin.longitude.toFixed(5)}:${destinationKey}`;
     const cached = walkingRouteCache.get(cacheKey);
     if (cached && cached.expires > Date.now()) return cached.route;
     let payload;
@@ -595,6 +610,7 @@ export async function getWalkingRoute(origin, destination) {
         GOOGLE_ROUTES_URL,
         {
           method: 'POST',
+          signal,
           headers: {
             'Content-Type': 'application/json',
             'X-Goog-Api-Key': apiKey(),
@@ -611,8 +627,8 @@ export async function getWalkingRoute(origin, destination) {
             ].join(','),
           },
           body: JSON.stringify({
-            origin: { location: { latLng: origin } },
-            destination: { location: { latLng: destination } },
+            origin: originWaypoint,
+            destination: destinationWaypoint,
             travelMode: 'WALK',
             languageCode: 'en-GB',
             units: 'METRIC',
@@ -655,7 +671,7 @@ export async function getWalkingRoute(origin, destination) {
     const walkingResult = {
       distanceMeters: route.distanceMeters,
       durationMinutes: Math.max(1, Math.ceil(seconds / 60)),
-      endLocation: destination,
+      endLocation: destinationWaypoint.placeId ? steps.at(-1)?.endLocation || null : destination,
       steps,
       ...(route.polyline?.encodedPolyline ? { polyline: route.polyline.encodedPolyline } : {}),
       source: 'google_routes',
@@ -682,7 +698,7 @@ export async function getBangingTransitDurations(origin, destinations) {
       },
       body: JSON.stringify({
         origins: [{ waypoint: { location: { latLng: origin } } }],
-        destinations: destinations.map(destination => ({ waypoint: { location: { latLng: destination } } })),
+        destinations: destinations.map(destination => ({ waypoint: routeWaypoint(destination) })),
         travelMode: 'TRANSIT', departureTime: new Date().toISOString(),
       }),
     },
@@ -697,7 +713,7 @@ export async function getBangingTransitDurations(origin, destinations) {
   });
 }
 
-export async function getTransitRoute(origin, destination, { includeLive = true, maxMinutes = Infinity } = {}) {
+export async function getTransitRoute(origin, destination, { includeLive = true, maxMinutes = Infinity, signal } = {}) {
     const requestedDepartureTime = new Date().toISOString();
     let payload;
     try {
@@ -705,6 +721,7 @@ export async function getTransitRoute(origin, destination, { includeLive = true,
         GOOGLE_ROUTES_URL,
         {
           method: 'POST',
+          signal,
           headers: {
             'Content-Type': 'application/json',
             'X-Goog-Api-Key': apiKey(),
@@ -729,8 +746,8 @@ export async function getTransitRoute(origin, destination, { includeLive = true,
             ].join(','),
           },
           body: JSON.stringify({
-            origin: { location: { latLng: origin } },
-            destination: { location: { latLng: destination } },
+            origin: routeWaypoint(origin),
+            destination: routeWaypoint(destination),
             travelMode: 'TRANSIT',
             departureTime: requestedDepartureTime,
             computeAlternativeRoutes: true,

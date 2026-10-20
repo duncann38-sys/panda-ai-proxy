@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  db, sharedStorageFailure, readSharedCache, searchVenueListings, getVenueProfile,
+  db, sharedStorageFailure, readSharedCache, searchVenueListings,
   getBangingTransitDurations, getWalkingRoute,
 } from './_venue-live.js';
 import { consumeDailyBudget, recordCostEvent } from './_cost-controls.js';
@@ -140,18 +140,9 @@ async function activePlacements() {
   }, 5 * 60 * 1000);
 }
 
-async function premiumProfiles(ids, placements) {
+export function premiumPlacements(ids, placements) {
   const allowed = new Set(placements.filter(item => item.tier === 'banging').map(item => item.place_id));
-  const selected = ids.filter(id => allowed.has(id));
-  const result = [];
-  for (let offset = 0; offset < selected.length; offset += 3) {
-    await Promise.all(selected.slice(offset, offset + 3).map(async id => {
-      const stored = await refresh(`premium-profile-v1:${id}`, () => getVenueProfile(id));
-      const venue = stored.value;
-      if (Number.isFinite(venue?.latitude) && Number.isFinite(venue?.longitude)) result.push(venue);
-    }));
-  }
-  return result;
+  return [...new Set(ids)].filter(id => allowed.has(id)).map(id => ({ id }));
 }
 
 export function withinTransitLimit(minutes, accessMinutes = 0) {
@@ -165,27 +156,35 @@ export async function getBangingDirectory(origin, premiumIds = []) {
     longitude: Math.round(origin.longitude * 50) / 50,
   };
   const [curated, feed] = await Promise.all([directory(origin), activePlacements()]);
-  const premium = await premiumProfiles(premiumIds, feed.value);
+  const premium = premiumPlacements(premiumIds, feed.value);
   const paidIds = new Set(feed.value.map(item => item.place_id));
   const organic = curated.value.filter(venue => !paidIds.has(venue.id));
   const prove = (candidates, role) => refresh(
-    `transit-v1:${role}:${anchor.latitude}:${anchor.longitude}:${candidates.map(item => item.id).sort().join(',')}`,
+    `transit-v1:${role === 'premium' ? 'premium-place-id-v1' : role}:${anchor.latitude}:${anchor.longitude}:${candidates.map(item => item.id).sort().join(',')}`,
     async () => {
     const durations = {};
     for (let offset = 0; offset < candidates.length; offset += 50) {
       const chunk = candidates.slice(offset, offset + 50);
       await withBudget('routes', chunk.length);
-      const times = await getBangingTransitDurations(anchor, chunk.map(venue => ({
-        latitude: venue.latitude, longitude: venue.longitude,
-      })));
+      const times = await getBangingTransitDurations(anchor, chunk.map(venue => role === 'premium'
+        ? { placeId: venue.id } : { latitude: venue.latitude, longitude: venue.longitude }));
       for (let index = 0; index < chunk.length; index++) {
         const venue = chunk[index];
         let minutes = times[index];
         // A venue at the boarding location may have no transit leg at all.
         // Only a real, verified short walking route can admit this case.
-        if (minutes === null && meters(anchor, venue) <= 250) {
-          const walking = await getWalkingRoute(anchor, { latitude: venue.latitude, longitude: venue.longitude });
-          minutes = walking?.durationMinutes ?? null;
+        if (minutes === null && (role === 'premium' || meters(anchor, venue) <= 250)) {
+          if (role === 'premium') await withBudget('routes', 1);
+          const walking = await getWalkingRoute(anchor, role === 'premium'
+            ? { placeId: venue.id } : { latitude: venue.latitude, longitude: venue.longitude }).catch(cause => {
+              if (role !== 'premium' || cause?.status === 429) throw cause;
+              console.warn('[Panda Banging] A Premium walking proof was unavailable', cause?.status || 'provider_error');
+              return null;
+            });
+          // Without a transit leg, retain only an actual short boarding-location
+          // walk, never a guessed distance or an arbitrary two-hour walk.
+          minutes = walking && (role !== 'premium' || walking.distanceMeters <= 250)
+            ? walking.durationMinutes : null;
         }
         durations[venue.id] = minutes;
       }
@@ -212,6 +211,10 @@ export async function getBangingDirectory(origin, premiumIds = []) {
   return {
     results,
     premiumJourneys: Object.fromEntries(premium.filter(venue => eligible(venue, paidProof)).map(venue => [venue.id, journey(venue, paidProof)])),
+    premiumVerification: {
+      requested: premium.length,
+      verified: premium.filter(venue => eligible(venue, paidProof)).length,
+    },
     complete: results.length >= 40,
     expiresAt: bangingVerifiedAt + TTL,
     travelMode: 'transit', maxMinutes: 120,
