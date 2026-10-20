@@ -247,5 +247,15 @@ export function safeDegradedText(text, venues = []) {
   if (/\b(book|reserv|payment|refund|complaint)/i.test(text)) {
     return 'I can help find official venue links, but I haven’t made a booking or processed a payment. Please confirm directly with the venue.';
   }
-  return venues.length ? 'Here are real nearby matches. Open a card for the verified venue details.' : 'I couldn’t verify matching venues just now. Try a specific venue, area or type of place.';
+  if (/\b(?:pubs?|bars?|drinks?|cocktails?|wine|beer|drunk|alcohol)\b/i.test(text)) {
+    return venues.length
+      ? 'Certainly — here are a few places to consider for a drink. Check each card’s venue type and opening hours before heading over.'
+      : 'Certainly — let’s find somewhere for a drink. I couldn’t confirm a matching spot just now; which neighbourhood shall we try?';
+  }
+  if (/\b(?:dinner|lunch|brunch|breakfast|restaurants?|food|eat)\b/i.test(text)) {
+    return venues.length
+      ? 'Of course — here are a few places to tempt you. Have a look at the menus and tell me which one takes your fancy.'
+      : 'Of course — let’s find you something lovely to eat. Which area or cuisine would you like me to try?';
+  }
+  return venues.length ? 'Of course — here are a few places worth a look. Tell me which one catches your eye, or what you’d like to change.' : 'I couldn’t confirm a match for that just now. Which area or kind of place would you like me to try?';
 }

@@ -8,6 +8,8 @@
 import { GoogleAuth } from 'google-auth-library';
 import admin from 'firebase-admin';
 import { applyGuard } from './_guard.js';
+import { answerOutingRequest } from './_panda-outing-intent.js';
+import { officialProgrammes } from './_panda-programmes.js';
 import { quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues, isSessionVenueTransitFollowUp } from './_panda-chat-policy.js';
 import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-directory.js';
 import { createDiscoveryService } from './_discovery-lite.js';
@@ -790,6 +792,16 @@ export default async function handler(req,res){
     const sessionVenueTransitFollowUp=isSessionVenueTransitFollowUp(userText,body.sessionVenueContext);
     const quick=quickChatReply(userText,body.chatContext,contents);
     if(quick){res.status(200).json({text:quick,venues:[],aiMode:'quick'});return;}
+    if(!sessionVenueTransitFollowUp){
+      const outing=await answerOutingRequest({
+        text:userText,contents,area:extractArea(userText),context:body.chatContext,
+        location:{lat,lng},hasLocation:Number.isFinite(body.location?.lat)&&Number.isFinite(body.location?.lng),
+      },{
+        search:async(query,area,wantOpen)=>filterSessionVenues(limitChatVenues(await searchChatVenues(query,lat,lng,area,wantOpen),userText,query),contents),
+        programmes:officialProgrammes,
+      });
+      if(outing){res.status(200).json(outing);return;}
+    }
     if(maySearchVenues(userText)&&ambiguousClub(userText,contents)){
       res.status(200).json({text:'Do you mean a nightclub for dancing, a private members’ club, or a sports/social club?',venues:[],aiMode:'clarification'});return;
     }
