@@ -1,10 +1,12 @@
 import https from 'node:https';
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
+import { bookingUrl } from './_opentable-match.js';
 
 const cache = new Map();
 const pending = new Map();
 const TTL = 3 * 60 * 60 * 1000;
+const LOOKUP_TIMEOUT_MS = 3500;
 
 export function publicAddress(address) {
   if (isIP(address) === 4) {
@@ -17,26 +19,43 @@ export function publicAddress(address) {
   }
   if (isIP(address) !== 6) return false;
   const value = address.toLowerCase();
-  // Reject mapped addresses rather than allowing private IPv4 through IPv6.
   return /^[23]/.test(value) && !(value === '::' || value === '::1' || value.startsWith('::ffff:') ||
     value.startsWith('fc') || value.startsWith('fd') || /^fe[89ab]/.test(value) ||
     value.startsWith('ff') || value.startsWith('2001:db8:'));
 }
 
+function unsafeUrl(message) {
+  const error = new Error(message);
+  error.code = 'UNSAFE_OFFICIAL_URL';
+  return error;
+}
+
 function publicUrl(value) {
   const url = new URL(value);
+  const hostname = url.hostname.replace(/^\[|\]$/g, '');
   if (url.protocol !== 'https:' || url.username || url.password ||
-    (url.port && url.port !== '443')) throw new Error('Unsafe official website URL');
+    (url.port && url.port !== '443') || /(?:^|\.)(?:localhost|local)$/i.test(hostname)
+    || (isIP(hostname) && !publicAddress(hostname))) throw unsafeUrl('Unsafe official website URL');
   return url;
 }
 
-async function readOfficialPage(value, redirects = 0) {
+async function readOfficialPage(value, redirects = 0, deadline = Date.now() + LOOKUP_TIMEOUT_MS) {
   const url = publicUrl(value);
   const hostname = url.hostname.replace(/^\[|\]$/g, '');
-  const addresses = await lookup(hostname, { all: true, verbatim: true });
+  const remaining = () => {
+    const ms = deadline - Date.now();
+    if (ms <= 0) throw new Error('Official link lookup timed out');
+    return ms;
+  };
+  let dnsTimer;
+  const addresses = await Promise.race([
+    lookup(hostname, { all: true, verbatim: true }),
+    new Promise((_, reject) => { dnsTimer = setTimeout(() => reject(new Error('Official link lookup timed out')), remaining()); }),
+  ]).finally(() => clearTimeout(dnsTimer));
   if (!addresses.length || addresses.some(entry => !publicAddress(entry.address))) {
-    throw new Error('Official website does not resolve to public addresses');
+    throw unsafeUrl('Official website does not resolve to public addresses');
   }
+  const timeoutMs = remaining();
   const response = await new Promise((resolve, reject) => {
     const request = https.get(url, {
       agent: false,
@@ -67,21 +86,23 @@ async function readOfficialPage(value, redirects = 0) {
       res.on('end', () => resolve({ html: Buffer.concat(chunks).toString('utf8') }));
       res.on('error', reject);
     });
-    const timer = setTimeout(() => request.destroy(new Error('Official link lookup timed out')), 8000);
+    const timer = setTimeout(() => request.destroy(new Error('Official link lookup timed out')), timeoutMs);
     request.on('close', () => clearTimeout(timer));
     request.on('error', reject);
   });
   if (response.redirect) {
     if (redirects >= 3) throw new Error('Too many official website redirects');
-    return readOfficialPage(new URL(response.redirect, url).href, redirects + 1);
+    return readOfficialPage(new URL(response.redirect, url).href, redirects + 1, deadline);
   }
   return { html: response.html, url: url.href };
 }
 
 const decode = value => value.replace(/&amp;/gi, '&').replace(/&#(\d+);/g,
   (_, number) => String.fromCharCode(Number(number))).replace(/&quot;/gi, '"');
+const normal = value => decode(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+const seasonal = /\b(christmas|xmas|festive|nye|valentine|easter|wedding)\b/;
 
-export function linksFromOfficialHtml(html, base, venueName = '') {
+export function linksFromOfficialHtml(html, base, venueName = '', { preferOpenTable = false } = {}) {
   const candidates = [];
   for (const match of html.matchAll(/<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)) {
     try {
@@ -89,7 +110,7 @@ export function linksFromOfficialHtml(html, base, venueName = '') {
       if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) continue;
       if (url.href.split('#')[0] === new URL(base).href.split('#')[0] && !url.hash) continue;
       const text = decode(match[2].replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim().toLowerCase();
-      candidates.push({ url: url.href, text, pathname: url.pathname.toLowerCase() });
+      candidates.push({ url: url.href, text, pathname: url.pathname.toLowerCase(), intent: normal(text + ' ' + decodeURIComponent(url.pathname + url.search)) });
     } catch { /* Ignore malformed website anchors. */ }
   }
   const words = value => value.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
@@ -106,31 +127,74 @@ export function linksFromOfficialHtml(html, base, venueName = '') {
   const choose = score => candidates.map(link => {
     const baseScore = score(link);
     return { ...link, score: baseScore > 0 ? baseScore + affinity(link) : 0 };
-  })
-    .filter(link => link.score > 0).sort((a, b) => b.score - a.score)[0]?.url || null;
+  }).filter(link => link.score > 0).sort((a, b) => b.score - a.score)[0]?.url || null;
+  const bookingScore = link => seasonal.test(link.intent)
+    || /\b(events?|tickets?|cinema|movies?|private hire|book rooms?|hotel rooms?|accommodation|weddings?)\b/.test(link.intent) ? 0
+    : /\b(reserve|reservation|reservations|book a table|book now|table booking|boka bord|bordsbokning|bestil bord)\b/.test(link.text) ? 100
+      : /reserv|book-a-table|boka-bord|opentable|sevenrooms|resdiary|quandoo|thefork/.test(link.url.toLowerCase()) ? 40 : 0;
+  let preferred = null;
+  const allowedOpenTable = new Set();
+  const openTableDestination = link => {
+    const url = new URL(link.url);
+    const rid = url.searchParams.get('rid') ?? url.pathname.match(/^\/restaurant\/profile\/(\d+)\/?$/i)?.[1];
+    return bookingUrl(link.url, rid);
+  };
+  const eligibleBookingScore = link => preferOpenTable
+    && new URL(link.url).hostname.includes('opentable') && !openTableDestination(link) ? 0 : bookingScore(link);
+  if (preferOpenTable) {
+    const options = candidates.filter(link => eligibleBookingScore(link) > 0).map(link => {
+      return { ...link, destination: openTableDestination(link), affinity: affinity(link) };
+    }).filter(link => link.destination);
+    const unique = new Set(options.map(link => link.destination));
+    const strongest = Math.max(0, ...candidates.filter(link => eligibleBookingScore(link) > 0).map(affinity));
+    const eligible = options.filter(link => {
+      const linked = words(link.text + ' ' + link.pathname);
+      const completeName = venueWords.length > 0 && venueWords.every(word => linked.includes(word));
+      const genericButton = words(link.text).every(word =>
+        ['book', 'now', 'reserve', 'reservation', 'reservations', 'table', 'online', 'here', 'with', 'opentable'].includes(word));
+      return completeName || (unique.size === 1 && genericButton && link.affinity === 0 && strongest === 0);
+    }).sort((a, b) => b.affinity - a.affinity);
+    // A generic brand name that fits two branches is not a verified branch.
+    const tied = eligible.length > 1 && eligible[0].affinity === eligible[1].affinity
+      && eligible[0].destination !== eligible[1].destination;
+    if (!tied && eligible.length) {
+      preferred = eligible[0].destination;
+      allowedOpenTable.add(preferred);
+    }
+  }
   return {
-    menuUrl: choose(link => /\b(menu|menus|meny|menyer|menukort|food\s*(?:&|and)\s*drink)\b/.test(link.text)
-      ? 100 + (/menus?|meny|menukort|\.pdf/.test(link.pathname) ? 20 : 0)
-      : /(?:^|\/)(?:menus?|meny|menukort)(?:\/|\.|$)/.test(link.pathname) ? 40 : 0),
-    reservationUrl: choose(link => /\b(room|hotel|event|private hire)\b/.test(link.text) ? 0 :
-      /\b(reserve|reservation|reservations|book a table|book now|table booking|boka bord|bordsbokning|bestil bord)\b/.test(link.text) ? 100 :
-        /reserv|book-a-table|boka-bord|opentable|sevenrooms|resdiary|quandoo|thefork/.test(link.url.toLowerCase()) ? 40 : 0),
+    menuUrl: choose(link => seasonal.test(link.intent) ? 0
+      : /\b(a la carte|all day|main menu|food menu|restaurant menu)\b/.test(link.intent) ? 200
+        : /\b(menu|menus|meny|menyer|menukort|food\s*(?:&|and)\s*drink)\b/.test(link.text)
+          ? 100 + (/menus?|meny|menukort|\.pdf/.test(link.pathname) ? 20 : 0)
+          : /(?:^|\/)(?:menus?|meny|menukort)(?:\/|\.|$)/.test(link.pathname) ? 40 : 0),
+    reservationUrl: preferred || choose(link => preferOpenTable && new URL(link.url).hostname.includes('opentable')
+      && !allowedOpenTable.has(openTableDestination(link)) ? 0 : eligibleBookingScore(link)),
   };
 }
 
-export async function getOfficialVenueLinks(website, venueName = '') {
-  if (!website) return { menuUrl: null, reservationUrl: null, source: 'official_website', website: null };
+export async function getOfficialVenueLinks(website, venueName = '', readPage = readOfficialPage, options = {}) {
+  if (!website) return { menuUrl: null, reservationUrl: null, source: 'official_website', website: null, lookupStatus: 'no_direct_links' };
   const url = new URL(website);
   if (url.protocol === 'http:') url.protocol = 'https:';
   const pageUrl = publicUrl(url.href).href;
-  const key = pageUrl + '|' + venueName.trim().toLowerCase();
+  const key = pageUrl + '|' + venueName.trim().toLowerCase() + (options.preferOpenTable ? '|opentable-first' : '');
   const cached = cache.get(key);
   if (cached && cached.expires > Date.now()) return cached.value;
   if (pending.has(key)) return pending.get(key);
   const request = (async () => {
-    const page = await readOfficialPage(pageUrl);
-    const value = { ...linksFromOfficialHtml(page.html, page.url, venueName), website: page.url, source: 'official_website' };
-    cache.set(key, { expires: Date.now() + TTL, value });
+    let value;
+    try {
+      const page = await readPage(pageUrl);
+      const links = linksFromOfficialHtml(page.html, page.url, venueName, options);
+      value = { ...links, website: page.url, source: 'official_website',
+        lookupStatus: links.menuUrl || links.reservationUrl ? 'verified' : 'no_direct_links' };
+    } catch (error) {
+      if (error?.code === 'UNSAFE_OFFICIAL_URL') throw error;
+      value = { menuUrl: null, reservationUrl: null, website: pageUrl,
+        source: 'official_website', lookupStatus: 'unavailable' };
+    }
+    cache.set(key, { expires: Date.now() + (value.lookupStatus === 'unavailable' ? 30_000 : TTL), value });
     if (cache.size > 1000) cache.delete(cache.keys().next().value);
     return value;
   })().finally(() => pending.delete(key));
