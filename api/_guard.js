@@ -64,7 +64,7 @@ export function applyGuard(req, res, { methods = ['POST', 'OPTIONS'], limit = tr
   }
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Methods', methods.join(', '));
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (req.method === 'OPTIONS') { res.status(204).end(); return true; }
 

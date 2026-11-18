@@ -564,6 +564,7 @@ export async function findNearestTransitStation(latitude, longitude) {
     Boolean(
       place?.id
       && place?.displayName?.text
+      && !/^(?:(?:tube|train|rail|railway|subway|underground|transit)\s+)?station$/i.test(place.displayName.text.trim())
       && place?.formattedAddress
       && typeof place?.location?.latitude === 'number'
       && typeof place?.location?.longitude === 'number',

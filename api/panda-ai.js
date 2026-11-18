@@ -7,6 +7,7 @@
 //   search centres on that place, not the user's GPS.
 import { GoogleAuth } from 'google-auth-library';
 import admin from 'firebase-admin';
+import { createSandboxHttpHandler, isSandboxReservationRequest } from './_panda-sandbox-http.js';
 import { applyGuard } from './_guard.js';
 import { answerOutingRequest } from './_panda-outing-intent.js';
 import { officialProgrammes } from './_panda-programmes.js';
@@ -18,6 +19,11 @@ import { buildIndexedFeedPage, buildIndexedIdCandidatePage } from './_indexed-fe
 import { currentWeatherResponse } from './_current-weather.js';
 import { googleCategoryTags } from './_google-category-tags.js';
 import { classifyIndexedFeedCategory } from './_venue-taxonomy.js';
+import { conciergeTurn, conciergeInstruction, conciergeArea, conciergeTimeWindow } from './_panda-concierge-turn.js';
+import { venueOpenAtRequestedTime } from './_panda-dining-hours.js';
+import { createNewRestaurantFeed, createFirestoreNewPool, newVenueDistance } from './_panda-new-restaurants.js';
+import { getVenueProfile } from './_venue-live.js';
+import { OT_BINDINGS } from './_opentable-match.js';
 import {
   boundedInteger,
   cacheablePlacesResult,
@@ -39,6 +45,29 @@ const MODELS = [...new Set([
 const LOCATION = process.env.PANDA_LOCATION || 'us-central1';
 const MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY;
 let coverDiscovery;
+let newRestaurantFeed;
+function sharedNewFeed() {
+  return newRestaurantFeed ||= createNewRestaurantFeed({
+    readPool: createFirestoreNewPool(db()),
+    hydrateVenue: async row => {
+      const snap = await db().collection(OT_BINDINGS).doc(row.placeId).get();
+      const binding = snap.exists ? snap.data() : null;
+      if (!binding || binding.environment !== 'production' || binding.placeId !== row.placeId
+        || String(binding.rid) !== row.rid || Number(binding.expiresAt) <= Date.now()) {
+        throw new Error('new_selection_binding_unavailable');
+      }
+      const budget = await consumeDailyBudget(db(), 'places', process.env.PANDA_DAILY_PLACES_LIMIT);
+      if (!budget.allowed) throw new Error('new_selection_budget_unavailable');
+      const venue = await getVenueProfile(row.placeId);
+      if (!venue || venue.id !== row.placeId || !Number.isFinite(venue.latitude)
+        || !Number.isFinite(venue.longitude)
+        || newVenueDistance(row, { lat: venue.latitude, lng: venue.longitude }) > 150) return null;
+      return { ...venue, type: venue.primaryType, lat: venue.latitude, lng: venue.longitude,
+        photoName: venue.photoNames?.[0]?.name, photoCount: venue.photoNames?.length ?? 0,
+        photoAttribution: venue.photoNames?.[0]?.attribution ?? '' };
+    },
+  });
+}
 const DEFAULT_LAT = 51.5074, DEFAULT_LNG = -0.1278;
 let nextIndexedDetailRequestAt = 0;
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -120,7 +149,7 @@ async function geocodeArea(area){
 function cacheKey(query,lat,lng,openNow,pageToken){
   const gLat=Math.round(lat*CACHE_GRID)/CACHE_GRID;
   const gLng=Math.round(lng*CACHE_GRID)/CACHE_GRID;
-  const raw=`${(query||'').toLowerCase().trim()}|${gLat},${gLng}|o${openNow===true?1:0}|p${pageToken||''}`;
+  const raw=`hours-v1|${(query||'').toLowerCase().trim()}|${gLat},${gLng}|o${openNow===true?1:0}|p${pageToken||''}`;
   return Buffer.from(raw).toString('base64').replace(/\//g,'_').slice(0,480);
 }
 function withDistances(rawVenues,lat,lng){
@@ -154,7 +183,7 @@ async function googleSearch(query,lat,lng,pageToken,openNow){
     const r=await fetch('https://places.googleapis.com/v1/places:searchText',{
       method:'POST',
       headers:{'Content-Type':'application/json','X-Goog-Api-Key':MAPS_KEY,
-        'X-Goog-FieldMask':['places.id','places.displayName','places.formattedAddress','places.shortFormattedAddress','places.location','places.rating','places.userRatingCount','places.priceLevel','places.priceRange','places.primaryType','places.primaryTypeDisplayName','places.types','places.googleMapsUri','places.websiteUri','places.nationalPhoneNumber','places.currentOpeningHours.openNow','places.currentOpeningHours.weekdayDescriptions','places.regularOpeningHours.weekdayDescriptions','places.businessStatus','places.photos','nextPageToken'].join(',')},
+        'X-Goog-FieldMask':['places.id','places.displayName','places.formattedAddress','places.shortFormattedAddress','places.location','places.rating','places.userRatingCount','places.priceLevel','places.priceRange','places.primaryType','places.primaryTypeDisplayName','places.types','places.googleMapsUri','places.websiteUri','places.nationalPhoneNumber','places.currentOpeningHours.openNow','places.currentOpeningHours.weekdayDescriptions','places.currentOpeningHours.periods','places.regularOpeningHours.weekdayDescriptions','places.regularOpeningHours.periods','places.businessStatus','places.photos','nextPageToken'].join(',')},
       body:JSON.stringify(reqBody)
     });
     if(!r.ok){
@@ -177,6 +206,7 @@ async function googleSearch(query,lat,lng,pageToken,openNow){
         priceRange:p.priceRange||null,
         openNow:(p.currentOpeningHours&&typeof p.currentOpeningHours.openNow==='boolean')?p.currentOpeningHours.openNow:null,
         openingHours:p.regularOpeningHours?.weekdayDescriptions||p.currentOpeningHours?.weekdayDescriptions||[],
+        openingPeriods:p.currentOpeningHours?.periods?.length?p.currentOpeningHours.periods:p.regularOpeningHours?.periods||[],
         businessStatus:p.businessStatus||'',types:p.types||[],hasMusic:!!musicBadge,musicBadge,
         lat:loc.latitude??null,lng:loc.longitude??null,
         phone:p.nationalPhoneNumber||'',website:p.websiteUri||'',menuLink:p.websiteUri||'',
@@ -461,12 +491,14 @@ async function searchVenuesSmart(query,userLat,userLng,area,openNow){
       // the area to the query and widen the bias radius so Places finds it.
       const q2 = `${query} in ${area}`;
       const viaText = strictLocationResult(await searchVenues(q2, userLat, userLng, null, openNow),area);
-      if(viaText.venues && viaText.venues.length) return viaText;
+      if(viaText.venues && viaText.venues.length) return { ...viaText, searchContext: {query:q2,lat:userLat,lng:userLng} };
       // last resort: text search without location weighting removed — still area-tagged
-      return strictLocationResult(await searchVenues(`${query} ${area}`, userLat, userLng, null, openNow),area);
+      return { ...strictLocationResult(await searchVenues(`${query} ${area}`, userLat, userLng, null, openNow),area),
+        searchContext: {query:`${query} ${area}`,lat:userLat,lng:userLng} };
     }
   }
-  return strictLocationResult(await searchVenues(query,lat,lng,null,openNow),area);
+  return { ...strictLocationResult(await searchVenues(query,lat,lng,null,openNow),area),
+    searchContext: {query,lat,lng} };
 }
 function fmtDist(m){return m==null?'':(m<1000?`${m} m`:`${(m/1000).toFixed(1)} km`);}
 function dayHours(v){
@@ -486,9 +518,7 @@ function dayClosing(v){
 function asksClosingTime(text){return /\b(when|what time|time)\b[^.!?]{0,70}\b(close|closes|closing|shut|last orders)\b|\b(close|closes|closing|shut|last orders)\b/i.test(String(text||''));}
 function venuesToText(v,context){if(!v.length)return 'No matching venues found nearby.';const includeClosing=asksClosingTime(context);return v.slice(0,15).map((x,i)=>{const bits=[x.type,fmtDist(x.distanceMeters),x.rating?`${x.rating}\u2605`:'',x.price,x.openNow===true?'open now':x.openNow===false?'closed':'',x.hasMusic?'live music/DJ':'',includeClosing?dayClosing(x):''].filter(Boolean).join(' \u00b7 ');return `${i+1}. ${x.name}${bits?' \u2014 '+bits:''}`;}).join('\n');}
 function extractArea(text){
-  const match=String(text||'').match(/\b(?:in|near|around|at)\s+(.+?)(?:\s+(?:tonight|today|tomorrow|please|for me))?\s*$/i);
-  const area=match?.[1]?.trim().replace(/[,.!?]+$/,'')||'';
-  return /^(me|here)$/i.test(area)?'':area;
+  return conciergeArea(text);
 }
 function isThemedRequest(text){return /\b(pub crawl|crawl|cozy|cosy|cheap|expensive|christmas|theme|live music|dj|music)\b/i.test(String(text||''));}
 const CHAT_CARD_LIMIT=20;
@@ -502,16 +532,25 @@ function nearbyChatVenues(venues){
   }
   return [...unique.values()].sort((a,b)=>a.distanceMeters-b.distanceMeters).slice(0,CHAT_CARD_LIMIT);
 }
-async function searchChatVenues(query,lat,lng,area,openNow,fast=false){
+async function searchChatVenues(query,lat,lng,area,openNow,fast=false,excludedPlaceIds=[],acceptVenue=()=>true){
   const first=await searchVenuesSmart(query,lat,lng,area,openNow);
-  let venues=nearbyChatVenues(first.venues);
-  if(!fast&&venues.length<15&&first.nextPageToken&&!area){
-    const second=await searchVenues(query,lat,lng,first.nextPageToken,openNow);
-    venues=nearbyChatVenues([...(first.venues||[]),...(second.venues||[])]);
+  const excluded = new Set(excludedPlaceIds);
+  let all = first.venues || [];
+  let venues=nearbyChatVenues(all.filter(venue => !excluded.has(venue.id) && acceptVenue(venue)));
+  let cursor = first.nextPageToken;
+  const searchContext = first.searchContext;
+  const used = new Set();
+  for (let page=0; page<2 && !fast && venues.length<4 && cursor && searchContext; page++) {
+    if (used.has(cursor)) break;
+    used.add(cursor);
+    const next = await searchVenues(searchContext.query,searchContext.lat,searchContext.lng,cursor,openNow);
+    all = [...all, ...(strictLocationResult(next,area).venues || [])];
+    venues=nearbyChatVenues(all.filter(venue => !excluded.has(venue.id) && acceptVenue(venue)));
+    cursor = next.nextPageToken;
   }
   return venues;
 }
-function limitChatVenues(venues,userText,query){return (venues||[]).slice(0,15);}
+function limitChatVenues(venues,userText,query){return (venues||[]).slice(0,4);}
 function latestUserText(contents){if(!Array.isArray(contents))return '';for(let i=contents.length-1;i>=0;i--){const c=contents[i];if(c?.role==='user'&&Array.isArray(c.parts)){const t=c.parts.map(p=>p.text||'').join(' ').trim();if(t)return t;}}return '';}
 function isPubCrawlRequest(text){return /\b(?:pub|bar|drinks?)?\s*crawl\b/i.test(String(text||''));}
 function pubCrawlLimit(){return 8;}
@@ -707,11 +746,30 @@ const FIND_PLACES_TOOL={functionDeclarations:[{
   },required:['query']}
 }]};
 export default async function handler(req,res){
-  if(applyGuard(req,res,{methods:['POST','OPTIONS'],limit:true})) return;
+  if(applyGuard(req,res,{methods:['GET','POST','OPTIONS'],limit:true})) return;
+  if (isSandboxReservationRequest(req)) {
+    return createSandboxHttpHandler({getDb:db,verifyIdToken:token=>admin.auth().verifyIdToken(token,true)})(req,res);
+  }
+  if(req.method!=='POST')return res.status(405).json({error:'method_not_allowed'});
   try{
     const body=req.body||{};
     const {contents,generationConfig,location}=body;
     const lat=location?.lat??DEFAULT_LAT, lng=location?.lng??DEFAULT_LNG;
+    const turn = conciergeTurn(contents, body.shownVenueIds);
+    if (body.newOpeningsOnly === true || (!body.venuesOnly && turn.wantsNew)) {
+      res.setHeader('Cache-Control','private, no-store');
+      const area = typeof body.area === 'string' ? body.area.slice(0,120) : extractArea(turn.searchText);
+      const centre = area ? await geocodeArea(area) : location;
+      if (area && !centre) return res.status(200).json({status:'area_unavailable',
+        newOpeningsSearch:true,venues:[],text:`I couldn’t locate ${area} reliably. Please give me the town or postcode.`});
+      try {
+        const result = await sharedNewFeed()({location:centre,excludedPlaceIds:turn.excludedPlaceIds});
+        return res.status(200).json({...result,area:area || null});
+      } catch {
+        return res.status(503).json({status:'verification_unavailable',newOpeningsSearch:true,venues:[],
+          text:'The OpenTable New selection could not be verified just now. Please try again shortly; I won’t substitute ordinary restaurants.'});
+      }
+    }
     if(body.weatherOnly===true){
       const result=await currentWeatherResponse({
         location,
@@ -788,7 +846,16 @@ export default async function handler(req,res){
       res.status(200).json({venues,nextPageToken});
       return;
     }
-    const userText=latestUserText(contents);
+    const userText=turn.continuation ? turn.searchText : latestUserText(contents);
+    if (turn.more && !turn.continuation) return res.status(200).json({venues:[],aiMode:'clarification',
+      text:'Of course—which area and kind of place shall I find more of?'});
+    const requestedWindow = conciergeTimeWindow(turn.searchText,body.chatContext);
+    const searchForTurn = async (query,latitude,longitude,area,openNow,fast=false) => {
+      const scheduled = /\b(?:tomorrow|tonight|at \d|after \d|before \d)\b/i.test(turn.searchText);
+      return searchChatVenues(query,latitude,longitude,area,scheduled?false:openNow,
+        turn.more||requestedWindow.lateDinner?false:fast,turn.excludedPlaceIds,
+        venue=>!requestedWindow.lateDinner||venueOpenAtRequestedTime(venue,requestedWindow));
+    };
     const sessionVenueTransitFollowUp=isSessionVenueTransitFollowUp(userText,body.sessionVenueContext);
     const quick=quickChatReply(userText,body.chatContext,contents);
     if(quick){res.status(200).json({text:quick,venues:[],aiMode:'quick'});return;}
@@ -797,7 +864,7 @@ export default async function handler(req,res){
         text:userText,contents,area:extractArea(userText),context:body.chatContext,
         location:{lat,lng},hasLocation:Number.isFinite(body.location?.lat)&&Number.isFinite(body.location?.lng),
       },{
-        search:async(query,area,wantOpen)=>filterSessionVenues(limitChatVenues(await searchChatVenues(query,lat,lng,area,wantOpen),userText,query),contents),
+        search:async(query,area,wantOpen)=>filterSessionVenues(limitChatVenues(await searchForTurn(query,lat,lng,area,wantOpen),userText,query),contents),
         programmes:officialProgrammes,
       });
       if(outing){res.status(200).json(outing);return;}
@@ -846,8 +913,7 @@ export default async function handler(req,res){
       }
       const wantOpen=/\bopen\b/i.test(userText);
       const q=fallbackQuery(userText),area=extractArea(userText);
-      let found=await searchChatVenues(q,lat,lng,area,wantOpen);
-      if(!found.length){found=await searchChatVenues('restaurants and bars',lat,lng,area,false);}
+      let found=await searchForTurn(q,lat,lng,area,wantOpen);
       found=filterSessionVenues(limitChatVenues(found,userText,q),contents);
       res.status(200).json({text:safeDegradedText(userText,found),venues:found,richMetadata:true,aiMode:'fallback',aiFallbackReason:reason});
     }
@@ -875,6 +941,7 @@ export default async function handler(req,res){
     const convo=compactConversation(contents,{maxItems:12,maxChars:7000});
     const baseBody={contents:convo,tools:[FIND_PLACES_TOOL]};
     baseBody.systemInstruction={parts:[{text:buildChatInstruction(contents,body.chatContext,weather,body.sessionPreferences,body.sessionVenueContext)}]};
+    baseBody.systemInstruction.parts[0].text += '\n' + conciergeInstruction(turn,body.chatContext);
     if(isWeatherQuestion(userText)&&!isDirectVenueRequest(userText))delete baseBody.tools;
     if(!maySearchVenues(userText)||sessionVenueTransitFollowUp)delete baseBody.tools;
     const maxOutputTokens=boundedInteger(process.env.PANDA_MAX_OUTPUT_TOKENS,320,96,512);
@@ -893,7 +960,7 @@ export default async function handler(req,res){
     if(maySearchVenues(userText)&&isDirectVenueRequest(userText)&&!isWeatherQuestion(userText)&&!sessionVenueTransitFollowUp){
       const area=extractArea(userText);
       const q=sessionVenueQuery(fallbackQuery(userText),contents);
-      prefetchedVenues=filterSessionVenues(limitChatVenues(await searchChatVenues(q,lat,lng,area,/\bopen\b/i.test(userText),!/\b(all|more|another|different)\b/i.test(userText)),userText,q),contents);
+      prefetchedVenues=filterSessionVenues(limitChatVenues(await searchForTurn(q,lat,lng,area,/\bopen\b/i.test(userText),!/\b(all|more|another|different)\b/i.test(userText)),userText,q),contents);
       venues=prefetchedVenues;
       delete baseBody.tools;
       baseBody.systemInstruction.parts[0].text+=`\nVerified venue shortlist: ${venuesToText(venues,userText)}\nAnswer only from this shortlist. If empty, say no matching venues were verified.`;
@@ -919,8 +986,7 @@ export default async function handler(req,res){
       const q=args.query||userText;
       const area=extractArea(userText)||args.area||'';
       const wantOpen=/\bopen\b/i.test(q)||/\bopen\b/i.test(userText);
-      let found=await searchChatVenues(q,lat,lng,area,wantOpen);
-      if(!found.length){const broad=(userText||q).split(' ').slice(0,4).join(' ')+' restaurants bars';found=await searchChatVenues(broad,lat,lng,area,false);}
+      let found=await searchForTurn(q,lat,lng,area,wantOpen);
       if(found.length) venues=filterSessionVenues(limitChatVenues(found,userText,q),contents);
       convo.push(cand.content);
       convo.push({role:'user',parts:[{functionResponse:{name:'find_places',response:{venues:venuesToText(found,userText)}}}]});
@@ -934,15 +1000,25 @@ export default async function handler(req,res){
     let text=(resp.data?.candidates?.[0]?.content?.parts||[]).map(p=>p.text||'').join('').trim();
     if(maySearchVenues(userText)&&prefetchedVenues===null&&!venues.length&&wantsPlaces(userText)&&!isGreeting(userText)&&!isWeatherQuestion(userText)){
       const fallbackArea=extractArea(userText);
-      const found=await searchChatVenues(fallbackQuery(userText),lat,lng,fallbackArea,false);
+      const found=await searchForTurn(fallbackQuery(userText),lat,lng,fallbackArea,false);
       venues=filterSessionVenues(limitChatVenues(found,userText,userText),contents);
     }
     if(!text) text=venues.length?"Here's what I dug up near you \uD83D\uDC3C":pick(NORESULT_LINES);
+    if (requestedWindow.lateDinner && venues.length && !/\bkitchen\b/i.test(text)) {
+      text += ' These are venue opening hours; kitchen service at that time still needs confirmation.';
+    }
     venues=limitChatVenues(venues,userText,userText);
     res.status(200).json({text,venues,richMetadata:true,aiMode:'vertex',weatherStatus,weather});
   }catch(err){
     try{
       const b=req.body||{};const loc=b.location||{};const lat=loc.lat??DEFAULT_LAT,lng=loc.lng??DEFAULT_LNG;
+      if (b.newOpeningsOnly === true || conciergeTurn(b.contents).wantsNew) {
+        res.status(503).json({status:'verification_unavailable',newOpeningsSearch:true,venues:[],
+          text:'The OpenTable New selection could not be verified just now. I won’t substitute ordinary restaurants.'});return;
+      }
+      if (conciergeTimeWindow(conciergeTurn(b.contents).searchText,b.chatContext).lateDinner) {
+        res.status(503).json({venues:[],text:'I couldn’t verify the late-night opening hours just now. I won’t guess which kitchens are still serving.'});return;
+      }
       const ut=latestUserText(b.contents);
       if(isWeatherQuestion(ut)){res.status(200).json({text:'Live weather is unavailable right now, so I won’t guess.',venues:[],aiMode:'fallback',aiFallbackReason:'backend_error'});return;}
       if(maySearchVenues(ut)&&isPubCrawlRequest(ut)){res.status(200).json(await buildCustomPubCrawl(ut,lat,lng));return;}

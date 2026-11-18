@@ -155,21 +155,37 @@ export function linksFromOfficialHtml(html, base, venueName = '', { preferOpenTa
       return completeName || (unique.size === 1 && genericButton && link.affinity === 0 && strongest === 0);
     }).sort((a, b) => b.affinity - a.affinity);
     // A generic brand name that fits two branches is not a verified branch.
-    const tied = eligible.length > 1 && eligible[0].affinity === eligible[1].affinity
-      && eligible[0].destination !== eligible[1].destination;
+    const tied = new Set(eligible.filter(link => link.affinity === eligible[0]?.affinity)
+      .map(link => link.destination)).size > 1;
     if (!tied && eligible.length) {
       preferred = eligible[0].destination;
       allowedOpenTable.add(preferred);
     }
   }
+  const providerHosts = ['sevenrooms.com', 'resdiary.com', 'dishcult.com', 'quandoo.com', 'quandoo.co.uk',
+    'thefork.com', 'thefork.co.uk', 'resy.com', 'exploretock.com', 'designmynight.com', 'tablein.com', 'guestplan.com'];
+  const providerDestinations = new Map();
+  for (const link of preferOpenTable ? candidates.filter(link => {
+    const hostname = new URL(link.url).hostname;
+    return eligibleBookingScore(link) > 0
+      && providerHosts.some(host => hostname === host || hostname.endsWith(`.${host}`));
+  }) : []) {
+    const rank = affinity(link);
+    const existing = providerDestinations.get(link.url);
+    if (!existing || rank > existing.rank) providerDestinations.set(link.url, { ...link, rank });
+  }
+  const providerOptions = [...providerDestinations.values()].sort((a, b) => b.rank - a.rank);
+  const providerTied = providerOptions.filter(link => link.rank === providerOptions[0]?.rank).length > 1;
+  const provider = !providerTied ? providerOptions[0]?.url : null;
   return {
     menuUrl: choose(link => seasonal.test(link.intent) ? 0
       : /\b(a la carte|all day|main menu|food menu|restaurant menu)\b/.test(link.intent) ? 200
         : /\b(menu|menus|meny|menyer|menukort|food\s*(?:&|and)\s*drink)\b/.test(link.text)
           ? 100 + (/menus?|meny|menukort|\.pdf/.test(link.pathname) ? 20 : 0)
           : /(?:^|\/)(?:menus?|meny|menukort)(?:\/|\.|$)/.test(link.pathname) ? 40 : 0),
-    reservationUrl: preferred || choose(link => preferOpenTable && new URL(link.url).hostname.includes('opentable')
-      && !allowedOpenTable.has(openTableDestination(link)) ? 0 : eligibleBookingScore(link)),
+    reservationUrl: preferred || provider || choose(link => preferOpenTable && (
+      new URL(link.url).hostname.includes('opentable') && !allowedOpenTable.has(openTableDestination(link))
+      || providerTied && providerOptions.some(option => option.url === link.url)) ? 0 : eligibleBookingScore(link)),
   };
 }
 
@@ -185,7 +201,8 @@ export async function getOfficialVenueLinks(website, venueName = '', readPage = 
   const request = (async () => {
     let value;
     try {
-      const page = await readPage(pageUrl);
+      const timeoutMs = Number.isFinite(options.timeoutMs) ? Math.max(1, Math.min(LOOKUP_TIMEOUT_MS, options.timeoutMs)) : LOOKUP_TIMEOUT_MS;
+      const page = await readPage(pageUrl, 0, Date.now() + timeoutMs);
       const links = linksFromOfficialHtml(page.html, page.url, venueName, options);
       value = { ...links, website: page.url, source: 'official_website',
         lookupStatus: links.menuUrl || links.reservationUrl ? 'verified' : 'no_direct_links' };
