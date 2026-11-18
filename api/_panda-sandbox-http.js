@@ -35,7 +35,7 @@ export function createSandboxHttpHandler({getDb,verifyIdToken,env=process.env,no
       const action=req.method==='GET'?'capabilities':req.body.sandboxReservationAction;
       if(action==='capabilities'){
         return send(200,{result:{enabled:true,environment:'sandbox',venueName:'OpenTable Sandbox — 264001',rid:264001,
-          minDate:isoDate(Math.floor(now()/86_400_000)*86_400_000+2*86_400_000),
+          minDate:isoDate(Math.floor(now()/86_400_000)*86_400_000+86_400_000),
           maxDate:isoDate(now()+7*86_400_000),cancellationAvailable:false,
           timeZone:policy.verifiedRestaurantTimeZone || null,floatingRestaurantLocalTimes:!policy.verifiedRestaurantTimeZone}});
       }

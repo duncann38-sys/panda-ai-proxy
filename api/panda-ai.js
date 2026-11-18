@@ -19,7 +19,7 @@ import { buildIndexedFeedPage, buildIndexedIdCandidatePage } from './_indexed-fe
 import { currentWeatherResponse } from './_current-weather.js';
 import { googleCategoryTags } from './_google-category-tags.js';
 import { classifyIndexedFeedCategory } from './_venue-taxonomy.js';
-import { conciergeTurn, conciergeInstruction, conciergeArea, conciergeTimeWindow } from './_panda-concierge-turn.js';
+import { conciergeTurn, conciergeInstruction, conciergeArea, conciergeTimeWindow, conciergeVenuePage, CONCIERGE_RESULT_LIMIT } from './_panda-concierge-turn.js';
 import { venueOpenAtRequestedTime } from './_panda-dining-hours.js';
 import { createNewRestaurantFeed, createFirestoreNewPool, newVenueDistance } from './_panda-new-restaurants.js';
 import { getVenueProfile } from './_venue-live.js';
@@ -540,7 +540,7 @@ async function searchChatVenues(query,lat,lng,area,openNow,fast=false,excludedPl
   let cursor = first.nextPageToken;
   const searchContext = first.searchContext;
   const used = new Set();
-  for (let page=0; page<2 && !fast && venues.length<4 && cursor && searchContext; page++) {
+  for (let page=0; page<2 && venues.length<CONCIERGE_RESULT_LIMIT && cursor && searchContext; page++) {
     if (used.has(cursor)) break;
     used.add(cursor);
     const next = await searchVenues(searchContext.query,searchContext.lat,searchContext.lng,cursor,openNow);
@@ -550,7 +550,7 @@ async function searchChatVenues(query,lat,lng,area,openNow,fast=false,excludedPl
   }
   return venues;
 }
-function limitChatVenues(venues,userText,query){return (venues||[]).slice(0,4);}
+function limitChatVenues(venues,userText,query){return conciergeVenuePage(venues);}
 function latestUserText(contents){if(!Array.isArray(contents))return '';for(let i=contents.length-1;i>=0;i--){const c=contents[i];if(c?.role==='user'&&Array.isArray(c.parts)){const t=c.parts.map(p=>p.text||'').join(' ').trim();if(t)return t;}}return '';}
 function isPubCrawlRequest(text){return /\b(?:pub|bar|drinks?)?\s*crawl\b/i.test(String(text||''));}
 function pubCrawlLimit(){return 8;}
@@ -854,7 +854,8 @@ export default async function handler(req,res){
       const scheduled = /\b(?:tomorrow|tonight|at \d|after \d|before \d)\b/i.test(turn.searchText);
       return searchChatVenues(query,latitude,longitude,area,scheduled?false:openNow,
         turn.more||requestedWindow.lateDinner?false:fast,turn.excludedPlaceIds,
-        venue=>!requestedWindow.lateDinner||venueOpenAtRequestedTime(venue,requestedWindow));
+        venue=>filterSessionVenues([venue],contents).length>0
+          &&(!requestedWindow.lateDinner||venueOpenAtRequestedTime(venue,requestedWindow)));
     };
     const sessionVenueTransitFollowUp=isSessionVenueTransitFollowUp(userText,body.sessionVenueContext);
     const quick=quickChatReply(userText,body.chatContext,contents);

@@ -57,9 +57,10 @@ function selection(input, now, timeZone, floatingSandboxTimes = false, blockedSe
   }
   if ((!timeZone || typeof timeZone !== 'string') && !floatingSandboxTimes) return fail('restaurant_timezone_not_verified',503);
   const orderingTime = localBookingInstant(input.startDateTime,timeZone || 'Etc/UTC');
-  // Without a verified sandbox time zone, use only dates >= two UTC days ahead.
+  // With no verified zone, the earliest possible UTC instant is local minus
+  // fourteen hours. This permits tomorrow evening without guessing London.
   // This ordering value is NOT presented as a verified UTC reservation instant.
-  const minimum = timeZone ? now : Math.floor(now / 86_400_000) * 86_400_000 + 2 * 86_400_000;
+  const minimum = timeZone ? now : now + 14 * 3_600_000;
   if (orderingTime <= minimum || orderingTime > now + 90 * 86_400_000) return fail('invalid_booking_time');
   return {rid:264001,partySize:input.partySize,startDateTime:input.startDateTime,
     timeZone:timeZone || null,scheduledAt:timeZone ? orderingTime : null,localTimeOrder:input.startDateTime,

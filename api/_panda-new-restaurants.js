@@ -80,7 +80,7 @@ export function createNewRestaurantFeed({
     const source = await readPool();
     if (source?.status !== 'ready' || !Array.isArray(source.rows)) {
       return { status: source?.status || 'source_unavailable', venues: [], newOpeningsSearch: true,
-        text: 'OpenTable’s verified New selection isn’t connected for this area yet. I won’t substitute ordinary restaurants.' };
+        text: 'OpenTable’s New selection is not available in Panda yet. It requires a separately approved source from OpenTable. I won’t label ordinary restaurants as new.' };
     }
     const pool = selectNewRestaurantPool(source.rows, location, now());
     const excluded = new Set(excludedPlaceIds.filter(placeId).slice(-500));
