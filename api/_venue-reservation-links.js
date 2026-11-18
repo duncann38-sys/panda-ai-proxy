@@ -1,3 +1,7 @@
+// A cold Firestore connection can exceed 1.5s even for a valid indexed match.
+// Keep enough time to return that verified destination rather than incorrectly
+// preferring the website fallback. No additional provider calls are introduced.
+export const RESERVATION_MATCH_TIMEOUT_MS = 3000;
 export function createVenueReservationLinks({ getProfile, getOfficialLinks, getOpenTableMatch }) {
   return async function load(placeId, { reservationOnly = false } = {}) {
     const profile = await getProfile(placeId);
@@ -13,7 +17,7 @@ export function createVenueReservationLinks({ getProfile, getOfficialLinks, getO
       try {
         return await Promise.race([
           Promise.resolve().then(() => getOpenTableMatch(profile)),
-          new Promise(resolve => { timer = setTimeout(() => resolve({ status: 'unavailable' }), 1500); }),
+          new Promise(resolve => { timer = setTimeout(() => resolve({ status: 'unavailable' }), RESERVATION_MATCH_TIMEOUT_MS); }),
         ]);
       } catch { return { status: 'unavailable' }; }
       finally { clearTimeout(timer); }
