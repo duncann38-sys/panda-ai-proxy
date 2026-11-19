@@ -6,6 +6,7 @@
 // UPGRADE: find_places accepts optional `area` (e.g. "Mayfair"), geocoded so the
 //   search centres on that place, not the user's GPS.
 import { GoogleAuth } from 'google-auth-library';
+import { quickVenueShortcut, matchesQuickVenueShortcut, compareQuickVenueRatings } from './_panda-shortcuts.js';
 import admin from 'firebase-admin';
 import { createSandboxHttpHandler, isSandboxReservationRequest } from './_panda-sandbox-http.js';
 import { applyGuard } from './_guard.js';
@@ -523,20 +524,20 @@ function extractArea(text){
 function isThemedRequest(text){return /\b(pub crawl|crawl|cozy|cosy|cheap|expensive|christmas|theme|live music|dj|music)\b/i.test(String(text||''));}
 const CHAT_CARD_LIMIT=20;
 const CHAT_MAX_DISTANCE_METERS=60000;
-function nearbyChatVenues(venues){
+function nearbyChatVenues(venues,compare=(a,b)=>a.distanceMeters-b.distanceMeters){
   const unique=new Map();
   for(const venue of venues||[]){
     if(!venue?.id||!venue.photoName||Number(venue.photoCount)<5)continue;
     if(!Number.isFinite(venue.distanceMeters)||venue.distanceMeters<0||venue.distanceMeters>CHAT_MAX_DISTANCE_METERS)continue;
     if(!unique.has(venue.id))unique.set(venue.id,venue);
   }
-  return [...unique.values()].sort((a,b)=>a.distanceMeters-b.distanceMeters).slice(0,CHAT_CARD_LIMIT);
+  return [...unique.values()].sort(compare).slice(0,CHAT_CARD_LIMIT);
 }
-async function searchChatVenues(query,lat,lng,area,openNow,fast=false,excludedPlaceIds=[],acceptVenue=()=>true){
+async function searchChatVenues(query,lat,lng,area,openNow,fast=false,excludedPlaceIds=[],acceptVenue=()=>true,compare){
   const first=await searchVenuesSmart(query,lat,lng,area,openNow);
   const excluded = new Set(excludedPlaceIds);
   let all = first.venues || [];
-  let venues=nearbyChatVenues(all.filter(venue => !excluded.has(venue.id) && acceptVenue(venue)));
+  let venues=nearbyChatVenues(all.filter(venue => !excluded.has(venue.id) && acceptVenue(venue)),compare);
   let cursor = first.nextPageToken;
   const searchContext = first.searchContext;
   const used = new Set();
@@ -545,7 +546,7 @@ async function searchChatVenues(query,lat,lng,area,openNow,fast=false,excludedPl
     used.add(cursor);
     const next = await searchVenues(searchContext.query,searchContext.lat,searchContext.lng,cursor,openNow);
     all = [...all, ...(strictLocationResult(next,area).venues || [])];
-    venues=nearbyChatVenues(all.filter(venue => !excluded.has(venue.id) && acceptVenue(venue)));
+    venues=nearbyChatVenues(all.filter(venue => !excluded.has(venue.id) && acceptVenue(venue)),compare);
     cursor = next.nextPageToken;
   }
   return venues;
@@ -847,15 +848,22 @@ export default async function handler(req,res){
       return;
     }
     const userText=turn.continuation ? turn.searchText : latestUserText(contents);
+    const shortcut=quickVenueShortcut(userText);
+    if(shortcut&&(!location||!Number.isFinite(Number(location.lat))||!Number.isFinite(Number(location.lng)))){
+      return res.status(200).json({text:'Allow location access so I can find the best-rated places near you, or tell me an area to search.',venues:[],aiMode:'clarification'});
+    }
     if (turn.more && !turn.continuation) return res.status(200).json({venues:[],aiMode:'clarification',
       text:'Of course—which area and kind of place shall I find more of?'});
     const requestedWindow = conciergeTimeWindow(turn.searchText,body.chatContext);
     const searchForTurn = async (query,latitude,longitude,area,openNow,fast=false) => {
       const scheduled = /\b(?:tomorrow|tonight|at \d|after \d|before \d)\b/i.test(turn.searchText);
-      return searchChatVenues(query,latitude,longitude,area,scheduled?false:openNow,
+      return searchChatVenues(shortcut?.query||query,latitude,longitude,shortcut?'':area,
+        shortcut?shortcut.openNow:scheduled?false:openNow,
         turn.more||requestedWindow.lateDinner?false:fast,turn.excludedPlaceIds,
         venue=>filterSessionVenues([venue],contents).length>0
-          &&(!requestedWindow.lateDinner||venueOpenAtRequestedTime(venue,requestedWindow)));
+          && matchesQuickVenueShortcut(venue,shortcut)
+          &&(!requestedWindow.lateDinner||venueOpenAtRequestedTime(venue,requestedWindow)),
+        shortcut?compareQuickVenueRatings:undefined);
     };
     const sessionVenueTransitFollowUp=isSessionVenueTransitFollowUp(userText,body.sessionVenueContext);
     const quick=quickChatReply(userText,body.chatContext,contents);
@@ -873,7 +881,7 @@ export default async function handler(req,res){
     if(maySearchVenues(userText)&&ambiguousClub(userText,contents)){
       res.status(200).json({text:'Do you mean a nightclub for dancing, a private members’ club, or a sports/social club?',venues:[],aiMode:'clarification'});return;
     }
-    if(maySearchVenues(userText)&&isDirectVenueRequest(userText)&&!extractArea(userText)&&(!location||!Number.isFinite(Number(location.lat))||!Number.isFinite(Number(location.lng)))){
+    if(maySearchVenues(userText)&&(shortcut||isDirectVenueRequest(userText))&&!extractArea(userText)&&(!location||!Number.isFinite(Number(location.lat))||!Number.isFinite(Number(location.lng)))){
       res.status(200).json({text:'Tell me your city or area, or allow location access, so I can find real nearby venues.',venues:[],aiMode:'clarification'});return;
     }
     if(maySearchVenues(userText)&&isPubCrawlRequest(userText)){res.status(200).json(await buildCustomPubCrawl(userText,lat,lng));return;}
@@ -958,13 +966,14 @@ export default async function handler(req,res){
     let venues=[];
     // An explicit venue request needs one grounded model reply, not a model decision plus
     // a second/third inference. Keep the established guarded, shared Places search.
-    if(maySearchVenues(userText)&&isDirectVenueRequest(userText)&&!isWeatherQuestion(userText)&&!sessionVenueTransitFollowUp){
+    if(maySearchVenues(userText)&&(shortcut||isDirectVenueRequest(userText))&&!isWeatherQuestion(userText)&&!sessionVenueTransitFollowUp){
       const area=extractArea(userText);
       const q=sessionVenueQuery(fallbackQuery(userText),contents);
       prefetchedVenues=filterSessionVenues(limitChatVenues(await searchForTurn(q,lat,lng,area,/\bopen\b/i.test(userText),!/\b(all|more|another|different)\b/i.test(userText)),userText,q),contents);
       venues=prefetchedVenues;
       delete baseBody.tools;
       baseBody.systemInstruction.parts[0].text+=`\nVerified venue shortlist: ${venuesToText(venues,userText)}\nAnswer only from this shortlist. If empty, say no matching venues were verified.`;
+      if(shortcut)baseBody.systemInstruction.parts[0].text+='\nThese results are within 5 km and ranked by rating in the requested category. Do not claim that dinner opening hours prove kitchen service or table availability. If empty, offer another area; never pad with distant or wrong-category places.';
     }
     const tokenResult=await tokenPromise;
     if(tokenResult.failed){await degrade('vertex-auth-unavailable');return;}

@@ -4,7 +4,7 @@ const MORE = /^(?:please\s+)?(?:more(?:\s+(?:places|options|restaurants|bars|pub
 const MODIFIER = /\b(?:tomorrow|tonight|today|instead|rather|at \d|after \d|before \d|for (?:two|three|four|\d+))\b/i;
 const VENUE = /\b(?:restaurants?|dinner|lunch|brunch|breakfast|pubs?|bars?|cocktails?|sushi|pizza|italian|french|indian|thai|new openings?)\b/i;
 const compact = value => String(value ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 1200);
-export const CONCIERGE_RESULT_LIMIT = 10;
+export const CONCIERGE_RESULT_LIMIT = 15;
 export function conciergeVenuePage(venues = []) {
   const unique = new Map();
   for (const venue of venues) if (venue?.id && !unique.has(venue.id)) unique.set(venue.id, venue);
@@ -94,7 +94,7 @@ export function conciergeInstruction(turn, context, now) {
   const window = conciergeTimeWindow(turn.searchText, context, now);
   return [
     'Be a thoughtful, naturally witty British dining concierge, not a search form. Reply to casual conversation without searching. Never force banter or use a gendered title.',
-    'For ordinary discovery, return up to ten verified venue cards per batch and one useful, short follow-up. Ten is a batch size, not a limit on continued browsing. Preserve the customer’s area, cuisine, budget and date across follow-ups; do not ask again for known details.',
+    'For ordinary discovery, return up to fifteen verified venue cards per batch and one useful, short follow-up. Fifteen is a batch size, not a limit on continued browsing. Preserve the customer’s area, cuisine, budget and date across follow-ups; do not ask again for known details.',
     `Request-local interpreted time window: ${JSON.stringify(window)}. This is a requested time, NOT evidence of availability or kitchen service.`,
     'Never equate venue closing time with the kitchen closing time. For late dinner, explain that kitchen service needs confirmation unless a provider explicitly verifies dining at the requested time.',
     'Never invent a dish, opening date, station, fare, availability or booking confirmation. No unsupported superlatives.',
