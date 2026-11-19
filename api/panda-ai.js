@@ -6,6 +6,7 @@
 // UPGRADE: find_places accepts optional `area` (e.g. "Mayfair"), geocoded so the
 //   search centres on that place, not the user's GPS.
 import { GoogleAuth } from 'google-auth-library';
+import { venueCardReply } from './_panda-card-reply.js';
 import { quickVenueShortcut, matchesQuickVenueShortcut, compareQuickVenueRatings } from './_panda-shortcuts.js';
 import admin from 'firebase-admin';
 import { createSandboxHttpHandler, isSandboxReservationRequest } from './_panda-sandbox-http.js';
@@ -1014,10 +1015,11 @@ export default async function handler(req,res){
       venues=filterSessionVenues(limitChatVenues(found,userText,userText),contents);
     }
     if(!text) text=venues.length?"Here's what I dug up near you \uD83D\uDC3C":pick(NORESULT_LINES);
+    venues=limitChatVenues(venues,userText,userText);
+    text=venueCardReply(text,venues,turn.searchText || userText);
     if (requestedWindow.lateDinner && venues.length && !/\bkitchen\b/i.test(text)) {
       text += ' These are venue opening hours; kitchen service at that time still needs confirmation.';
     }
-    venues=limitChatVenues(venues,userText,userText);
     res.status(200).json({text,venues,richMetadata:true,aiMode:'vertex',weatherStatus,weather});
   }catch(err){
     try{

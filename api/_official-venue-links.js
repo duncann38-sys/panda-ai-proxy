@@ -194,7 +194,7 @@ export async function getOfficialVenueLinks(website, venueName = '', readPage = 
   const url = new URL(website);
   if (url.protocol === 'http:') url.protocol = 'https:';
   const pageUrl = publicUrl(url.href).href;
-  const key = pageUrl + '|' + venueName.trim().toLowerCase() + (options.preferOpenTable ? '|opentable-first' : '');
+  const key = pageUrl + '|' + venueName.trim().toLowerCase() + (options.preferOpenTable ? '|opentable-first' : '') + (options.visit ? '|visit' : '');
   const cached = cache.get(key);
   if (cached && cached.expires > Date.now()) return cached.value;
   if (pending.has(key)) return pending.get(key);
@@ -205,6 +205,7 @@ export async function getOfficialVenueLinks(website, venueName = '', readPage = 
       const page = await readPage(pageUrl, 0, Date.now() + timeoutMs);
       const links = linksFromOfficialHtml(page.html, page.url, venueName, options);
       value = { ...links, website: page.url, source: 'official_website',
+        ...(options.visit ? { visitInfo: (await import('./_panda-visit-info.js')).officialVisitInfo(page.html, page.url) } : {}),
         lookupStatus: links.menuUrl || links.reservationUrl ? 'verified' : 'no_direct_links' };
     } catch (error) {
       if (error?.code === 'UNSAFE_OFFICIAL_URL') throw error;

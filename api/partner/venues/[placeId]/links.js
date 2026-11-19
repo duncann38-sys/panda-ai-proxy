@@ -17,6 +17,15 @@ export default async function handler(req, res) {
   if (applyVenueGuard(req, res)) return;
   if (!isValidPlaceId(req.query.placeId)) return res.status(400).json({ error: 'Choose a valid Google venue.' });
   try {
+    if (req.query.intent === 'visit') {
+      const profile = await getVenueProfile(req.query.placeId);
+      if (!profile) return res.status(404).json({ error: 'Venue profile unavailable.' });
+      const links = profile.website
+        ? await getOfficialVenueLinks(profile.website, profile.name, undefined, { visit: true })
+        : { website: null, visitInfo: null, source: 'official_website', lookupStatus: 'no_direct_links' };
+      res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=900');
+      return res.status(200).json({ ...links, placeId: req.query.placeId });
+    }
     const reservationOnly = req.query.intent === 'reservation';
     const links = await loadLinks(req.query.placeId, { reservationOnly });
     if (!links) return res.status(404).json({ error: 'Venue profile unavailable.' });
