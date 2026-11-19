@@ -126,9 +126,8 @@ export function createSandboxReservationService({store,provider,sendConfirmation
       ...chosen,createdAt:now(),lockRequestId:randomUUID(),bookingRequestId:randomUUID()};
     const claimed=await store.claimAttempt(user.uid,key,attempt);
     if (!claimed.created) {
-      if (claimed.record?.status==='confirmed') {
-        return store.getBooking(user.uid,key);
-      }
+      const saved=await store.getBooking(user.uid,key);
+      if (saved?.status==='confirmed' && saved.ownerUid===user.uid && saved.environment==='sandbox') return saved;
       return fail('booking_already_submitted_do_not_retry',409);
     }
     let phase='locking';
@@ -151,21 +150,22 @@ export function createSandboxReservationService({store,provider,sendConfirmation
         return fail('provider_details_require_review_do_not_retry',409);
       }
       const booking={id:key,ownerUid:user.uid,environment:'sandbox',status:'confirmed',...chosen,
-        ...verified,createdAt:now(),emailStatus:'not_requested'};
+        ...verified,createdAt:now(),emailStatus:sendConfirmation?'pending':'provider_managed'};
       // Persist first; a mail outage must never trigger another reservation.
       await store.saveBooking(user.uid,key,booking);
       phase='confirmed';
-      await store.updateAttempt(user.uid,key,{status:'confirmed'});
+      await store.updateAttempt(user.uid,key,{status:'confirmed'}).catch(()=>{});
       if (sendConfirmation) {
         // At most once: claim before sending, never silently retry an uncertain email.
-        const mailClaimed=await store.claimEmail(user.uid,key);
-        if (mailClaimed) {
-          try {
+        try {
+          const mailClaimed=await store.claimEmail(user.uid,key);
+          if (mailClaimed) {
             await sendConfirmation({booking,email:user.email,idempotencyKey:`sandbox-${key}`});
-            booking.emailStatus='sent';
-          } catch { booking.emailStatus='unknown_do_not_resend'; }
-          await store.updateBooking(user.uid,key,{emailStatus:booking.emailStatus});
-        }
+            booking.emailStatus='accepted';
+          } else booking.emailStatus='unknown_do_not_resend';
+        } catch { booking.emailStatus='unknown_do_not_resend'; }
+        // A receipt is still a confirmed booking if mail/status storage fails.
+        await store.updateBooking(user.uid,key,{emailStatus:booking.emailStatus}).catch(()=>{});
       }
       return booking;
     } catch (error) {
