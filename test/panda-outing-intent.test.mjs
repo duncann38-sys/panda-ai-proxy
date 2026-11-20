@@ -14,9 +14,9 @@ const request = text => ({ text, contents: [], location: { lat: 51.48, lng: -0.1
 
 test('both photographed theatre prompts keep their actual intent', () => {
   assert.equal(outingIntent('What is going on in theatres today').kind, 'theatre');
-  assert.equal(outingIntent('What shows are on').kind, 'theatre');
+  assert.equal(outingIntent('What shows are on'), null);
   const contents = [{ role: 'user', parts: [{ text: 'Any concerts tonight?' }] }];
-  assert.equal(outingIntent('What shows are on', contents).kind, 'concerts');
+  assert.equal(outingIntent('What shows are on', contents), null);
   assert.equal(outingIntent('Any musicals today?').kind, 'musicals');
   assert.equal(outingIntent('What’s on the menu?'), null);
   assert.equal(outingIntent('Show me restaurants'), null);
@@ -72,9 +72,17 @@ test('official shows can still be returned if the Places provider is unavailable
   assert.match(result.text, /A verified show/);
 });
 
-test('show lookup does not substitute hospitality when listings or providers fail', async () => {
+test('event lookups bypass the venue-only outing fallback', async () => {
+  const query = 'When is The Rolling Stones in concert?';
+  assert.equal(outingIntent(query), null);
+  assert.equal(await answerOutingRequest(request(query), {
+    search: async () => { throw Error('venue search must not run'); },
+  }), null);
+});
+
+test('non-date venue searches do not substitute hospitality when listings or providers fail', async () => {
   let calls = 0;
-  const result = await answerOutingRequest(request('What shows are on'), {
+  const result = await answerOutingRequest(request('theatres today'), {
     search: async query => { calls++; assert.match(query, /theatres/); return [cafe, pub, theatre]; },
     programmes: async () => { throw Error('publisher temporarily unavailable'); },
   });
@@ -170,4 +178,6 @@ test('dedicated intent handling precedes the broad maySearchVenues gate in the l
   assert.ok(entry > 0);
   assert.ok(entry < code.indexOf('if(maySearchVenues(userText)&&ambiguousClub'));
   assert.match(code.slice(entry, entry + 800), /if\(outing\).*json\(outing\)/s);
+  assert.match(code.slice(0, entry), /if\(!sessionVenueTransitFollowUp&&!eventSearchQuestion\)/);
+  assert.ok(code.indexOf('const eventSearchQuestion=isEventSearchQuestion(userText)') < entry);
 });

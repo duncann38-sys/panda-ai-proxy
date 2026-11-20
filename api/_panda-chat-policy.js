@@ -102,6 +102,26 @@ export function isWeatherQuestion(text) {
   return /\b(weather|rain(?:ing|y)?|snow(?:ing)?|sunny|sunshine|temperature|forecast|wind(?:y)?|humidity|warm enough|cold outside)\b/i.test(text);
 }
 
+const WEATHER_TIME_MARKER = /\b(?:today|tonight|tomorrow|the\s+(?:morning|afternoon|evening|week|weekend|month|year)|this\s+(?:morning|afternoon|evening|week|weekend|month|year)|next\s+(?:week|weekend|month|year)|coming\s+(?:week|weekend)|monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december|in\s+\d+\s+(?:days?|weeks?|months?))\b/i;
+const WEATHER_AREA_PHRASE = /\b(?:in|on|near|around|within|for)\s+([\p{L}\p{M}\d][\p{L}\p{M}\d'’.-]*(?:[\s-]+[\p{L}\p{M}\d][\p{L}\p{M}\d'’.-]*){0,3}(?:,\s*[\p{L}\p{M}][\p{L}\p{M}.'’-]*)?)/giu;
+
+export function extractWeatherArea(text) {
+  if (!isWeatherQuestion(text)) return '';
+  const candidates = [];
+  for (const match of String(text || '').matchAll(WEATHER_AREA_PHRASE)) {
+    let candidate = match[1].trim();
+    const timeMarker = candidate.search(WEATHER_TIME_MARKER);
+    if (timeMarker >= 0) candidate = candidate.slice(0, timeMarker);
+    candidate = candidate
+      .replace(/\b(?:for|at|in|on|near|around|within)\s*$/i, '')
+      .replace(/[,\s.]+$/g, '')
+      .trim();
+    if (!candidate || /^(?:the|me|here|there|my(?:\s+(?:area|city|location|home))?|local(?:ly)?|nearby|the\s+rest(?:\s+of)?)$/i.test(candidate)) continue;
+    candidates.push(candidate);
+  }
+  return candidates.at(-1) || '';
+}
+
 export function isEventSearchQuestion(text) {
   const clean = String(text || '').trim();
   if (/\b(?:train|tube|bus|flight|ferry)\s+tickets?\b/i.test(clean)) return false;
@@ -215,7 +235,7 @@ export function ambiguousClub(text, contents) {
     && !userTexts(contents).slice(-4, -1).some(t => /\b(nightclubs?|danc(?:e|ing)|dj|disco|members?|sports? club)\b/i.test(t));
 }
 
-export function buildChatInstruction(contents, context = {}, weather = null, explicitPreferences = [], sessionVenueContext = null) {
+export function buildChatInstruction(contents, context = {}, weather = null, explicitPreferences = [], sessionVenueContext = null, weatherArea = '') {
   const { greeting, timeZone } = localGreeting(context);
   // Session-local statements only: never a shared per-process chat or a permanent user profile.
   const preferences = [...(Array.isArray(explicitPreferences) ? explicitPreferences : []), ...userTexts(contents)]
@@ -250,7 +270,7 @@ export function buildChatInstruction(contents, context = {}, weather = null, exp
         ]
       : []),
     weather
-      ? `Verified MET Norway model forecast (not a station observation). Use only the supplied readings, respect their UTC timestamps, and describe them as a forecast or estimate rather than observed conditions. Clearly attribute MET Norway under CC BY 4.0 when discussing the forecast. ${JSON.stringify(weather)}`
+      ? `Verified MET Norway model forecast (not a station observation)${weatherArea ? ` for the requested area ${JSON.stringify(weatherArea)}` : ' for the user’s current local area'}. Use only the supplied readings, respect their UTC timestamps, and answer the requested forecast period. If a named area was requested, explicitly name it near the start (for example, “In ${weatherArea}, the latest forecast shows…”). Describe readings as a forecast or estimate, never as a live station observation. If the supplied forecast does not cover the requested period, say so rather than guessing. Clearly attribute MET Norway under CC BY 4.0. One fitting weather emoji is welcome when it feels natural. ${JSON.stringify(weather)}`
       : 'No verified live weather is supplied. Do not state or guess current weather; offer conditional advice, or say live weather is unavailable.',
   ].join('\n');
 }
