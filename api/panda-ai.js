@@ -13,13 +13,14 @@ import { createSandboxHttpHandler, isSandboxReservationRequest } from './_panda-
 import { applyGuard } from './_guard.js';
 import { answerOutingRequest } from './_panda-outing-intent.js';
 import { officialProgrammes } from './_panda-programmes.js';
-import { quickChatReply, shouldUseConversationalModel, wantsOpenNow, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, isEventSearchQuestion, reserveEventGroundingBudget, settleEventGroundingBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues, isSessionVenueTransitFollowUp } from './_panda-chat-policy.js';
+import { quickChatReply, shouldUseConversationalModel, wantsOpenNow, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, extractWeatherArea, isEventSearchQuestion, reserveEventGroundingBudget, settleEventGroundingBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues, isSessionVenueTransitFollowUp } from './_panda-chat-policy.js';
 import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-directory.js';
 import { createDiscoveryService } from './_discovery-lite.js';
 import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage, MAX_INDEXED_FEED_PAGE_SIZE } from './_london-index.js';
 import { buildIndexedFeedPage, buildIndexedIdCandidatePage } from './_indexed-feed-page.js';
 import { currentWeatherResponse } from './_current-weather.js';
 import { groundingQueryCount, groundingSources, groundedEventText } from './_panda-event-search.js';
+import { resolveEventSearchArea } from './_panda-event-location.js';
 import { googleCategoryTags } from './_google-category-tags.js';
 import { classifyIndexedFeedCategory } from './_venue-taxonomy.js';
 import { conciergeTurn, conciergeInstruction, conciergeArea, conciergeTimeWindow, conciergeVenuePage, CONCIERGE_RESULT_LIMIT } from './_panda-concierge-turn.js';
@@ -853,6 +854,7 @@ export default async function handler(req,res){
       return;
     }
     const userText=turn.continuation ? turn.searchText : latestUserText(contents);
+    const eventSearchQuestion=isEventSearchQuestion(userText);
     const shortcut=quickVenueShortcut(userText);
     if(shortcut&&(!location||!Number.isFinite(Number(location.lat))||!Number.isFinite(Number(location.lng)))){
       return res.status(200).json({text:'Allow location access so I can find the best-rated places near you, or tell me an area to search.',venues:[],aiMode:'clarification'});
@@ -875,7 +877,7 @@ export default async function handler(req,res){
     const sessionVenueTransitFollowUp=isSessionVenueTransitFollowUp(userText,body.sessionVenueContext);
     const quick=quickChatReply(userText,body.chatContext,contents);
     if(quick&&!shouldUseConversationalModel(userText,contents)){res.status(200).json({text:quick,venues:[],aiMode:'quick'});return;}
-    if(!sessionVenueTransitFollowUp){
+    if(!sessionVenueTransitFollowUp&&!eventSearchQuestion){
       const outing=await answerOutingRequest({
         text:userText,contents,area:extractArea(userText),context:body.chatContext,
         location:{lat,lng},hasLocation:Number.isFinite(body.location?.lat)&&Number.isFinite(body.location?.lng),
@@ -895,10 +897,10 @@ export default async function handler(req,res){
     let prefetchedVenues=null;
     let weather=null;
     let weatherStatus=null;
-    const eventSearchQuestion=isEventSearchQuestion(userText);
+    let weatherArea='';
     if(isWeatherQuestion(userText)){
-      const area=extractArea(userText);
-      const point=area?await geocodeArea(area):location;
+      weatherArea=extractWeatherArea(userText);
+      const point=weatherArea?await geocodeArea(weatherArea):location;
       if(!point||!Number.isFinite(Number(point.lat))||!Number.isFinite(Number(point.lng))){
         res.status(200).json({text:'Which city or area should I check the weather for?',venues:[],aiMode:'clarification'});return;
       }
@@ -913,13 +915,26 @@ export default async function handler(req,res){
       if(result.status===200)weather=result.body.weather;
       else weatherStatus=result.body.error||'weather_unavailable';
     }
+    const eventTarget=eventSearchQuestion
+      ? await resolveEventSearchArea({text:userText,location,apiKey:MAPS_KEY,fetchImpl:fetch})
+      : null;
+    if(eventSearchQuestion&&!eventTarget?.area){
+      res.status(200).json({
+        text:'Which city or area should I check for upcoming performances? I couldn’t identify your current area, and I won’t guess.',
+        venues:[],
+        sources:[],
+        aiMode:'clarification',
+        eventSearchStatus:'location_unavailable',
+      });
+      return;
+    }
     async function degrade(reason='unknown'){
       if(prefetchedVenues!==null){
         res.status(200).json({text:safeDegradedText(userText,prefetchedVenues),venues:prefetchedVenues,richMetadata:true,aiMode:'fallback',aiFallbackReason:reason});return;
       }
       if(isWeatherQuestion(userText)){
         const summary=weather
-          ?`MET Norway’s model forecast is ${weather.condition||'available'}${Number.isFinite(Number(weather.temperatureC))?`, around ${weather.temperatureC}°C`:''}. It is a forecast, not a station observation. Weather data: MET Norway, CC BY 4.0.`
+          ?`The latest MET Norway forecast${weatherArea?` for ${weatherArea}`:' for your local area'} shows ${weather.condition||'conditions available'}${Number.isFinite(Number(weather.temperatureC))?`, around ${weather.temperatureC}°C`:''}. It is a forecast, not a station observation. Weather data: MET Norway, CC BY 4.0.`
           :'I couldn’t retrieve a reliable forecast just now, so I won’t guess. Please try again shortly.';
         res.status(200).json({text:summary,venues:[],aiMode:'fallback',aiFallbackReason:reason,weatherStatus,weather});return;
       }
@@ -956,7 +971,7 @@ export default async function handler(req,res){
     const projectId=credentials.project_id;
     const convo=compactConversation(contents,{maxItems:12,maxChars:7000});
     const baseBody={contents:convo,tools:[FIND_PLACES_TOOL]};
-    baseBody.systemInstruction={parts:[{text:buildChatInstruction(contents,body.chatContext,weather,body.sessionPreferences,body.sessionVenueContext)}]};
+    baseBody.systemInstruction={parts:[{text:buildChatInstruction(contents,body.chatContext,weather,body.sessionPreferences,body.sessionVenueContext,weatherArea)}]};
     baseBody.systemInstruction.parts[0].text += '\n' + conciergeInstruction(turn,body.chatContext);
     if(isWeatherQuestion(userText)&&!isDirectVenueRequest(userText))delete baseBody.tools;
     if(!maySearchVenues(userText)||sessionVenueTransitFollowUp)delete baseBody.tools;
@@ -975,8 +990,11 @@ export default async function handler(req,res){
       baseBody.tools=[{googleSearch:{}}];
       baseBody.generationConfig={...(baseBody.generationConfig||{}),temperature:1.0};
       baseBody.systemInstruction.parts[0].text+=[
-        'LIVE SHOW SEARCH: Use Google Search grounding for current performances, concerts and ticket information.',
-        'Prefer the artist’s official site, the venue’s event page, or an official ticket seller. Give only upcoming performances supported by the search results, with city/venue and date; include local time only when the source verifies it. The app renders grounded source links below the answer, so do not invent or type raw URLs into the reply.',
+        `LIVE SHOW SEARCH: Use Google Search grounding for current performances, concerts and ticket information. Search area: ${eventTarget.area}.`,
+        eventTarget.source === 'explicit'
+          ? 'The user named this destination; search that place, not the device location.'
+          : 'The user did not name another destination; prioritize this city/region from their device location. Do not return unrelated global tour dates. If no local or regional dates are verified, say so plainly.',
+        'Prefer the artist’s official site, the venue’s event page, or an official ticket seller. Cross-check with at least two independent reliable sources when available. Give only upcoming performances supported by the search results, with city/venue and date; include local time only when the source verifies it. The app renders up to six grounded source links below the answer, so do not invent or type raw URLs into the reply.',
         'Never invent a performance, ticket availability or price. If no reliable upcoming listing is found, say so plainly. Keep the answer concise and show no more than three events. Panda can link to event pages but cannot purchase tickets or make reservations.',
       ].join('\n');
     }

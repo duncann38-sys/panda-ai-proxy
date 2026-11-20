@@ -1,5 +1,8 @@
 // Grounded, request-scoped outing handling. Never broaden a show request to hospitality.
+import { isEventSearchQuestion } from './_panda-chat-policy.js';
+
 export function outingIntent(text, contents = []) {
+  if (isEventSearchQuestion(text)) return null;
   const value = String(text || '').toLowerCase();
   const previous = (Array.isArray(contents) ? contents : []).filter(item => item?.role === 'user')
     .slice(-5).map(item => (Array.isArray(item.parts) ? item.parts : []).map(part => part?.text || '').join(' ')).join(' ');
