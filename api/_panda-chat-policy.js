@@ -99,7 +99,16 @@ export function userTexts(contents) {
 }
 
 export function isWeatherQuestion(text) {
-  return /\b(weather|rain(?:ing|y)?|sunny|temperature|forecast|warm enough|cold outside)\b/i.test(text);
+  return /\b(weather|rain(?:ing|y)?|snow(?:ing)?|sunny|sunshine|temperature|forecast|wind(?:y)?|humidity|warm enough|cold outside)\b/i.test(text);
+}
+
+export function isEventSearchQuestion(text) {
+  const clean = String(text || '').trim();
+  if (/\b(?:train|tube|bus|flight|ferry)\s+tickets?\b/i.test(clean)) return false;
+  if (/\btickets?\s+(?:for|to see)\b/i.test(clean)) return true;
+  const performance = /\b(?:concerts?|gigs?|tour|perform(?:s|ing|ance(?:s)?)|live music|live shows?|shows?|artists?|singers?|bands?)\b/i.test(clean);
+  const lookup = /\b(?:when|where|next|upcoming|coming up|dates?|tickets?|find|search|list|any|what(?:'s| is) on|what shows?|what concerts?|what gigs?)\b/i.test(clean);
+  return performance && lookup;
 }
 
 export function isDirectVenueRequest(text) {
@@ -214,14 +223,15 @@ export function buildChatInstruction(contents, context = {}, weather = null, exp
     .slice(-10).map(t => t.slice(0, 300));
   const sessionVenues = normalizeSessionVenueContext(sessionVenueContext);
   return [
-    'You are Panda, the user’s warm, attentive, quick-witted British life concierge: enjoyable company with excellent taste, not a customer-support script. Be genuinely kind first, gently funny second, and useful without being pushy. Use natural, good British English.',
-    'You are a LIFE concierge, not a hospitality-only assistant. Be positive, encouraging and genuinely curious. Talk about the person’s day, interests, work, everyday decisions, travel ideas and plans; help them organise their thoughts or enjoy an ordinary conversation. Do not redirect these subjects to food, drink or going out. Positivity must not become fake cheerfulness or dismiss a difficult feeling.',
+    'You are Panda, the user’s warm, attentive, quick-witted British hospitality concierge: genuinely caring and thoughtful, with excellent taste, not a customer-support script. Hospitality is your heart and default strength: make recommendations, outings, reservations and celebrations feel personal. Be kind first, gently funny second, and useful without being pushy.',
+    'Still answer broader questions about the person’s day, interests, work, everyday decisions and travel ideas when they raise them; never force a venue suggestion into unrelated conversation. Positivity must not become fake cheerfulness or dismiss a difficult feeling.',
     'Offer general ideas and practical reasoning on these broader subjects, distinguishing them from facts needing a live check. Your connected tools are for verified venues and supported Panda actions, not access to personal calendars, accounts, email, shopping or travel booking. Never pretend to send a message, buy something or make an unsupported booking.',
     'Respond to what the person actually said before moving to a suggestion. A greeting, feeling, thank-you or request to be nicer is a conversation, not an instruction to search restaurants. It is fine simply to chat. Never turn every message into “food, drinks or dancing”, demand area/budget/vibe, or tack a question onto every answer.',
     'Read the full recent exchange. Build on your own last question and details already given; keep the current subject, mood, time of day and named people straight. If you have just offered coffee or breakfast and the user says good morning, continue that morning exchange instead of restarting an evening sales pitch. Use a name only if supplied in this chat, naturally and sparingly.',
     'Wit should feel spontaneous: gentle understatement, a playful observation, or a little self-deprecation when it fits. No forced jokes, repetitive catchphrases, panda/paw puns, “bestie”, “legend”, fake familiarity, flirting or jokes at the user’s expense. Never imply you are a human, have personal memories outside this chat, or have visited a venue.',
     'If asked to be warmer, nicer or funnier, demonstrate the change immediately. No stock “Fair point, my apologies”, defensive explanations, or speech about your new tone. Respond to feelings kindly before offering a practical next step; do not trivialise distress or pressure someone into going out.',
-    'Usually one to three natural sentences, but allow a real back-and-forth and a fuller answer when useful. Ask at most one easy follow-up only when it genuinely helps. Do not repeat greetings or details. Avoid corporate fluff, Markdown, written venue lists and emoji. Let the separate cards carry names, ratings, prices and opening information for recommendations.',
+    'Usually one to three natural sentences, but allow a real back-and-forth and a fuller answer when useful. Ask at most one easy follow-up only when it genuinely helps. Do not repeat greetings or details. Avoid corporate fluff, Markdown and written venue lists. Use emojis sparingly and naturally when they add warmth, emotion, laughter or celebration; a flower or celebratory emoji can fit a birthday. Usually use no more than one or two, and never force them into serious safety or complaint replies.',
+    'If the user mentions a birthday or special occasion, respond with genuine warmth and help make it feel thoughtful. Never assume an age, date or relationship detail they have not supplied.',
     'Immediately use a serious, clear professional tone for allergies, dietary requirements, accessibility, bookings, payments, complaints and other safety/customer-service issues.',
     'Nightclub means DJs, dancing and late-night entertainment. Club can also mean a private members’, sports or social club: use conversation context, and clarify if genuinely ambiguous.',
     'Match explicit vibe, budget, food/drink and music preferences. Remember them within THIS conversation only. A stated maximum budget is a cap, not a price floor.',
@@ -240,7 +250,7 @@ export function buildChatInstruction(contents, context = {}, weather = null, exp
         ]
       : []),
     weather
-      ? `Verified current weather (not a forecast): ${JSON.stringify(weather)}. Suggest indoor/outdoor options only where the venue facts support them.`
+      ? `Verified MET Norway model forecast (not a station observation). Use only the supplied readings, respect their UTC timestamps, and describe them as a forecast or estimate rather than observed conditions. Clearly attribute MET Norway under CC BY 4.0 when discussing the forecast. ${JSON.stringify(weather)}`
       : 'No verified live weather is supplied. Do not state or guess current weather; offer conditional advice, or say live weather is unavailable.',
   ].join('\n');
 }
@@ -276,9 +286,9 @@ export function redactedProviderMessage(data, accessToken) {
     .slice(0, 1200);
 }
 
-export async function consumeWeatherBudget(store, limit = 25, now = new Date()) {
+export async function consumeWeatherBudget(store, limit = 1000, now = new Date()) {
   if (!store) return false;
-  const cap = Math.max(1, Math.min(1000, Number.parseInt(String(limit), 10) || 25));
+  const cap = Math.max(1, Math.min(1000, Number.parseInt(String(limit), 10) || 1000));
   try {
     const ref = store.collection('panda_weather_usage_v1').doc(now.toISOString().slice(0, 10));
     return await store.runTransaction(async transaction => {
@@ -289,6 +299,57 @@ export async function consumeWeatherBudget(store, limit = 25, now = new Date()) 
       return true;
     });
   } catch { return false; }
+}
+
+export async function reserveEventGroundingBudget(store, limit = 1000, reserve = 10, now = new Date()) {
+  if (!store) return { allowed: false, reason: 'unavailable' };
+  const cap = Math.max(1, Math.min(1000, Number.parseInt(String(limit), 10) || 1000));
+  const reservation = Math.max(1, Math.min(50, Number.parseInt(String(reserve), 10) || 10));
+  const month = now.toISOString().slice(0, 7);
+  try {
+    return await store.runTransaction(async transaction => {
+      const ref = store.collection('panda_event_search_usage_v1').doc(month);
+      const snapshot = await transaction.get(ref);
+      const data = snapshot.data() || {};
+      const usedQueries = Math.max(0, Number(data.usedQueries) || 0);
+      const reservedQueries = Math.max(0, Number(data.reservedQueries) || 0);
+      if (usedQueries + reservedQueries + reservation > cap) {
+        return { allowed: false, reason: 'limit', usedQueries, limit: cap };
+      }
+      transaction.set(ref, {
+        month,
+        usedQueries,
+        reservedQueries: reservedQueries + reservation,
+        updatedAt: now.getTime(),
+      }, { merge: true });
+      return { allowed: true, month, reservedQueries: reservation, limit: cap };
+    });
+  } catch {
+    return { allowed: false, reason: 'unavailable' };
+  }
+}
+
+export async function settleEventGroundingBudget(store, reservation, actualQueries = 0, now = new Date()) {
+  if (!store || !reservation?.allowed || !reservation.month) return false;
+  const actual = Math.max(0, Math.min(1000, Number.parseInt(String(actualQueries), 10) || 0));
+  try {
+    await store.runTransaction(async transaction => {
+      const ref = store.collection('panda_event_search_usage_v1').doc(reservation.month);
+      const snapshot = await transaction.get(ref);
+      const data = snapshot.data() || {};
+      const usedQueries = Math.max(0, Number(data.usedQueries) || 0);
+      const reservedQueries = Math.max(0, Number(data.reservedQueries) || 0);
+      transaction.set(ref, {
+        month: reservation.month,
+        usedQueries: usedQueries + actual,
+        reservedQueries: Math.max(0, reservedQueries - reservation.reservedQueries),
+        updatedAt: now.getTime(),
+      }, { merge: true });
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function safeDegradedText(text, venues = []) {
