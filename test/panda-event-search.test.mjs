@@ -15,10 +15,13 @@ import {
   buildLiveShowSearchInstruction,
   buildOfficialArtistWebsiteFallbackInstruction,
   buildPriceSearchInstruction,
+  buildPriceSourceFallbackInstruction,
   isFlightPriceQuestion,
   extractFlightRoute,
   extractPriceSearchArea,
   extractEventArea,
+  shouldSearchOfficialArtistSite,
+  stripRawUrls,
 } from '../api/_panda-event-search.js';
 import { clearEventAreaCacheForTests, resolveEventSearchArea } from '../api/_panda-event-location.js';
 
@@ -214,8 +217,16 @@ test('live show answers prioritize the last verified show, next date, ticket pri
 test('official-site fallback excludes Google result pages and ticket resellers', () => {
   const prompt = buildOfficialArtistWebsiteFallbackInstruction('London, United Kingdom');
   assert.match(prompt, /first-party official website or official tour page/i);
+  assert.match(prompt, /Do not write a URL in the reply text/i);
   assert.match(prompt, /Do not return Google search-result pages, fan pages, news articles, venues, or ticket resellers/i);
   assert.match(prompt, /If no official page is verified, say so plainly/i);
+});
+
+test('artist answers with no upcoming dates trigger an official-page lookup and raw URLs are removed', () => {
+  assert.equal(shouldSearchOfficialArtistSite('There are no confirmed tour dates announced for London.'), true);
+  assert.equal(shouldSearchOfficialArtistSite('You can check https://artist.example/tour for updates.'), true);
+  assert.equal(shouldSearchOfficialArtistSite('The next show is confirmed for London on 12 June.'), false);
+  assert.equal(stripRawUrls('Check the official page: https://artist.example/tour 🎟️'), 'Check the official page 🎟️');
 });
 
 test('price answers provide distinct guidance for flight fares and dining or retail prices', () => {
@@ -234,6 +245,18 @@ test('price answers provide distinct guidance for flight fares and dining or ret
   assert.match(flightPrompt, /baggage and fees/i);
 });
 
+test('price source recheck searches a clearer product or route and never emits raw URLs', () => {
+  const productPrompt = buildPriceSourceFallbackInstruction('London, United Kingdom');
+  assert.match(productPrompt, /focused Google Search grounded recheck/i);
+  assert.match(productPrompt, /standard\/popular variant as an assumption/i);
+  assert.match(productPrompt, /current page supports it/i);
+  assert.match(productPrompt, /Do not write raw URLs/i);
+
+  const flightPrompt = buildPriceSourceFallbackInstruction('London to Paris', true);
+  assert.match(flightPrompt, /exact route/i);
+  assert.match(flightPrompt, /one-way\/return basis/i);
+});
+
 test('ticket-price questions route to live event search', () => {
   assert.equal(isEventSearchQuestion('How much are Bruce Springsteen tickets?'), true);
   assert.equal(isEventSearchQuestion('What does a concert ticket cost in London?'), true);
@@ -245,6 +268,15 @@ test('live show and price searches share a 10000-query cap without generic searc
   assert.match(handler, /PANDA_LIVE_LOOKUP_MONTHLY_LIMIT/);
   assert.match(handler, /boundedInteger\(configuredLookupLimit,10000,1,10000\)/);
   assert.doesNotMatch(handler, /groundingSearchLinks/);
+});
+
+test('show and price source gaps receive a bounded grounded recheck', () => {
+  const handler = readFileSync(new URL('../api/panda-ai.js', import.meta.url), 'utf8');
+  assert.match(handler, /shouldSearchOfficialArtistSite\(text\)/);
+  assert.match(handler, /buildOfficialArtistWebsiteFallbackInstruction/);
+  assert.match(handler, /buildPriceSourceFallbackInstruction/);
+  assert.match(handler, /stage:'grounded-price-recheck'/);
+  assert.match(handler, /stripRawUrls\(text\)/);
 });
 
 test('Panda prompt supports natural warmth, hospitality, emojis, birthdays and weather attribution', () => {
