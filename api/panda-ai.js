@@ -19,7 +19,7 @@ import { createDiscoveryService } from './_discovery-lite.js';
 import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage, MAX_INDEXED_FEED_PAGE_SIZE } from './_london-index.js';
 import { buildIndexedFeedPage, buildIndexedIdCandidatePage } from './_indexed-feed-page.js';
 import { currentWeatherResponse } from './_current-weather.js';
-import { groundingQueryCount, groundingSources, groundedEventText } from './_panda-event-search.js';
+import { groundingQueryCount, groundingSources, groundingSearchLinks, groundedEventText } from './_panda-event-search.js';
 import { resolveEventSearchArea } from './_panda-event-location.js';
 import { googleCategoryTags } from './_google-category-tags.js';
 import { classifyIndexedFeedCategory } from './_venue-taxonomy.js';
@@ -1064,6 +1064,19 @@ export default async function handler(req,res){
       }
       const text=groundedEventText(candidate);
       const sources=groundingSources(candidate);
+      if(!sources.length){
+        const searches=groundingSearchLinks(candidate);
+        res.status(200).json({
+          text:searches.length
+            ?'I ran a live Google search, but it did not return linkable source pages to verify the show dates. I won’t guess; you can open these searches or try again with a city or date.'
+            :'I couldn’t retrieve linkable sources for a live-show answer, so I won’t guess at dates. Please try again shortly.',
+          venues:[],
+          sources:searches,
+          aiMode:'fallback',
+          eventSearchStatus:'sources_unavailable',
+        });
+        return;
+      }
       res.status(200).json({
         text:text||'I found live search results but couldn’t verify an upcoming performance clearly enough to give you a date.',
         venues:[],
