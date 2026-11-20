@@ -18,8 +18,8 @@ import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-director
 import { createDiscoveryService } from './_discovery-lite.js';
 import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage, MAX_INDEXED_FEED_PAGE_SIZE } from './_london-index.js';
 import { buildIndexedFeedPage, buildIndexedIdCandidatePage } from './_indexed-feed-page.js';
-import { currentWeatherResponse } from './_current-weather.js';
-import { groundingQueryCount, groundingSources, groundedEventText, buildLiveShowSearchInstruction, buildOfficialArtistWebsiteFallbackInstruction, buildPriceSearchInstruction, buildPriceSourceFallbackInstruction, isFlightPriceQuestion, extractFlightRoute, extractPriceSearchArea, shouldSearchOfficialArtistSite, stripRawUrls } from './_panda-event-search.js';
+import { currentWeatherResponse, weatherFallbackSummary } from './_current-weather.js';
+import { groundingQueryCount, groundingSources, groundedEventText, buildLiveShowSearchInstruction, buildOfficialArtistWebsiteFallbackInstruction, buildPriceSearchInstruction, buildPriceSourceFallbackInstruction, isFlightPriceQuestion, extractFlightRoute, extractPriceSearchArea, extractArtistName, isVerifiedOfficialArtistSource, shouldSearchOfficialArtistSite, stripRawUrls } from './_panda-event-search.js';
 import { resolveEventSearchArea } from './_panda-event-location.js';
 import { parseRideRequest, pickRideDestination } from './_panda-ride-request.js';
 import { googleCategoryTags } from './_google-category-tags.js';
@@ -1034,7 +1034,7 @@ export default async function handler(req,res){
       }
       if(isWeatherQuestion(userText)){
         const summary=weather
-          ?`The latest MET Norway forecast${weatherArea?` for ${weatherArea}`:' for your local area'} shows ${weather.condition||'conditions available'}${Number.isFinite(Number(weather.temperatureC))?`, around ${weather.temperatureC}°C`:''}. It is a forecast, not a station observation. Weather data: MET Norway, CC BY 4.0.`
+          ?weatherFallbackSummary(weather,weatherArea,userText)
           :'I couldn’t retrieve a reliable forecast just now, so I won’t guess. Please try again shortly.';
         res.status(200).json({text:summary,venues:[],aiMode:'fallback',aiFallbackReason:reason,weatherStatus,weather});return;
       }
@@ -1175,17 +1175,27 @@ export default async function handler(req,res){
       let text=groundedEventText(candidate);
       let sources=groundingSources(candidate);
       let lookupStatus='verified_search';
-      const needsOfficialArtistSite=eventSearchQuestion
+      const initialSourceCount=sources.length;
+      const artistName=eventSearchQuestion?extractArtistName(userText):'';
+      const artistClarification=eventSearchQuestion&&/\b(?:which|who|do you mean|could you clarify|please clarify|full name)\b/i.test(text);
+      const needsOfficialArtistSite=eventSearchQuestion&&Boolean(artistName)&&!artistClarification
         &&(shouldSearchOfficialArtistSite(text)||!sources.length);
       let officialSiteAdded=false;
       if(needsOfficialArtistSite){
         const officialSiteReservation=await reserveEventGroundingBudget(db(),monthlyLimit,5);
         if(officialSiteReservation.allowed){
+          const officialSiteQuestion={
+            role:'user',
+            parts:[{
+              text:`Find the verified first-party official website or official tour page for ${JSON.stringify(artistName)}. Search specifically for “${artistName} official website”. Return no performance dates or prices.`,
+            }],
+          };
           const officialSiteBody={
             ...baseBody,
+            contents:[officialSiteQuestion],
             systemInstruction:{
               parts:[{
-                text:baseBody.systemInstruction.parts[0].text+'\n'+buildOfficialArtistWebsiteFallbackInstruction(eventTarget.area),
+                text:buildOfficialArtistWebsiteFallbackInstruction(eventTarget.area,artistName),
               }],
             },
           };
@@ -1202,20 +1212,23 @@ export default async function handler(req,res){
           await settleEventGroundingBudget(db(),officialSiteReservation,chargedSearches);
           recordCostEvent('event_grounding_query_count',{count:chargedSearches});
           const officialSiteSources=groundingSources(officialSiteCandidate);
-          const officialSiteSource=officialSiteSources[0];
+          const officialSiteSource=officialSiteSources.find(source=>isVerifiedOfficialArtistSource(source,artistName));
           if(officialSiteResponse.ok&&officialSiteSearches>0&&officialSiteSource){
             sources=[
               ...sources.filter(source=>source.url!==officialSiteSource.url).slice(0,5),
               officialSiteSource,
             ];
             officialSiteAdded=true;
-            if(!groundingSources(candidate).length)lookupStatus='official_site_fallback';
+            if(!initialSourceCount){
+              text=`I couldn’t confirm the performer’s latest or next show in ${eventTarget.area} from live event sources. The verified official artist page is linked below for current dates. 🎟️`;
+              lookupStatus='official_site_fallback';
+            }
           }
         }
         text=stripRawUrls(text);
         if(officialSiteAdded){
-          text=`${text} The verified official artist page is linked below.`.trim();
-        }else{
+          if(initialSourceCount)text=`${text} The verified official artist page is linked below.`.trim();
+        }else if(initialSourceCount){
           text=`${text} I couldn’t verify a clickable official artist page just now.`.trim();
         }
       }
@@ -1254,7 +1267,9 @@ export default async function handler(req,res){
       if(!sources.length){
         res.status(200).json({
           text:eventSearchQuestion
-            ?'I couldn’t verify the artist’s last or next performance, ticket prices, or an official website link just now, so I won’t guess. Please try again shortly or tell me the artist’s full name.'
+            ?artistClarification&&text
+              ?text
+              :'I couldn’t verify the artist’s last or next performance, ticket prices, or an official website link just now, so I won’t guess. Please try again shortly or tell me the artist’s full name.'
             :'I couldn’t verify a current price or a reliable price range just now, so I won’t guess. Try again with a city, route or date if you have one.',
           venues:[],
           sources:[],

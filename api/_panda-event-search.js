@@ -72,17 +72,52 @@ export function buildLiveShowSearchInstruction(area, source = 'device') {
   ].join('\n');
 }
 
-export function buildOfficialArtistWebsiteFallbackInstruction(area) {
+export function buildOfficialArtistWebsiteFallbackInstruction(area, artistName = '') {
+  const artist = String(artistName || 'the named performer').slice(0, 120);
   return [
-    `OFFICIAL ARTIST WEBSITE LOOKUP: Use Google Search grounding to find the performer’s first-party official website or official tour page. Search area context: ${String(area || 'the user’s local area').slice(0, 120)}.`,
-    'Use the artist named in the conversation. If the name is ambiguous, ask one short clarification instead of guessing.',
-    'Return only the verified official artist website or official tour page as a grounded source link. Do not write a URL in the reply text; the app displays grounded links as clickable source cards. Do not return Google search-result pages, fan pages, news articles, venues, or ticket resellers as substitutes.',
+    `OFFICIAL ARTIST WEBSITE LOOKUP: Use Google Search grounding to find the first-party official website or official tour page for ${artist}. Search the exact performer name plus “official website”; area context: ${String(area || 'the user’s local area').slice(0, 120)}.`,
+    'If the performer name is ambiguous, ask one short clarification instead of guessing.',
+    'Return only a grounded source whose page title clearly identifies the artist’s official site or whose domain matches the artist name. Do not write a URL in the reply text; the app displays grounded links as clickable source cards. Do not return search results, fan pages, news articles, venues, social networks, or ticket resellers as substitutes.',
     'Do not state performance dates, ticket prices, or availability during this fallback lookup. If no official page is verified, say so plainly and do not invent a URL.',
   ].join('\n');
 }
 
+export function extractArtistName(text) {
+  const value = String(text || '');
+  const match = value.match(/\b(?:when|where)\s+(?:is|are|did|will|does|has|have)\s+(.+?)\s+(?:last\s+)?(?:perform(?:ing)?|play(?:ing)?|appear(?:ing)?|take\s+the\s+stage|tour(?:ing)?|in\s+concert)\b/i);
+  if (!match) return '';
+  const artist = match[1]
+    .replace(/\b(?:the|next|last|soon|again|tonight|tomorrow)\b/gi, ' ')
+    .replace(/^[\s"'“”]+|[\s"'“”?.!,]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return /^(?:artist|performer|band|singer|musician)$/i.test(artist) ? '' : artist.slice(0, 120);
+}
+
+export function isVerifiedOfficialArtistSource(source, artistName = '') {
+  const title = String(source?.title || '').trim();
+  if (!title) return false;
+  if (/(?:ultimateclassicrock|concertful|ticketmaster|livenation|songkick|setlist\.fm|bandsintown|wikipedia|instagram|facebook|twitter|x\.com|tiktok|youtube|linktr\.ee)/i.test(title)) return false;
+  const artistTokens = String(artistName || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .split(/\s+/)
+    .filter(token => token.length >= 3 && !/^(?:the|and|band|artist|singer|musician)$/.test(token));
+  const normalizedTitle = title
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+  if (!artistTokens.length || !artistTokens.every(token => normalizedTitle.includes(token))) return false;
+  return /\bofficial\b/i.test(title)
+    || /^(?:www\.)?[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/i.test(title);
+}
+
 export function shouldSearchOfficialArtistSite(text) {
   const value = String(text || '');
+  if (/\b(?:which|who|do you mean|could you clarify|please clarify|full name)\b/i.test(value)) return false;
   return /https?:\/\/\S+/i.test(value)
     || /\b(?:no|none|not|without|hasn['’]?t|haven['’]?t)\b.{0,80}\b(?:confirmed|upcoming|announced|performances?|shows?|dates?|tour)\b/i.test(value)
     || /\bno\s+(?:concerts?|gigs?|events?)\b/i.test(value);
@@ -90,6 +125,7 @@ export function shouldSearchOfficialArtistSite(text) {
 
 export function stripRawUrls(text) {
   return String(text || '')
+    .replace(/\[([^\]]+)\]\(\s*(?:https?:\/\/[^)]*)?\s*\)/gi, '$1')
     .replace(/https?:\/\/[^\s<>()]+/gi, '')
     .replace(/:\s+(?=[\u{1F000}-\u{1FAFF}])/gu, ' ')
     .replace(/\s+([,.;!?])/g, '$1')
