@@ -237,6 +237,14 @@ export function weatherFallbackSummary(weather, area = '', userText = '') {
   return `${place}, the MET Norway model forecast for next week (${rangeLabel}) shows ${temperatureSummary}; ${conditionSummary}. ${precipitationSummary} This is a model forecast, not a station observation. ${attribution} ${emoji}`;
 }
 
+export function appendWeatherAttribution(text, weather) {
+  const reply = String(text || '').trim();
+  if (!weather) return reply;
+  const attribution = String(weather.attribution || ATTRIBUTION);
+  if (/MET Norway/i.test(reply) && /CC BY 4\.0/i.test(reply)) return reply;
+  return [reply, attribution].filter(Boolean).join('\n\n');
+}
+
 async function inspectCache(store, key, now) {
   const snapshot = await store.collection(CACHE_COLLECTION).doc(key).get();
   const value = snapshot?.exists ? snapshot.data() || {} : {};

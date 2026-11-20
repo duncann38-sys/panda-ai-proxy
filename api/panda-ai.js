@@ -18,7 +18,7 @@ import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-director
 import { createDiscoveryService } from './_discovery-lite.js';
 import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage, MAX_INDEXED_FEED_PAGE_SIZE } from './_london-index.js';
 import { buildIndexedFeedPage, buildIndexedIdCandidatePage } from './_indexed-feed-page.js';
-import { currentWeatherResponse, weatherFallbackSummary } from './_current-weather.js';
+import { currentWeatherResponse, weatherFallbackSummary, appendWeatherAttribution } from './_current-weather.js';
 import { groundingQueryCount, groundingSources, groundedEventText, buildLiveShowSearchInstruction, buildOfficialArtistWebsiteFallbackInstruction, buildPriceSearchInstruction, buildPriceSourceFallbackInstruction, isFlightPriceQuestion, extractFlightRoute, extractPriceSearchArea, extractArtistName, isVerifiedOfficialArtistSource, shouldSearchOfficialArtistSite, stripRawUrls } from './_panda-event-search.js';
 import { resolveEventSearchArea } from './_panda-event-location.js';
 import { parseRideRequest, pickRideDestination } from './_panda-ride-request.js';
@@ -1034,7 +1034,7 @@ export default async function handler(req,res){
       }
       if(isWeatherQuestion(userText)){
         const summary=weather
-          ?weatherFallbackSummary(weather,weatherArea,userText)
+          ?appendWeatherAttribution(weatherFallbackSummary(weather,weatherArea,userText),weather)
           :'I couldn’t retrieve a reliable forecast just now, so I won’t guess. Please try again shortly.';
         res.status(200).json({text:summary,venues:[],aiMode:'fallback',aiFallbackReason:reason,weatherStatus,weather});return;
       }
@@ -1330,6 +1330,7 @@ export default async function handler(req,res){
     if (requestedWindow.lateDinner && venues.length && !/\bkitchen\b/i.test(text)) {
       text += ' These are venue opening hours; kitchen service at that time still needs confirmation.';
     }
+    if(isWeatherQuestion(userText)&&weather)text=appendWeatherAttribution(text,weather);
     res.status(200).json({text,venues,richMetadata:true,aiMode:'vertex',weatherStatus,weather});
   }catch(err){
     try{
