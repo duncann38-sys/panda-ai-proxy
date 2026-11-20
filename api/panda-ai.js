@@ -19,7 +19,7 @@ import { createDiscoveryService } from './_discovery-lite.js';
 import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage, MAX_INDEXED_FEED_PAGE_SIZE } from './_london-index.js';
 import { buildIndexedFeedPage, buildIndexedIdCandidatePage } from './_indexed-feed-page.js';
 import { currentWeatherResponse } from './_current-weather.js';
-import { groundingQueryCount, groundingSources, groundedEventText, buildLiveShowSearchInstruction, buildOfficialArtistWebsiteFallbackInstruction, buildPriceSearchInstruction, isFlightPriceQuestion, extractFlightRoute, extractPriceSearchArea } from './_panda-event-search.js';
+import { groundingQueryCount, groundingSources, groundedEventText, buildLiveShowSearchInstruction, buildOfficialArtistWebsiteFallbackInstruction, buildPriceSearchInstruction, buildPriceSourceFallbackInstruction, isFlightPriceQuestion, extractFlightRoute, extractPriceSearchArea, shouldSearchOfficialArtistSite, stripRawUrls } from './_panda-event-search.js';
 import { resolveEventSearchArea } from './_panda-event-location.js';
 import { parseRideRequest, pickRideDestination } from './_panda-ride-request.js';
 import { googleCategoryTags } from './_google-category-tags.js';
@@ -1172,9 +1172,13 @@ export default async function handler(req,res){
         });
         return;
       }
-      const text=groundedEventText(candidate);
-      const sources=groundingSources(candidate);
-      if(!sources.length&&eventSearchQuestion){
+      let text=groundedEventText(candidate);
+      let sources=groundingSources(candidate);
+      let lookupStatus='verified_search';
+      const needsOfficialArtistSite=eventSearchQuestion
+        &&(shouldSearchOfficialArtistSite(text)||!sources.length);
+      let officialSiteAdded=false;
+      if(needsOfficialArtistSite){
         const officialSiteReservation=await reserveEventGroundingBudget(db(),monthlyLimit,5);
         if(officialSiteReservation.allowed){
           const officialSiteBody={
@@ -1198,18 +1202,55 @@ export default async function handler(req,res){
           await settleEventGroundingBudget(db(),officialSiteReservation,chargedSearches);
           recordCostEvent('event_grounding_query_count',{count:chargedSearches});
           const officialSiteSources=groundingSources(officialSiteCandidate);
-          if(officialSiteResponse.ok&&officialSiteSearches>0&&officialSiteSources.length){
-            res.status(200).json({
-              text:'I couldn’t verify the artist’s latest or next performance or ticket prices just now, so I won’t guess. I’ve searched specifically for the official artist website; use the link below to check confirmed dates and ticket information.',
-              venues:[],
-              sources:officialSiteSources,
-              aiMode:'grounded-events',
-              eventSearchStatus:'official_site_fallback',
-            });
-            return;
+          const officialSiteSource=officialSiteSources[0];
+          if(officialSiteResponse.ok&&officialSiteSearches>0&&officialSiteSource){
+            sources=[
+              ...sources.filter(source=>source.url!==officialSiteSource.url).slice(0,5),
+              officialSiteSource,
+            ];
+            officialSiteAdded=true;
+            if(!groundingSources(candidate).length)lookupStatus='official_site_fallback';
+          }
+        }
+        text=stripRawUrls(text);
+        if(officialSiteAdded){
+          text=`${text} The verified official artist page is linked below.`.trim();
+        }else{
+          text=`${text} I couldn’t verify a clickable official artist page just now.`.trim();
+        }
+      }
+      if(priceSearchQuestion&&!sources.length){
+        const priceRetryReservation=await reserveEventGroundingBudget(db(),monthlyLimit,5);
+        if(priceRetryReservation.allowed){
+          const priceRetryBody={
+            ...baseBody,
+            systemInstruction:{
+              parts:[{
+                text:baseBody.systemInstruction.parts[0].text+'\n'+buildPriceSourceFallbackInstruction(priceTarget.area,flightPriceQuestion),
+              }],
+            },
+          };
+          const priceRetryResponse=await gemini(
+            token,
+            projectId,
+            priceRetryBody,
+            {...cacheLocation,stage:'grounded-price-recheck'},
+            {modelLimit:1},
+          );
+          const priceRetryCandidate=priceRetryResponse.data?.candidates?.[0];
+          const priceRetrySearches=groundingQueryCount(priceRetryCandidate);
+          const chargedSearches=priceRetryResponse.ok?priceRetrySearches:5;
+          await settleEventGroundingBudget(db(),priceRetryReservation,chargedSearches);
+          recordCostEvent('event_grounding_query_count',{count:chargedSearches});
+          const retrySources=groundingSources(priceRetryCandidate);
+          if(priceRetryResponse.ok&&priceRetrySearches>0&&retrySources.length){
+            text=groundedEventText(priceRetryCandidate);
+            sources=retrySources;
+            lookupStatus='verified_price_recheck';
           }
         }
       }
+      text=stripRawUrls(text);
       if(!sources.length){
         res.status(200).json({
           text:eventSearchQuestion
@@ -1231,7 +1272,7 @@ export default async function handler(req,res){
         venues:[],
         sources,
         aiMode:eventSearchQuestion?'grounded-events':'grounded-prices',
-        [statusField]:'verified_search',
+        [statusField]:lookupStatus,
       });
       return;
     }

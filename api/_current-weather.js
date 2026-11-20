@@ -112,14 +112,21 @@ function normalizeForecast(data) {
   const current = forecastPoint(entries[0]);
   if (!current) return null;
   const start = Date.parse(current.time);
+  if (!Number.isFinite(start)) return null;
   const forecast = [];
   for (const entry of entries) {
     const point = forecastPoint(entry);
     if (!point) continue;
-    const hours = Math.floor((Date.parse(point.time) - start) / 3_600_000);
-    if (hours < 0 || (hours > 24 && hours % 6 !== 0)) continue;
+    const pointTime = Date.parse(point.time);
+    if (!Number.isFinite(pointTime)) continue;
+    const hours = Math.floor((pointTime - start) / 3_600_000);
+    if (hours < 0 || hours > 7 * 24) continue;
+    if (hours > 24 && forecast.length) {
+      const previousTime = Date.parse(forecast[forecast.length - 1].time);
+      if (Number.isFinite(previousTime) && pointTime - previousTime < 6 * 3_600_000) continue;
+    }
     forecast.push(point);
-    if (forecast.length >= 42) break;
+    if (forecast.length >= 56) break;
   }
   return {
     forecastUpdatedAt: data.properties.meta?.updated_at || null,

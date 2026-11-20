@@ -104,6 +104,34 @@ test('weather uses MET Norway with a contactable User-Agent, short coordinates a
   assert.deepEqual(usage, ['weather_provider_call']);
 });
 
+test('weather keeps a full seven-day horizon with six-hour samples after the first day', async () => {
+  const store = makeStore();
+  const start = Date.parse('2026-11-20T11:23:00Z');
+  const forecast = Array.from({ length: 240 }, (_, index) => ({
+    time: new Date(start + index * 60 * 60_000).toISOString(),
+    data: {
+      instant: { details: { air_temperature: 5 + (index % 8), wind_speed: 3 } },
+      next_1_hours: { summary: { symbol_code: 'partlycloudy_day' }, details: { precipitation_amount: 0.1 } },
+    },
+  }));
+  const result = await currentWeatherResponse({
+    location: { lat: 59.9139, lng: 10.7522 },
+    store,
+    now: start,
+    fetchImpl: async () => ({
+      ok: true,
+      headers: { get: () => null },
+      async json() { return { properties: { timeseries: forecast } }; },
+    }),
+  });
+
+  assert.equal(result.status, 200);
+  const points = result.body.weather.forecast;
+  const horizonHours = (Date.parse(points.at(-1).time) - Date.parse(points[0].time)) / 3_600_000;
+  assert.equal(horizonHours, 168);
+  assert.ok(points.length >= 48 && points.length <= 50);
+});
+
 test('weather cache is reused before spending the shared daily allowance', async () => {
   const store = makeStore();
   const cacheLocation = { lat: -33.8688, lng: 151.2093 };

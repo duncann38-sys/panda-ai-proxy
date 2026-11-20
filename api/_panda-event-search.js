@@ -76,9 +76,26 @@ export function buildOfficialArtistWebsiteFallbackInstruction(area) {
   return [
     `OFFICIAL ARTIST WEBSITE LOOKUP: Use Google Search grounding to find the performer’s first-party official website or official tour page. Search area context: ${String(area || 'the user’s local area').slice(0, 120)}.`,
     'Use the artist named in the conversation. If the name is ambiguous, ask one short clarification instead of guessing.',
-    'Return only the verified official artist website or official tour page as a clickable source link. Do not return Google search-result pages, fan pages, news articles, venues, or ticket resellers as substitutes.',
+    'Return only the verified official artist website or official tour page as a grounded source link. Do not write a URL in the reply text; the app displays grounded links as clickable source cards. Do not return Google search-result pages, fan pages, news articles, venues, or ticket resellers as substitutes.',
     'Do not state performance dates, ticket prices, or availability during this fallback lookup. If no official page is verified, say so plainly and do not invent a URL.',
   ].join('\n');
+}
+
+export function shouldSearchOfficialArtistSite(text) {
+  const value = String(text || '');
+  return /https?:\/\/\S+/i.test(value)
+    || /\b(?:no|none|not|without|hasn['’]?t|haven['’]?t)\b.{0,80}\b(?:confirmed|upcoming|announced|performances?|shows?|dates?|tour)\b/i.test(value)
+    || /\bno\s+(?:concerts?|gigs?|events?)\b/i.test(value);
+}
+
+export function stripRawUrls(text) {
+  return String(text || '')
+    .replace(/https?:\/\/[^\s<>()]+/gi, '')
+    .replace(/:\s+(?=[\u{1F000}-\u{1FAFF}])/gu, ' ')
+    .replace(/\s+([,.;!?])/g, '$1')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\b(?:at|via|here|the link is)\s*$/i, '')
+    .trim();
 }
 
 export function isFlightPriceQuestion(text) {
@@ -124,6 +141,18 @@ export function buildPriceSearchInstruction(area, source = 'device', travel = fa
     'Never invent prices, menus, fares, stock, ticket availability or fees. If reliable price sources are missing, say the price could not be verified instead of guessing.',
     'Prefer official menus, retailers, airlines, airports and authorized ticket sellers. The app renders up to six clickable source links; do not type raw URLs or generic Google search links into the answer.',
     'Use one or two relevant emojis naturally (for example 🍾, 🍽️ or ✈️) when they make the answer warmer; keep the figures and assumptions clear.',
+  ].join('\n');
+}
+
+export function buildPriceSourceFallbackInstruction(area, travel = false) {
+  return [
+    `TARGETED PRICE SOURCE RECHECK: Run one focused Google Search grounded recheck for the exact product, meal or route in the user’s latest question. Market/route: ${String(area || 'the user’s local area').slice(0, 120)}.`,
+    travel
+      ? 'Search current airline or reputable fare-comparison pages for the exact route. State the date assumptions and one-way/return basis only when verified.'
+      : 'For a named brand without a product variant, use a clearly stated standard/popular variant as an assumption; for dining, use the named restaurant’s current menu. Prefer retailer or restaurant pages that show a live price.',
+    'Give an exact price only when a current page supports it. Give a range only when multiple current source prices support the range. State currency, product size, date checked and material exclusions such as fees, service, tax or delivery when known.',
+    'The app displays Google-grounded source pages as clickable cards. Do not write raw URLs or Google search links in the reply. If no citable price page is found, say that the price could not be verified and do not guess.',
+    'Use one or two relevant emojis naturally only if they fit the answer.',
   ].join('\n');
 }
 
