@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { currentWeatherResponse, weatherFallbackSummary } from '../api/_current-weather.js';
+import { currentWeatherResponse, weatherFallbackSummary, appendWeatherAttribution } from '../api/_current-weather.js';
 
 function makeStore(initialRequests = 0) {
   let requests = initialRequests;
@@ -169,6 +169,18 @@ test('weather fallback refuses a full-week claim when forecast coverage stops ea
 
   assert.match(text, /does not cover the full next-week window/);
   assert.doesNotMatch(text, /model forecast for next week \(Mon 23 Nov/);
+});
+
+test('MET Norway attribution is included once in successful weather replies', () => {
+  const weather = { attribution: 'Weather data from MET Norway, licensed under CC BY 4.0.' };
+  assert.equal(
+    appendWeatherAttribution('In Malmö, the forecast looks clear.', weather),
+    'In Malmö, the forecast looks clear.\n\nWeather data from MET Norway, licensed under CC BY 4.0.',
+  );
+  assert.equal(
+    appendWeatherAttribution('Weather data from MET Norway, licensed under CC BY 4.0.', weather),
+    'Weather data from MET Norway, licensed under CC BY 4.0.',
+  );
 });
 
 test('weather cache is reused before spending the shared daily allowance', async () => {
