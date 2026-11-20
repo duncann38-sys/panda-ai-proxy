@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { currentWeatherResponse } from '../api/_current-weather.js';
+import { currentWeatherResponse, weatherFallbackSummary } from '../api/_current-weather.js';
 
 function makeStore(initialRequests = 0) {
   let requests = initialRequests;
@@ -104,10 +104,10 @@ test('weather uses MET Norway with a contactable User-Agent, short coordinates a
   assert.deepEqual(usage, ['weather_provider_call']);
 });
 
-test('weather keeps a full seven-day horizon with six-hour samples after the first day', async () => {
+test('weather keeps a full ten-day MET Norway horizon with six-hour samples after the first day', async () => {
   const store = makeStore();
   const start = Date.parse('2026-11-20T11:23:00Z');
-  const forecast = Array.from({ length: 240 }, (_, index) => ({
+  const forecast = Array.from({ length: 360 }, (_, index) => ({
     time: new Date(start + index * 60 * 60_000).toISOString(),
     data: {
       instant: { details: { air_temperature: 5 + (index % 8), wind_speed: 3 } },
@@ -128,8 +128,47 @@ test('weather keeps a full seven-day horizon with six-hour samples after the fir
   assert.equal(result.status, 200);
   const points = result.body.weather.forecast;
   const horizonHours = (Date.parse(points.at(-1).time) - Date.parse(points[0].time)) / 3_600_000;
-  assert.equal(horizonHours, 168);
-  assert.ok(points.length >= 48 && points.length <= 50);
+  assert.equal(horizonHours, 240);
+  assert.ok(points.length >= 60 && points.length <= 62);
+});
+
+test('weather fallback summarizes the next calendar week when source coverage reaches it', () => {
+  const start = Date.parse('2026-11-20T19:00:00Z');
+  const forecast = Array.from({ length: 41 }, (_, index) => ({
+    time: new Date(start + index * 6 * 60 * 60_000).toISOString(),
+    temperatureC: index % 2 === 0 ? -2 : 5,
+    condition: index % 2 === 0 ? 'Clear sky' : 'Partly cloudy',
+    precipitationMm: index % 3 === 0 ? 0.4 : 0,
+  }));
+  const text = weatherFallbackSummary({
+    condition: 'Clear sky',
+    temperatureC: 1,
+    forecast,
+  }, 'Oslo', 'How is the weather in Oslo next week?');
+
+  assert.match(text, /In Oslo.*next week \(Mon 23 Nov–Sun 29 Nov \(UTC\)\)/);
+  assert.match(text, /-2°C to 5°C/);
+  assert.match(text, /Rain is indicated in some forecast periods/);
+  assert.match(text, /not a station observation/);
+  assert.match(text, /🌧️|🌤️|❄️|🌦️/);
+});
+
+test('weather fallback refuses a full-week claim when forecast coverage stops early', () => {
+  const start = Date.parse('2026-11-20T19:00:00Z');
+  const forecast = Array.from({ length: 9 }, (_, index) => ({
+    time: new Date(start + index * 6 * 60 * 60_000).toISOString(),
+    temperatureC: 1,
+    condition: 'Clear sky',
+    precipitationMm: 0,
+  }));
+  const text = weatherFallbackSummary({
+    condition: 'Clear sky',
+    temperatureC: 1,
+    forecast,
+  }, 'Oslo', 'How is the weather in Oslo next week?');
+
+  assert.match(text, /does not cover the full next-week window/);
+  assert.doesNotMatch(text, /model forecast for next week \(Mon 23 Nov/);
 });
 
 test('weather cache is reused before spending the shared daily allowance', async () => {

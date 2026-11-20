@@ -120,13 +120,13 @@ function normalizeForecast(data) {
     const pointTime = Date.parse(point.time);
     if (!Number.isFinite(pointTime)) continue;
     const hours = Math.floor((pointTime - start) / 3_600_000);
-    if (hours < 0 || hours > 7 * 24) continue;
+    if (hours < 0 || hours > 10 * 24) continue;
     if (hours > 24 && forecast.length) {
       const previousTime = Date.parse(forecast[forecast.length - 1].time);
       if (Number.isFinite(previousTime) && pointTime - previousTime < 6 * 3_600_000) continue;
     }
     forecast.push(point);
-    if (forecast.length >= 56) break;
+    if (forecast.length >= 64) break;
   }
   return {
     forecastUpdatedAt: data.properties.meta?.updated_at || null,
@@ -140,6 +140,101 @@ function normalizeForecast(data) {
     attribution: ATTRIBUTION,
     attributionUrl: ATTRIBUTION_URL,
   };
+}
+
+function utcDateLabel(timestamp) {
+  const date = new Date(timestamp);
+  return Number.isFinite(date.getTime())
+    ? date.toLocaleDateString('en-GB', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short' })
+    : '';
+}
+
+function utcDateTimeLabel(timestamp) {
+  const date = new Date(timestamp);
+  if (!Number.isFinite(date.getTime())) return 'an unknown time';
+  return `${utcDateLabel(timestamp)} at ${date.toLocaleTimeString('en-GB', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit' })} UTC`;
+}
+
+export function weatherFallbackSummary(weather, area = '', userText = '') {
+  const place = area ? `In ${area}` : 'In your local area';
+  const currentCondition = weather?.condition || 'conditions are available';
+  const currentTemperature = Number.isFinite(Number(weather?.temperatureC))
+    ? `, around ${Math.round(Number(weather.temperatureC))}°C`
+    : '';
+  const attribution = 'Weather data from MET Norway, licensed under CC BY 4.0.';
+  const asksNextWeek = /\b(?:next\s+(?:week|7 days|seven days)|week ahead|coming week)\b/i.test(String(userText || ''));
+  if (!asksNextWeek) {
+    return `The latest MET Norway forecast${area ? ` for ${area}` : ' for your local area'} shows ${currentCondition}${currentTemperature}. It is a forecast, not a station observation. ${attribution}`;
+  }
+
+  const points = Array.isArray(weather?.forecast)
+    ? weather.forecast.filter(point => Number.isFinite(Date.parse(point?.time)))
+    : [];
+  if (!points.length) {
+    return `${place}, I couldn’t retrieve forecast details for next week, so I won’t guess. ${attribution}`;
+  }
+
+  const firstTime = Date.parse(points[0].time);
+  const lastTime = Date.parse(points.at(-1).time);
+  const rollingSevenDays = /\bnext\s+(?:7 days|seven days)\b/i.test(String(userText || ''));
+  let periodStart;
+  if (rollingSevenDays) {
+    periodStart = firstTime;
+  } else {
+    const firstDate = new Date(firstTime);
+    const day = firstDate.getUTCDay();
+    const daysUntilMonday = (8 - day) % 7 || 7;
+    periodStart = Date.UTC(
+      firstDate.getUTCFullYear(),
+      firstDate.getUTCMonth(),
+      firstDate.getUTCDate() + daysUntilMonday,
+    );
+  }
+  const periodEnd = periodStart + 7 * 24 * 3_600_000;
+  const periodPoints = points.filter(point => {
+    const time = Date.parse(point.time);
+    return time >= periodStart && time < periodEnd;
+  });
+  const rangeLabel = `${utcDateLabel(periodStart)}–${utcDateLabel(periodEnd - 24 * 3_600_000)} (UTC)`;
+  if (!periodPoints.length || lastTime < periodEnd - 6 * 3_600_000) {
+    return `${place}, MET Norway’s available forecast currently runs through ${utcDateTimeLabel(lastTime)}, which does not cover the full next-week window (${rangeLabel}). The current reading is ${currentCondition}${currentTemperature}; I won’t guess beyond the published forecast. ${attribution}`;
+  }
+
+  const temperatures = periodPoints
+    .map(point => point.temperatureC == null ? NaN : Number(point.temperatureC))
+    .filter(Number.isFinite);
+  const conditionCounts = new Map();
+  for (const point of periodPoints) {
+    if (point.condition) conditionCounts.set(point.condition, (conditionCounts.get(point.condition) || 0) + 1);
+  }
+  const commonConditions = [...conditionCounts.entries()]
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 2)
+    .map(([condition]) => condition.toLowerCase());
+  const measuredPrecipitation = periodPoints
+    .map(point => point.precipitationMm == null ? NaN : Number(point.precipitationMm))
+    .filter(Number.isFinite);
+  const wetPeriods = measuredPrecipitation.filter(amount => amount > 0).length;
+  const precipitationSummary = measuredPrecipitation.length === 0
+    ? 'Precipitation detail is unavailable.'
+    : wetPeriods
+      ? 'Rain is indicated in some forecast periods.'
+      : 'No precipitation is shown in the available forecast periods.';
+  const temperatureSummary = temperatures.length
+    ? `temperatures range from about ${Math.round(Math.min(...temperatures))}°C to ${Math.round(Math.max(...temperatures))}°C`
+    : 'temperature details are unavailable';
+  const conditionSummary = commonConditions.length
+    ? `conditions are most often ${commonConditions.join(' and ')}`
+    : 'condition details are unavailable';
+  const conditionText = commonConditions.join(' ').toLowerCase();
+  const emoji = /snow|sleet|ice/.test(conditionText)
+    ? '❄️'
+    : wetPeriods || /rain|shower|thunder/.test(conditionText)
+      ? '🌧️'
+      : /clear|fair|partly/.test(conditionText)
+        ? '🌤️'
+        : '🌦️';
+  return `${place}, the MET Norway model forecast for next week (${rangeLabel}) shows ${temperatureSummary}; ${conditionSummary}. ${precipitationSummary} This is a model forecast, not a station observation. ${attribution} ${emoji}`;
 }
 
 async function inspectCache(store, key, now) {
