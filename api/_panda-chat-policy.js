@@ -125,10 +125,19 @@ export function extractWeatherArea(text) {
 export function isEventSearchQuestion(text) {
   const clean = String(text || '').trim();
   if (/\b(?:train|tube|bus|flight|ferry)\s+tickets?\b/i.test(clean)) return false;
+  const ticketPrice = /\b(?:how much|price|pricing|costs?|ticket prices?)\b/i.test(clean)
+    && /\b(?:tickets?|concerts?|gigs?|tour|perform(?:s|ing|ance(?:s)?)|live music|live shows?|shows?)\b/i.test(clean);
+  if (ticketPrice) return true;
   if (/\btickets?\s+(?:for|to see)\b/i.test(clean)) return true;
   const performance = /\b(?:concerts?|gigs?|tour|perform(?:s|ing|ance(?:s)?)|live music|live shows?|shows?|artists?|singers?|bands?)\b/i.test(clean);
   const lookup = /\b(?:when|where|next|upcoming|coming up|dates?|tickets?|find|search|list|any|what(?:'s| is) on|what shows?|what concerts?|what gigs?)\b/i.test(clean);
   return performance && lookup;
+}
+
+export function isPriceLookupQuestion(text) {
+  const clean = String(text || '').trim();
+  if (/\b(?:how much time|how much longer|how far|how many|calories|body weight|age|love|care|miss|enjoy)\b/i.test(clean)) return false;
+  return /\b(?:how much(?:\s+(?:is|are|for|does|do|would|will|to))?|how expensive|price(?:s)?|cost(?:s)?|fare(?:s)?|average (?:price|cost|fare))\b/i.test(clean);
 }
 
 export function isDirectVenueRequest(text) {
@@ -250,7 +259,7 @@ export function buildChatInstruction(contents, context = {}, weather = null, exp
     'Read the full recent exchange. Build on your own last question and details already given; keep the current subject, mood, time of day and named people straight. If you have just offered coffee or breakfast and the user says good morning, continue that morning exchange instead of restarting an evening sales pitch. Use a name only if supplied in this chat, naturally and sparingly.',
     'Wit should feel spontaneous: gentle understatement, a playful observation, or a little self-deprecation when it fits. No forced jokes, repetitive catchphrases, panda/paw puns, “bestie”, “legend”, fake familiarity, flirting or jokes at the user’s expense. Never imply you are a human, have personal memories outside this chat, or have visited a venue.',
     'If asked to be warmer, nicer or funnier, demonstrate the change immediately. No stock “Fair point, my apologies”, defensive explanations, or speech about your new tone. Respond to feelings kindly before offering a practical next step; do not trivialise distress or pressure someone into going out.',
-    'Usually one to three natural sentences, but allow a real back-and-forth and a fuller answer when useful. Ask at most one easy follow-up only when it genuinely helps. Do not repeat greetings or details. Avoid corporate fluff, Markdown and written venue lists. Use emojis sparingly and naturally when they add warmth, emotion, laughter or celebration; a flower or celebratory emoji can fit a birthday. Usually use no more than one or two, and never force them into serious safety or complaint replies.',
+    'Usually one to three natural sentences, but allow a real back-and-forth and a fuller answer when useful. Ask at most one easy follow-up only when it genuinely helps. Do not repeat greetings or details. Avoid corporate fluff, Markdown and written venue lists. Use one or two relevant emojis naturally in many casual replies—especially food, drinks, weather, entertainment, humour and celebrations; a flower can fit a birthday. Do not add emoji chains, obscure prices or facts with decoration, or use them in serious safety or complaint replies.',
     'If the user mentions a birthday or special occasion, respond with genuine warmth and help make it feel thoughtful. Never assume an age, date or relationship detail they have not supplied.',
     'Immediately use a serious, clear professional tone for allergies, dietary requirements, accessibility, bookings, payments, complaints and other safety/customer-service issues.',
     'Nightclub means DJs, dancing and late-night entertainment. Club can also mean a private members’, sports or social club: use conversation context, and clarify if genuinely ambiguous.',
@@ -321,9 +330,9 @@ export async function consumeWeatherBudget(store, limit = 1000, now = new Date()
   } catch { return false; }
 }
 
-export async function reserveEventGroundingBudget(store, limit = 1000, reserve = 10, now = new Date()) {
+export async function reserveEventGroundingBudget(store, limit = 10000, reserve = 10, now = new Date()) {
   if (!store) return { allowed: false, reason: 'unavailable' };
-  const cap = Math.max(1, Math.min(1000, Number.parseInt(String(limit), 10) || 1000));
+  const cap = Math.max(1, Math.min(10000, Number.parseInt(String(limit), 10) || 10000));
   const reservation = Math.max(1, Math.min(50, Number.parseInt(String(reserve), 10) || 10));
   const month = now.toISOString().slice(0, 7);
   try {
@@ -351,7 +360,7 @@ export async function reserveEventGroundingBudget(store, limit = 1000, reserve =
 
 export async function settleEventGroundingBudget(store, reservation, actualQueries = 0, now = new Date()) {
   if (!store || !reservation?.allowed || !reservation.month) return false;
-  const actual = Math.max(0, Math.min(1000, Number.parseInt(String(actualQueries), 10) || 0));
+  const actual = Math.max(0, Math.min(10000, Number.parseInt(String(actualQueries), 10) || 0));
   try {
     await store.runTransaction(async transaction => {
       const ref = store.collection('panda_event_search_usage_v1').doc(reservation.month);
