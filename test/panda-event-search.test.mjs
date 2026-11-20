@@ -10,6 +10,7 @@ import {
 import {
   groundingQueryCount,
   groundingSources,
+  groundingSearchLinks,
   extractEventArea,
 } from '../api/_panda-event-search.js';
 import { clearEventAreaCacheForTests, resolveEventSearchArea } from '../api/_panda-event-location.js';
@@ -169,6 +170,20 @@ test('grounding source links accept unique HTTPS pages and exclude search-result
   assert.deepEqual(groundingSources(candidate).map(source => source.title), [
     'Usher Tickets', 'Venue event', 'Artist tour', 'Promoter listing', 'Local venue listing', 'Ticket listing',
   ]);
+});
+
+test('search queries without source pages are not treated as a verified answer', () => {
+  const candidate = {
+    groundingMetadata: {
+      webSearchQueries: ['Rolling Stones official tour dates', 'Rolling Stones official tour dates'],
+    },
+  };
+  assert.equal(groundingSources(candidate).length, 0);
+  assert.deepEqual(groundingSearchLinks(candidate), [{
+    title: 'Google search: Rolling Stones official tour dates',
+    url: 'https://www.google.com/search?q=Rolling%20Stones%20official%20tour%20dates',
+    domain: 'google.com',
+  }]);
 });
 
 test('Panda prompt supports natural warmth, hospitality, emojis, birthdays and weather attribution', () => {

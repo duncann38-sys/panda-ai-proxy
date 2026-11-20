@@ -56,6 +56,27 @@ export function groundingSources(candidate) {
   return sources;
 }
 
+export function groundingSearchLinks(candidate) {
+  const queries = candidate?.groundingMetadata?.webSearchQueries;
+  if (!Array.isArray(queries)) return [];
+  const seen = new Set();
+  const links = [];
+  for (const value of queries) {
+    if (typeof value !== 'string') continue;
+    const query = value.replace(/\s+/g, ' ').trim().slice(0, 180);
+    const key = query.toLowerCase();
+    if (!query || seen.has(key)) continue;
+    seen.add(key);
+    links.push({
+      title: `Google search: ${query}`,
+      url: `https://www.google.com/search?q=${encodeURIComponent(query)}`,
+      domain: 'google.com',
+    });
+    if (links.length >= MAX_GROUNDING_SOURCES) break;
+  }
+  return links;
+}
+
 export function groundedEventText(candidate) {
   return (candidate?.content?.parts || [])
     .map(part => typeof part?.text === 'string' ? part.text : '')
