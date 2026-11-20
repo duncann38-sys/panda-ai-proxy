@@ -13,7 +13,7 @@ import { createSandboxHttpHandler, isSandboxReservationRequest } from './_panda-
 import { applyGuard } from './_guard.js';
 import { answerOutingRequest } from './_panda-outing-intent.js';
 import { officialProgrammes } from './_panda-programmes.js';
-import { quickChatReply, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues, isSessionVenueTransitFollowUp } from './_panda-chat-policy.js';
+import { quickChatReply, shouldUseConversationalModel, wantsOpenNow, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues, isSessionVenueTransitFollowUp } from './_panda-chat-policy.js';
 import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-directory.js';
 import { createDiscoveryService } from './_discovery-lite.js';
 import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage, MAX_INDEXED_FEED_PAGE_SIZE } from './_london-index.js';
@@ -628,7 +628,7 @@ function isGreeting(t){return GREET_RE.test((t||'').trim());}
 const SMALL_TALK_RE=/^(?:thanks|thank you|cheers|nice one|how are you|who are you|what can you do|help)[!.?\s]*$/i;
 function wantsPlaces(t){
   const value=String(t||'').trim();
-  return PLACE_RE.test(value) || (value.length>=3 && !isGreeting(value) && !SMALL_TALK_RE.test(value));
+  return isDirectVenueRequest(value) || /\b(?:find|look for|show me|recommend|near(?:by)?|around here)\b/i.test(value);
 }
 function fallbackQuery(text){
   const raw=String(text||'').trim();
@@ -856,19 +856,21 @@ export default async function handler(req,res){
     if (turn.more && !turn.continuation) return res.status(200).json({venues:[],aiMode:'clarification',
       text:'Of course—which area and kind of place shall I find more of?'});
     const requestedWindow = conciergeTimeWindow(turn.searchText,body.chatContext);
+    const onlyOpenNow = wantsOpenNow(userText);
     const searchForTurn = async (query,latitude,longitude,area,openNow,fast=false) => {
       const scheduled = /\b(?:tomorrow|tonight|at \d|after \d|before \d)\b/i.test(turn.searchText);
       return searchChatVenues(shortcut?.query||query,latitude,longitude,shortcut?'':area,
-        shortcut?shortcut.openNow:scheduled?false:openNow,
+        onlyOpenNow|| (shortcut?shortcut.openNow:scheduled?false:openNow),
         turn.more||requestedWindow.lateDinner?false:fast,turn.excludedPlaceIds,
         venue=>filterSessionVenues([venue],contents).length>0
+          &&(!onlyOpenNow || venue.openNow === true)
           && matchesQuickVenueShortcut(venue,shortcut)
           &&(!requestedWindow.lateDinner||venueOpenAtRequestedTime(venue,requestedWindow)),
         shortcut?compareQuickVenueRatings:undefined);
     };
     const sessionVenueTransitFollowUp=isSessionVenueTransitFollowUp(userText,body.sessionVenueContext);
     const quick=quickChatReply(userText,body.chatContext,contents);
-    if(quick){res.status(200).json({text:quick,venues:[],aiMode:'quick'});return;}
+    if(quick&&!shouldUseConversationalModel(userText,contents)){res.status(200).json({text:quick,venues:[],aiMode:'quick'});return;}
     if(!sessionVenueTransitFollowUp){
       const outing=await answerOutingRequest({
         text:userText,contents,area:extractArea(userText),context:body.chatContext,
@@ -918,14 +920,14 @@ export default async function handler(req,res){
         res.status(200).json({text:weather?`Current conditions: ${weather.condition}, ${weather.temperatureC}°C (Google Weather). ${/rain|storm|snow/i.test(weather.condition||'')?'An indoor spot looks the better option.':'Tell me if you fancy an indoor or outdoor spot.'}`:'Live weather is unavailable right now, so I won’t guess. Tell me if you’d prefer an indoor or outdoor spot.',venues:[],aiMode:'fallback',aiFallbackReason:reason,weatherStatus,weather});return;
       }
       if(!maySearchVenues(userText)||isGreeting(userText) || !wantsPlaces(userText)){
-        res.status(200).json({text:'The conversational AI is temporarily unavailable. I can still help with verified venue searches and directions.',venues:[],aiMode:'fallback',aiFallbackReason:reason});
+        res.status(200).json({text:quick || 'I’m having trouble connecting just now. We can try again in a moment; your conversation is still here.',venues:[],aiMode:'fallback',aiFallbackReason:reason});
         return;
       }
       const wantOpen=/\bopen\b/i.test(userText);
       const q=fallbackQuery(userText),area=extractArea(userText);
       let found=await searchForTurn(q,lat,lng,area,wantOpen);
       found=filterSessionVenues(limitChatVenues(found,userText,q),contents);
-      res.status(200).json({text:safeDegradedText(userText,found),venues:found,richMetadata:true,aiMode:'fallback',aiFallbackReason:reason});
+      res.status(200).json({text:onlyOpenNow&&!found.length?'I couldn’t confirm anywhere matching that nearby is open right now. Shall we try another area?':safeDegradedText(userText,found),venues:found,richMetadata:true,aiMode:'fallback',aiFallbackReason:reason});
     }
     const clientBudget=await consumeClientDailyBudget(
       db(),
@@ -1017,6 +1019,9 @@ export default async function handler(req,res){
     if(!text) text=venues.length?"Here's what I dug up near you \uD83D\uDC3C":pick(NORESULT_LINES);
     venues=limitChatVenues(venues,userText,userText);
     text=venueCardReply(text,venues,turn.searchText || userText);
+    if (onlyOpenNow && maySearchVenues(userText) && !venues.length) {
+      text = 'I couldn’t confirm anywhere matching that nearby is open right now. Shall we try another area?';
+    }
     if (requestedWindow.lateDinner && venues.length && !/\bkitchen\b/i.test(text)) {
       text += ' These are venue opening hours; kitchen service at that time still needs confirmation.';
     }
@@ -1035,7 +1040,9 @@ export default async function handler(req,res){
       if(isWeatherQuestion(ut)){res.status(200).json({text:'Live weather is unavailable right now, so I won’t guess.',venues:[],aiMode:'fallback',aiFallbackReason:'backend_error'});return;}
       if(maySearchVenues(ut)&&isPubCrawlRequest(ut)){res.status(200).json(await buildCustomPubCrawl(ut,lat,lng));return;}
       if(!maySearchVenues(ut)||isGreeting(ut)||!wantsPlaces(ut)){res.status(200).json({text:quickChatReply(ut,b.chatContext,b.contents)||'The conversational AI is temporarily unavailable. I can still help with verified venue searches and directions.',venues:[],aiMode:'fallback',aiFallbackReason:'backend_error'});return;}
-      const found=limitChatVenues((await searchVenuesSmart(fallbackQuery(ut),lat,lng,extractArea(ut))).venues,ut,ut);
+      const openOnly=wantsOpenNow(ut);
+      const candidates=(await searchVenuesSmart(fallbackQuery(ut),lat,lng,extractArea(ut),openOnly)).venues || [];
+      const found=limitChatVenues(openOnly?candidates.filter(venue=>venue.openNow===true):candidates,ut,ut);
       res.status(200).json({text:safeDegradedText(ut,found),venues:found,richMetadata:true,aiMode:'fallback',aiFallbackReason:'backend_error'});
     }
     catch(e){res.status(200).json({text:"I glitched for a second \u2014 give that another go.",venues:[]});}

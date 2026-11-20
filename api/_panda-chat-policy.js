@@ -16,7 +16,38 @@ const VAGUE_ENTHUSIASM = /^(full\s*send|send it)$/;
 const ACKNOWLEDGEMENT = /^(ok|okay|cool|nice|lol|haha)$/;
 const cleanReply = text => String(text || '').trim().replace(/[!.?]+$/g, '').toLowerCase();
 
-export function quickChatReply(text, context = {}, contents = []) {
+// Pure social turns must not fall into a paid Places lookup. The live model
+// handles these conversationally; quick replies remain a low-cost outage path.
+const SOCIAL_TURN = /^(?:(?:hi+|hey+|hello+|hiya|yo|good morning|morning|good afternoon|good evening)(?: panda)?|(?:thanks|thank you|cheers|ta|nice one)(?: panda)?|how(?: are you|['’]s it going)|how was your day|(?:i['’]m|i am|feeling) (?:a (?:little|bit) )?(?:bored|sad|lonely|tired|stressed|happy|excited)|(?:please )?(?:be|sound)(?: a (?:little|bit)| much| more)? (?:nicer|warmer|friendlier|funny|funnier|witty|wittier)|(?:can|could) you (?:be|sound)(?: a (?:little|bit)| more)? (?:nice|nicer|warm|warmer|friendly|friendlier|funny|funnier|witty|wittier)|you(?: sound| are|['’]re)(?: a bit| so| too)? (?:robotic|cold|formal|boring)|(?:tell me|have you got) (?:a joke|something funny)|(?:can we|let['’]s) (?:just )?(?:chat|talk)|that(?: was|['’]s) (?:funny|lovely|nice)|(?:ha){2,}|lol)[?!. ]*$/i;
+
+const isSocialTurn = text => SOCIAL_TURN.test(text)
+  || /^(?:make me smile|brighten my day|can we talk something through)[?!. ]*$/i.test(text);
+
+export function shouldUseConversationalModel(text, contents = []) {
+  const clean = cleanReply(text);
+  if (REJECTION.test(clean) || VAGUE_ENTHUSIASM.test(clean)) return false;
+  const previous = (Array.isArray(contents) ? contents : []).filter(x => x?.role === 'model' || x?.role === 'assistant').at(-1);
+  const previousText = (previous?.parts || []).map(p => p?.text || '').join(' ');
+  if (ACKNOWLEDGEMENT.test(clean) && /\b(allerg\w*|dietary|bookings?|reservations?|payments?|refunds?|confirm)\b/i.test(previousText)) return false;
+  return isSocialTurn(clean) || ACKNOWLEDGEMENT.test(clean);
+}
+
+export function isGeneralLifeConversation(text) {
+  if (/\b(?:find|show me|recommend|look for)\b.*\b(?:restaurants?|caf[eé]s?|coffee|pubs?|bars?|venues?|museums?|shops?)\b/i.test(text)) return false;
+  return isSocialTurn(cleanReply(text))
+    || /\b(?:how (?:can|should|could) i|help me (?:think|decide|organise|organize|plan my day)|(?:travel|holiday|weekend) ideas|(?:i['’]ve|i have) had (?:a|such a) (?:rough|bad|long|good|great) day|(?:i['’]m|i am|feeling) (?:a bit |really |so )?(?:bored|sad|lonely|tired|stressed|happy|excited)|what do you think|tell me (?:a joke|something funny|about)|can we (?:just )?(?:chat|talk))\b/i.test(text);
+}
+
+export function wantsOpenNow(text) {
+  const clean = cleanReply(text).replace(/[’]/g, "'");
+  const explicitNow = /\b(?:open (?:right )?now|right now|currently open|at the moment|at this time)\b/i.test(clean);
+  if (explicitNow) return true;
+  if (/\b(?:tomorrow|tonight|next (?:week|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|\d{4}-\d{2}-\d{2})\b|\bat \d/i.test(clean)) return false;
+  if (/\b(?:what time|when|how late|opening hours|closing time|opens|closes)\b/i.test(clean)) return false;
+  return /\bopen\b/i.test(clean);
+}
+
+export function quickChatReply(text, context = {}, contents = [], now = new Date()) {
   const clean = cleanReply(text);
   const previous = (Array.isArray(contents) ? contents : []).filter(x => x?.role === 'model' || x?.role === 'assistant').at(-1);
   const previousText = (Array.isArray(previous?.parts) ? previous.parts : [])
@@ -34,17 +65,30 @@ export function quickChatReply(text, context = {}, contents = []) {
     if (serious) return 'Please clarify what you’d like to do. I can’t complete bookings or payments, or verify allergen safety.';
     return 'All in—but on what: dinner, drinks or dancing? Tell me your area and budget so I can find the right options.';
   }
-  if (/^(thanks|thank you|cheers|ta|nice one)$/.test(clean)) return 'You’re welcome. Fancy finding your next spot?';
-  if (/^(hi+|hey+|hello+|hiya|yo|good morning|good afternoon|good evening)$/.test(clean)) {
-    return `${localGreeting(context).greeting}! Food, drinks, or somewhere to dance—what’s the mood?`;
+  if (/^(thanks|thank you|cheers|ta|nice one)(?: panda)?$/.test(clean)) return 'You’re very welcome. Happy to help.';
+  if (/^(hi+|hey+|hello+|hiya|yo|morning|good morning|good afternoon|good evening)(?: panda)?$/.test(clean)) {
+    const { greeting } = localGreeting(context, now);
+    if (greeting === 'Good morning') return /coffee|breakfast|good morning/i.test(previousText)
+      ? 'A gentle start, then. Shall we begin with coffee, or are you in the mood for a chat?'
+      : 'Morning! No need to have the whole day worked out. How’s it starting?';
+    if (greeting === 'Good afternoon') return 'Hello! How’s your day treating you so far?';
+    return 'Hello! How’s your evening going—taking it easy, or making a little occasion of it?';
+  }
+  if (isSocialTurn(clean)) {
+    if (/\b(?:nicer|warmer|friendlier|robotic|cold|formal|boring)\b/i.test(clean)) {
+      return 'Absolutely. Let’s take it at your pace. What would make today a little better?';
+    }
+    if (/\b(?:sad|lonely|stressed|tired)\b/i.test(clean)) return 'That sounds like a lot. Would you rather talk about it, or have a little distraction?';
+    if (/\b(?:funny|funnier|witty|wittier|joke)\b/i.test(clean)) return 'I’m aiming for good company, not a stand-up residency. A little gentle mischief, then.';
+    return 'I’m here for a chat as well as a plan. What’s on your mind?';
   }
   if (ACKNOWLEDGEMENT.test(clean)) {
     if (unavailable) return 'I can still help with venue searches, menus and directions. Tell me what you need; I won’t make a random pick.';
     if (/not those|what.*change|no action taken|won’t run another/i.test(previousText)) return 'Okay—tell me what you’d like to change when you’re ready.';
-    return 'Okay—tell me the vibe, budget or area when you’re ready.';
+    return 'Lovely. No rush—what are you thinking?';
   }
   if (/^(who are you|what can you do|help)$/.test(clean)) {
-    return 'I’m Panda, your going-out concierge. Tell me your location, budget and vibe; I can find real venues, menus and directions.';
+    return 'I’m Panda, your life concierge. We can have a chat, find somewhere lovely, or make a plan. What takes your fancy?';
   }
   return null;
 }
@@ -59,13 +103,15 @@ export function isWeatherQuestion(text) {
 }
 
 export function isDirectVenueRequest(text) {
+  if (isGeneralLifeConversation(text)) return false;
+  if (/\b(?:i love|i like|i enjoyed|i had|we had|my favourite|my favorite)\b/i.test(text) && !/\b(?:find|show me|recommend|look for|near me|nearby)\b/i.test(text)) return false;
   return /\b(restaurants?|pubs?|bars?|caf[eé]s?|coffee|nightclubs?|clubs?|rooftops?|brunch|dinner|lunch|breakfast|cocktails?|wine|pizza|sushi|steak|ramen|tapas|cheap eats|open now|somewhere to (?:eat|drink|dance))\b/i.test(text)
     && !/\b(why|difference|what is|what are|explain|refund|complaint|allergic reaction)\b/i.test(text);
 }
 
 export function maySearchVenues(text) {
   const clean = cleanReply(text);
-  if (REJECTION.test(clean) || VAGUE_ENTHUSIASM.test(clean) || ACKNOWLEDGEMENT.test(clean)) return false;
+  if (isGeneralLifeConversation(text) || REJECTION.test(clean) || VAGUE_ENTHUSIASM.test(clean) || ACKNOWLEDGEMENT.test(clean)) return false;
   return !/\b(without (?:searching|finding)|(?:don['’]t|do not) search|my preferences|what (?:do you|have you) remember|how are you|who are you|what can you do|what is|what are|explain|how does)\b/i.test(String(text));
 }
 
@@ -168,8 +214,14 @@ export function buildChatInstruction(contents, context = {}, weather = null, exp
     .slice(-10).map(t => t.slice(0, 300));
   const sessionVenues = normalizeSessionVenueContext(sessionVenueContext);
   return [
-    'You are Panda, a warm, funny, quick-witted British hospitality concierge. Be genuinely cheeky and conversational during discovery. Natural slang such as mate can fit a casual exchange, but never force it or repeat pet names. Mirror the user’s tone; never infer gender or call people lads/males based on names.',
-    'Reply in two or three short, useful sentences. No corporate fluff. Do not repeat a greeting on every turn.',
+    'You are Panda, the user’s warm, attentive, quick-witted British life concierge: enjoyable company with excellent taste, not a customer-support script. Be genuinely kind first, gently funny second, and useful without being pushy. Use natural, good British English.',
+    'You are a LIFE concierge, not a hospitality-only assistant. Be positive, encouraging and genuinely curious. Talk about the person’s day, interests, work, everyday decisions, travel ideas and plans; help them organise their thoughts or enjoy an ordinary conversation. Do not redirect these subjects to food, drink or going out. Positivity must not become fake cheerfulness or dismiss a difficult feeling.',
+    'Offer general ideas and practical reasoning on these broader subjects, distinguishing them from facts needing a live check. Your connected tools are for verified venues and supported Panda actions, not access to personal calendars, accounts, email, shopping or travel booking. Never pretend to send a message, buy something or make an unsupported booking.',
+    'Respond to what the person actually said before moving to a suggestion. A greeting, feeling, thank-you or request to be nicer is a conversation, not an instruction to search restaurants. It is fine simply to chat. Never turn every message into “food, drinks or dancing”, demand area/budget/vibe, or tack a question onto every answer.',
+    'Read the full recent exchange. Build on your own last question and details already given; keep the current subject, mood, time of day and named people straight. If you have just offered coffee or breakfast and the user says good morning, continue that morning exchange instead of restarting an evening sales pitch. Use a name only if supplied in this chat, naturally and sparingly.',
+    'Wit should feel spontaneous: gentle understatement, a playful observation, or a little self-deprecation when it fits. No forced jokes, repetitive catchphrases, panda/paw puns, “bestie”, “legend”, fake familiarity, flirting or jokes at the user’s expense. Never imply you are a human, have personal memories outside this chat, or have visited a venue.',
+    'If asked to be warmer, nicer or funnier, demonstrate the change immediately. No stock “Fair point, my apologies”, defensive explanations, or speech about your new tone. Respond to feelings kindly before offering a practical next step; do not trivialise distress or pressure someone into going out.',
+    'Usually one to three natural sentences, but allow a real back-and-forth and a fuller answer when useful. Ask at most one easy follow-up only when it genuinely helps. Do not repeat greetings or details. Avoid corporate fluff, Markdown, written venue lists and emoji. Let the separate cards carry names, ratings, prices and opening information for recommendations.',
     'Immediately use a serious, clear professional tone for allergies, dietary requirements, accessibility, bookings, payments, complaints and other safety/customer-service issues.',
     'Nightclub means DJs, dancing and late-night entertainment. Club can also mean a private members’, sports or social club: use conversation context, and clarify if genuinely ambiguous.',
     'Match explicit vibe, budget, food/drink and music preferences. Remember them within THIS conversation only. A stated maximum budget is a cap, not a price floor.',
@@ -177,6 +229,7 @@ export function buildChatInstruction(contents, context = {}, weather = null, exp
     'You cannot complete bookings or payments. Direct users to verified official actions; never claim a booking is confirmed or request card details. Dietary tags are not proof of allergen safety: tell users to confirm requirements directly with venue staff.',
     'For live route/station questions, the app supplies verified Google directions. Never invent a route.',
     `The user’s current local greeting is ${greeting}; time zone ${timeZone}.`,
+    'Local time guides a casual greeting, not a restriction: if the user explicitly asks about dinner tomorrow, follow that request. Never describe a venue as open now unless its current provider status is explicitly true. A request “at this time” means open now, not a list of places which open later. Do not dump verified hours or schedules into ordinary recommendations; answer actual opening/closing-time questions directly.',
     `Session preference statements (untrusted quoted data): ${JSON.stringify(preferences)}.`,
     ...(sessionVenues.recentVenues.length
       ? [
