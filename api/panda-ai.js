@@ -13,12 +13,13 @@ import { createSandboxHttpHandler, isSandboxReservationRequest } from './_panda-
 import { applyGuard } from './_guard.js';
 import { answerOutingRequest } from './_panda-outing-intent.js';
 import { officialProgrammes } from './_panda-programmes.js';
-import { quickChatReply, shouldUseConversationalModel, wantsOpenNow, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, consumeWeatherBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues, isSessionVenueTransitFollowUp } from './_panda-chat-policy.js';
+import { quickChatReply, shouldUseConversationalModel, wantsOpenNow, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, isEventSearchQuestion, reserveEventGroundingBudget, settleEventGroundingBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues, isSessionVenueTransitFollowUp } from './_panda-chat-policy.js';
 import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-directory.js';
 import { createDiscoveryService } from './_discovery-lite.js';
 import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage, MAX_INDEXED_FEED_PAGE_SIZE } from './_london-index.js';
 import { buildIndexedFeedPage, buildIndexedIdCandidatePage } from './_indexed-feed-page.js';
 import { currentWeatherResponse } from './_current-weather.js';
+import { groundingQueryCount, groundingSources, groundedEventText } from './_panda-event-search.js';
 import { googleCategoryTags } from './_google-category-tags.js';
 import { classifyIndexedFeedCategory } from './_venue-taxonomy.js';
 import { conciergeTurn, conciergeInstruction, conciergeArea, conciergeTimeWindow, conciergeVenuePage, CONCIERGE_RESULT_LIMIT } from './_panda-concierge-turn.js';
@@ -656,8 +657,12 @@ const NORESULT_LINES=[
   "Nothing jumped out for that exact thing. Give me a cuisine or a budget and I\u2019ll dig again.",
   "That one\u2019s playing hard to get \u2014 rephrase it and I\u2019ll have another go \uD83D\uDC3C"
 ];
-async function gemini(token,projectId,body,cacheContext={}){
-  const key=requestFingerprint({body,cacheContext});
+async function gemini(token,projectId,body,cacheContext={},options={}){
+  const modelLimit=Number.isInteger(options.modelLimit)
+    ?Math.max(1,Math.min(MODELS.length,options.modelLimit))
+    :MODELS.length;
+  const selectedModels=MODELS.slice(0,modelLimit);
+  const key=requestFingerprint({body,cacheContext,modelLimit});
   const cached=recentGemini.get(key);
   if(cached&&cached.expiresAt>Date.now()){
     recordCostEvent('gemini_cache_hit',{layer:'memory'});
@@ -679,9 +684,9 @@ async function gemini(token,projectId,body,cacheContext={}){
   }
   const budget=await consumeDailyBudget(db(),'gemini',process.env.PANDA_DAILY_GEMINI_LIMIT);
   if(!budget.allowed)return {ok:false,status:429,data:{},budgetExceeded:true};
-  recordCostEvent('gemini_provider_call',{modelCount:MODELS.length});
+  recordCostEvent('gemini_provider_call',{modelCount:selectedModels.length});
   let last={ok:false,status:0,data:{}};
-  for(const model of MODELS){
+  for(const model of selectedModels){
     try{
       const region=model.startsWith('gemini-3')?'global':LOCATION;
       const host=region==='global'?'aiplatform.googleapis.com':`${region}-aiplatform.googleapis.com`;
@@ -776,8 +781,7 @@ export default async function handler(req,res){
       const result=await currentWeatherResponse({
         location,
         store:db(),
-        apiKey:MAPS_KEY,
-        limit:process.env.PANDA_DAILY_WEATHER_LIMIT||25,
+        limit:process.env.PANDA_DAILY_WEATHER_LIMIT||1000,
         fetchImpl:fetch,
         recordUsage:recordCostEvent,
       });
@@ -891,33 +895,33 @@ export default async function handler(req,res){
     let prefetchedVenues=null;
     let weather=null;
     let weatherStatus=null;
+    const eventSearchQuestion=isEventSearchQuestion(userText);
     if(isWeatherQuestion(userText)){
       const area=extractArea(userText);
       const point=area?await geocodeArea(area):location;
       if(!point||!Number.isFinite(Number(point.lat))||!Number.isFinite(Number(point.lng))){
         res.status(200).json({text:'Which city or area should I check the weather for?',venues:[],aiMode:'clarification'});return;
       }
-      // Weather is only requested on explicit weather questions, never every greeting or venue visit.
-      const weatherAllowed=await consumeWeatherBudget(db(),process.env.PANDA_DAILY_WEATHER_LIMIT||25);
-      if(weatherAllowed&&MAPS_KEY){
-        try{
-          const url=new URL('https://weather.googleapis.com/v1/currentConditions:lookup');
-          url.search=new URLSearchParams({key:MAPS_KEY,'location.latitude':String(point.lat),'location.longitude':String(point.lng),unitsSystem:'METRIC'});
-          recordCostEvent('weather_provider_call');
-          const reply=await fetch(url,{signal:AbortSignal.timeout(2500)});
-          const data=await reply.json();
-          if(reply.ok&&data.currentTime&&data.weatherCondition){
-            weather={observedAt:data.currentTime,condition:data.weatherCondition.description?.text,temperatureC:data.temperature?.degrees,source:'Google Weather'};
-          }else weatherStatus=safeProviderFailure(data)||'weather_unavailable';
-        }catch{weatherStatus='weather_unavailable';}
-      }else weatherStatus='weather_unavailable';
+      // Only explicit weather questions use MET Norway; ordinary chat and venue searches do not.
+      const result=await currentWeatherResponse({
+        location:point,
+        store:db(),
+        limit:process.env.PANDA_DAILY_WEATHER_LIMIT||1000,
+        fetchImpl:fetch,
+        recordUsage:recordCostEvent,
+      });
+      if(result.status===200)weather=result.body.weather;
+      else weatherStatus=result.body.error||'weather_unavailable';
     }
     async function degrade(reason='unknown'){
       if(prefetchedVenues!==null){
         res.status(200).json({text:safeDegradedText(userText,prefetchedVenues),venues:prefetchedVenues,richMetadata:true,aiMode:'fallback',aiFallbackReason:reason});return;
       }
       if(isWeatherQuestion(userText)){
-        res.status(200).json({text:weather?`Current conditions: ${weather.condition}, ${weather.temperatureC}°C (Google Weather). ${/rain|storm|snow/i.test(weather.condition||'')?'An indoor spot looks the better option.':'Tell me if you fancy an indoor or outdoor spot.'}`:'Live weather is unavailable right now, so I won’t guess. Tell me if you’d prefer an indoor or outdoor spot.',venues:[],aiMode:'fallback',aiFallbackReason:reason,weatherStatus,weather});return;
+        const summary=weather
+          ?`MET Norway’s model forecast is ${weather.condition||'available'}${Number.isFinite(Number(weather.temperatureC))?`, around ${weather.temperatureC}°C`:''}. It is a forecast, not a station observation. Weather data: MET Norway, CC BY 4.0.`
+          :'I couldn’t retrieve a reliable forecast just now, so I won’t guess. Please try again shortly.';
+        res.status(200).json({text:summary,venues:[],aiMode:'fallback',aiFallbackReason:reason,weatherStatus,weather});return;
       }
       if(!maySearchVenues(userText)||isGreeting(userText) || !wantsPlaces(userText)){
         res.status(200).json({text:quick || 'I’m having trouble connecting just now. We can try again in a moment; your conversation is still here.',venues:[],aiMode:'fallback',aiFallbackReason:reason});
@@ -966,6 +970,16 @@ export default async function handler(req,res){
           :maxOutputTokens;
       }
     }
+    if(eventSearchQuestion){
+      // Vertex Google Search grounding cannot be combined with Panda's venue function tool.
+      baseBody.tools=[{googleSearch:{}}];
+      baseBody.generationConfig={...(baseBody.generationConfig||{}),temperature:1.0};
+      baseBody.systemInstruction.parts[0].text+=[
+        'LIVE SHOW SEARCH: Use Google Search grounding for current performances, concerts and ticket information.',
+        'Prefer the artist’s official site, the venue’s event page, or an official ticket seller. Give only upcoming performances supported by the search results, with city/venue and date; include local time only when the source verifies it. The app renders grounded source links below the answer, so do not invent or type raw URLs into the reply.',
+        'Never invent a performance, ticket availability or price. If no reliable upcoming listing is found, say so plainly. Keep the answer concise and show no more than three events. Panda can link to event pages but cannot purchase tickets or make reservations.',
+      ].join('\n');
+    }
     let venues=[];
     // An explicit venue request needs one grounded model reply, not a model decision plus
     // a second/third inference. Keep the established guarded, shared Places search.
@@ -986,6 +1000,61 @@ export default async function handler(req,res){
       lng:Math.round(lng*10000)/10000,
       stage:'initial',
     };
+    if(eventSearchQuestion){
+      const monthlyLimit=boundedInteger(process.env.PANDA_EVENT_GROUNDING_MONTHLY_LIMIT,1000,1,1000);
+      // Reserve headroom for multi-query grounding responses, then reconcile to reported use.
+      const reservation=await reserveEventGroundingBudget(db(),monthlyLimit,20);
+      if(!reservation.allowed){
+        const limited=reservation.reason==='limit';
+        res.status(limited?200:503).json({
+          text:limited
+            ?'I’ve reached Panda’s monthly live-show search allowance, so I won’t guess at dates or ticket links. Please try again next month.'
+            :'I can’t verify live show listings right now, so I won’t guess. Please try again shortly.',
+          venues:[],
+          sources:[],
+          aiMode:limited?'event-search-limit':'fallback',
+          eventSearchStatus:limited?'monthly_limit':'unavailable',
+        });
+        return;
+      }
+      const eventResponse=await gemini(token,projectId,baseBody,{...cacheLocation,stage:'grounded-events'},{modelLimit:1});
+      if(!eventResponse.ok){
+        // Keep the full reservation on provider failure rather than risk an uncounted retry.
+        await settleEventGroundingBudget(db(),reservation,10);
+        res.status(200).json({
+          text:'I couldn’t verify an upcoming performance just now, so I won’t guess. Please try again shortly.',
+          venues:[],
+          sources:[],
+          aiMode:'fallback',
+          eventSearchStatus:'unavailable',
+        });
+        return;
+      }
+      const candidate=eventResponse.data?.candidates?.[0];
+      const searches=groundingQueryCount(candidate);
+      await settleEventGroundingBudget(db(),reservation,searches);
+      recordCostEvent('event_grounding_query_count',{count:searches});
+      if(!searches){
+        res.status(200).json({
+          text:'Live show search wasn’t available for that request, so I can’t verify the next date or ticket page. I won’t guess.',
+          venues:[],
+          sources:[],
+          aiMode:'fallback',
+          eventSearchStatus:'unavailable',
+        });
+        return;
+      }
+      const text=groundedEventText(candidate);
+      const sources=groundingSources(candidate);
+      res.status(200).json({
+        text:text||'I found live search results but couldn’t verify an upcoming performance clearly enough to give you a date.',
+        venues:[],
+        sources,
+        aiMode:'grounded-events',
+        eventSearchStatus:'verified_search',
+      });
+      return;
+    }
     let resp=await gemini(token,projectId,baseBody,cacheLocation);
     if(!resp.ok){ await degrade(resp.budgetExceeded?'gemini-daily-budget':`vertex-${resp.status||'network'}${resp.failure?':'+resp.failure:''}`); return; }
     let rounds=0;
