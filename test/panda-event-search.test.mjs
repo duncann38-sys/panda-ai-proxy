@@ -14,6 +14,7 @@ import {
   groundingSources,
   buildLiveShowSearchInstruction,
   buildOfficialArtistWebsiteFallbackInstruction,
+  buildOfficialArtistCandidateVerificationInstruction,
   buildPriceSearchInstruction,
   buildPriceSourceFallbackInstruction,
   isFlightPriceQuestion,
@@ -21,6 +22,8 @@ import {
   extractPriceSearchArea,
   extractEventArea,
   extractArtistName,
+  extractArtistWebsiteCandidate,
+  isArtistClarification,
   isVerifiedOfficialArtistSource,
   shouldSearchOfficialArtistSite,
   stripRawUrls,
@@ -235,13 +238,25 @@ test('official artist links must be first-party-looking and match the named perf
   assert.equal(isVerifiedOfficialArtistSource({ title: 'Bruce Springsteen Official Tickets | Ticketmaster' }, 'Bruce Springsteen'), false);
 });
 
+test('official-site retry verifies candidate domains and clarifications are not misclassified', () => {
+  assert.equal(extractArtistWebsiteCandidate('Visit brucespringsteen.net for more.', 'Bruce Springsteen'), 'brucespringsteen.net');
+  assert.equal(extractArtistWebsiteCandidate('Read ultimateclassicrock.com.', 'Bruce Springsteen'), '');
+  assert.equal(isArtistClarification('Which Bruce do you mean?'), true);
+  assert.equal(isArtistClarification('Their 2024 tour, which concluded in Vancouver.'), false);
+  assert.match(
+    buildOfficialArtistCandidateVerificationInstruction('London', 'Bruce Springsteen', 'brucespringsteen.net'),
+    /a matching name alone is not proof/i,
+  );
+});
+
 test('artist answers with no upcoming dates trigger an official-page lookup and raw URLs are removed', () => {
   assert.equal(shouldSearchOfficialArtistSite('There are no confirmed tour dates announced for London.'), true);
   assert.equal(shouldSearchOfficialArtistSite('You can check https://artist.example/tour for updates.'), true);
   assert.equal(shouldSearchOfficialArtistSite('The next show is confirmed for London on 12 June.'), false);
   assert.equal(shouldSearchOfficialArtistSite('Which Bruce do you mean?'), false);
   assert.equal(stripRawUrls('Check the official page: https://artist.example/tour 🎟️'), 'Check the official page 🎟️');
-  assert.equal(stripRawUrls('Use [brucespringsteen.net](https://brucespringsteen.net/) or [the site]()'), 'Use brucespringsteen.net or the site');
+  assert.equal(stripRawUrls('Check brucespringsteen.net for dates.'), 'Check for dates.');
+  assert.equal(stripRawUrls('Use [brucespringsteen.net](https://brucespringsteen.net/) or [the site]()'), 'Use or the site');
 });
 
 test('price answers provide distinct guidance for flight fares and dining or retail prices', () => {
@@ -289,8 +304,10 @@ test('show and price source gaps receive a bounded grounded recheck', () => {
   const handler = readFileSync(new URL('../api/panda-ai.js', import.meta.url), 'utf8');
   assert.match(handler, /shouldSearchOfficialArtistSite\(text\)/);
   assert.match(handler, /buildOfficialArtistWebsiteFallbackInstruction/);
+  assert.match(handler, /buildOfficialArtistCandidateVerificationInstruction/);
   assert.match(handler, /isVerifiedOfficialArtistSource/);
   assert.match(handler, /officialSiteQuestion/);
+  assert.match(handler, /stage:'official-site-verification-retry'/);
   assert.match(handler, /buildPriceSourceFallbackInstruction/);
   assert.match(handler, /stage:'grounded-price-recheck'/);
   assert.match(handler, /stripRawUrls\(text\)/);

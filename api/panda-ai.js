@@ -19,7 +19,7 @@ import { createDiscoveryService } from './_discovery-lite.js';
 import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage, MAX_INDEXED_FEED_PAGE_SIZE } from './_london-index.js';
 import { buildIndexedFeedPage, buildIndexedIdCandidatePage } from './_indexed-feed-page.js';
 import { currentWeatherResponse, weatherFallbackSummary, appendWeatherAttribution } from './_current-weather.js';
-import { groundingQueryCount, groundingSources, groundedEventText, buildLiveShowSearchInstruction, buildOfficialArtistWebsiteFallbackInstruction, buildPriceSearchInstruction, buildPriceSourceFallbackInstruction, isFlightPriceQuestion, extractFlightRoute, extractPriceSearchArea, extractArtistName, isVerifiedOfficialArtistSource, shouldSearchOfficialArtistSite, stripRawUrls } from './_panda-event-search.js';
+import { groundingQueryCount, groundingSources, groundedEventText, buildLiveShowSearchInstruction, buildOfficialArtistWebsiteFallbackInstruction, buildOfficialArtistCandidateVerificationInstruction, buildPriceSearchInstruction, buildPriceSourceFallbackInstruction, isFlightPriceQuestion, extractFlightRoute, extractPriceSearchArea, extractArtistName, extractArtistWebsiteCandidate, isArtistClarification, isVerifiedOfficialArtistSource, shouldSearchOfficialArtistSite, stripRawUrls } from './_panda-event-search.js';
 import { resolveEventSearchArea } from './_panda-event-location.js';
 import { parseRideRequest, pickRideDestination } from './_panda-ride-request.js';
 import { googleCategoryTags } from './_google-category-tags.js';
@@ -1177,10 +1177,23 @@ export default async function handler(req,res){
       let lookupStatus='verified_search';
       const initialSourceCount=sources.length;
       const artistName=eventSearchQuestion?extractArtistName(userText):'';
-      const artistClarification=eventSearchQuestion&&/\b(?:which|who|do you mean|could you clarify|please clarify|full name)\b/i.test(text);
+      const artistClarification=eventSearchQuestion&&isArtistClarification(text);
       const needsOfficialArtistSite=eventSearchQuestion&&Boolean(artistName)&&!artistClarification
         &&(shouldSearchOfficialArtistSite(text)||!sources.length);
       let officialSiteAdded=false;
+      const attachOfficialArtistSource=officialSiteSource=>{
+        if(!officialSiteSource)return false;
+        sources=[
+          ...sources.filter(source=>source.url!==officialSiteSource.url).slice(0,5),
+          officialSiteSource,
+        ];
+        officialSiteAdded=true;
+        if(!initialSourceCount){
+          text=`I couldn’t confirm the performer’s latest or next show in ${eventTarget.area} from live event sources. The verified official artist page is linked below for current dates. 🎟️`;
+          lookupStatus='official_site_fallback';
+        }
+        return true;
+      };
       if(needsOfficialArtistSite){
         const officialSiteReservation=await reserveEventGroundingBudget(db(),monthlyLimit,5);
         if(officialSiteReservation.allowed){
@@ -1213,16 +1226,41 @@ export default async function handler(req,res){
           recordCostEvent('event_grounding_query_count',{count:chargedSearches});
           const officialSiteSources=groundingSources(officialSiteCandidate);
           const officialSiteSource=officialSiteSources.find(source=>isVerifiedOfficialArtistSource(source,artistName));
-          if(officialSiteResponse.ok&&officialSiteSearches>0&&officialSiteSource){
-            sources=[
-              ...sources.filter(source=>source.url!==officialSiteSource.url).slice(0,5),
-              officialSiteSource,
-            ];
-            officialSiteAdded=true;
-            if(!initialSourceCount){
-              text=`I couldn’t confirm the performer’s latest or next show in ${eventTarget.area} from live event sources. The verified official artist page is linked below for current dates. 🎟️`;
-              lookupStatus='official_site_fallback';
-            }
+          if(officialSiteResponse.ok&&officialSiteSearches>0)attachOfficialArtistSource(officialSiteSource);
+        }
+        if(!officialSiteAdded){
+          const candidateHost=extractArtistWebsiteCandidate(text,artistName);
+          const verificationReservation=await reserveEventGroundingBudget(db(),monthlyLimit,5);
+          if(verificationReservation.allowed){
+            const verificationBody={
+              ...baseBody,
+              contents:[{
+                role:'user',
+                parts:[{
+                  text:`Verify the official website for ${JSON.stringify(artistName)}. Candidate domain: ${JSON.stringify(candidateHost||'none supplied')}. Search this domain with the artist name; if it is not official, search independently for the official first-party site. Return no performance dates or prices.`,
+                }],
+              }],
+              systemInstruction:{
+                parts:[{
+                  text:buildOfficialArtistCandidateVerificationInstruction(eventTarget.area,artistName,candidateHost),
+                }],
+              },
+            };
+            const verificationResponse=await gemini(
+              token,
+              projectId,
+              verificationBody,
+              {...cacheLocation,stage:'official-site-verification-retry'},
+              {modelLimit:1},
+            );
+            const verificationCandidate=verificationResponse.data?.candidates?.[0];
+            const verificationSearches=groundingQueryCount(verificationCandidate);
+            const chargedSearches=verificationResponse.ok?verificationSearches:5;
+            await settleEventGroundingBudget(db(),verificationReservation,chargedSearches);
+            recordCostEvent('event_grounding_query_count',{count:chargedSearches});
+            const verificationSources=groundingSources(verificationCandidate);
+            const verifiedSource=verificationSources.find(source=>isVerifiedOfficialArtistSource(source,artistName));
+            if(verificationResponse.ok&&verificationSearches>0)attachOfficialArtistSource(verifiedSource);
           }
         }
         text=stripRawUrls(text);
