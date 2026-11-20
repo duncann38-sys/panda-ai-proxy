@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   isEventSearchQuestion,
+  isPriceLookupQuestion,
   reserveEventGroundingBudget,
   settleEventGroundingBudget,
   buildChatInstruction,
@@ -10,7 +12,12 @@ import {
 import {
   groundingQueryCount,
   groundingSources,
-  groundingSearchLinks,
+  buildLiveShowSearchInstruction,
+  buildOfficialArtistWebsiteFallbackInstruction,
+  buildPriceSearchInstruction,
+  isFlightPriceQuestion,
+  extractFlightRoute,
+  extractPriceSearchArea,
   extractEventArea,
 } from '../api/_panda-event-search.js';
 import { clearEventAreaCacheForTests, resolveEventSearchArea } from '../api/_panda-event-location.js';
@@ -62,6 +69,19 @@ test('event lookup does not intercept transport tickets or ordinary venue search
   assert.equal(isEventSearchQuestion('Show me jazz bars in New York'), false);
   assert.equal(isEventSearchQuestion('I love Usher'), false);
   assert.equal(isEventSearchQuestion('Will it rain at the concert tonight?'), false);
+});
+
+test('price lookup recognizes products, restaurant meals and flight fares', () => {
+  assert.equal(isPriceLookupQuestion('How much is a bottle of Bollinger?'), true);
+  assert.equal(isPriceLookupQuestion('How much is lunch at The Ivy with and without wine?'), true);
+  assert.equal(isPriceLookupQuestion('How much to fly from London to Paris?'), true);
+  assert.equal(isPriceLookupQuestion('What is the average price of a 750 ml bottle in London?'), true);
+  assert.equal(isPriceLookupQuestion('How much time do I need in Paris?'), false);
+  assert.equal(isPriceLookupQuestion('How much do you love me?'), false);
+  assert.equal(isFlightPriceQuestion('How much to fly from London to Paris?'), true);
+  assert.equal(extractFlightRoute('How much to fly from London to Paris next week?'), 'London to Paris');
+  assert.equal(extractPriceSearchArea('How much is lunch at The Ivy?'), '');
+  assert.equal(extractPriceSearchArea('How much is lunch at The Ivy in London with wine?'), 'London');
 });
 
 test('weather area extraction handles natural city wording and ignores forecast periods', () => {
@@ -146,6 +166,13 @@ test('Panda reservation budget fails closed and settles provider-reported querie
   assert.equal(denied.allowed, false);
   assert.equal(denied.reason, 'limit');
   assert.equal((await reserveEventGroundingBudget(null, 1000, 10, month)).reason, 'unavailable');
+
+  const tenThousandStore = makeStore({
+    'panda_event_search_usage_v1/2026-11': { usedQueries: 9980, reservedQueries: 0 },
+  });
+  const higherCap = await reserveEventGroundingBudget(tenThousandStore, 10000, 10, month);
+  assert.equal(higherCap.allowed, true);
+  assert.equal(higherCap.limit, 10000);
 });
 
 test('grounding source links accept unique HTTPS pages and exclude search-result pages', () => {
@@ -172,18 +199,52 @@ test('grounding source links accept unique HTTPS pages and exclude search-result
   ]);
 });
 
-test('search queries without source pages are not treated as a verified answer', () => {
-  const candidate = {
-    groundingMetadata: {
-      webSearchQueries: ['Rolling Stones official tour dates', 'Rolling Stones official tour dates'],
-    },
-  };
-  assert.equal(groundingSources(candidate).length, 0);
-  assert.deepEqual(groundingSearchLinks(candidate), [{
-    title: 'Google search: Rolling Stones official tour dates',
-    url: 'https://www.google.com/search?q=Rolling%20Stones%20official%20tour%20dates',
-    domain: 'google.com',
-  }]);
+test('live show answers prioritize the last verified show, next date, ticket price and official fallback', () => {
+  const prompt = buildLiveShowSearchInstruction('London, United Kingdom', 'device');
+  assert.match(prompt, /most recent confirmed performance.*date, venue and city/i);
+  assert.match(prompt, /next confirmed upcoming performance/i);
+  assert.match(prompt, /verified official website or official tour page/i);
+  assert.match(prompt, /price or range, currency/i);
+  assert.match(prompt, /whether fees are included/i);
+  assert.match(prompt, /first name alone such as “Bruce”/i);
+  assert.match(prompt, /Do not substitute generic Google search-result cards/i);
+  assert.match(prompt, /one relevant emoji/i);
+});
+
+test('official-site fallback excludes Google result pages and ticket resellers', () => {
+  const prompt = buildOfficialArtistWebsiteFallbackInstruction('London, United Kingdom');
+  assert.match(prompt, /first-party official website or official tour page/i);
+  assert.match(prompt, /Do not return Google search-result pages, fan pages, news articles, venues, or ticket resellers/i);
+  assert.match(prompt, /If no official page is verified, say so plainly/i);
+});
+
+test('price answers provide distinct guidance for flight fares and dining or retail prices', () => {
+  const localPrompt = buildPriceSearchInstruction('London, United Kingdom', 'device', false);
+  assert.match(localPrompt, /current official menu prices/i);
+  assert.match(localPrompt, /food-only and food plus one glass of wine/i);
+  assert.match(localPrompt, /standard 750 ml bottle/i);
+  assert.match(localPrompt, /currency/i);
+  assert.match(localPrompt, /indicative range or average/i);
+  assert.match(localPrompt, /one or two relevant emojis/i);
+
+  const flightPrompt = buildPriceSearchInstruction('London to Paris', 'explicit', true);
+  assert.match(flightPrompt, /origin and destination/i);
+  assert.match(flightPrompt, /current indicative average or range/i);
+  assert.match(flightPrompt, /bookable or guaranteed/i);
+  assert.match(flightPrompt, /baggage and fees/i);
+});
+
+test('ticket-price questions route to live event search', () => {
+  assert.equal(isEventSearchQuestion('How much are Bruce Springsteen tickets?'), true);
+  assert.equal(isEventSearchQuestion('What does a concert ticket cost in London?'), true);
+  assert.equal(isEventSearchQuestion('How much is dinner at home?'), false);
+});
+
+test('live show and price searches share a 10000-query cap without generic search cards', () => {
+  const handler = readFileSync(new URL('../api/panda-ai.js', import.meta.url), 'utf8');
+  assert.match(handler, /PANDA_LIVE_LOOKUP_MONTHLY_LIMIT/);
+  assert.match(handler, /boundedInteger\(configuredLookupLimit,10000,1,10000\)/);
+  assert.doesNotMatch(handler, /groundingSearchLinks/);
 });
 
 test('Panda prompt supports natural warmth, hospitality, emojis, birthdays and weather attribution', () => {
@@ -193,7 +254,7 @@ test('Panda prompt supports natural warmth, hospitality, emojis, birthdays and w
     forecast: [],
   }, [], null, 'Oslo');
   assert.match(prompt, /Hospitality is your heart/i);
-  assert.match(prompt, /emojis sparingly/i);
+  assert.match(prompt, /one or two relevant emojis naturally/i);
   assert.match(prompt, /birthday/i);
   assert.match(prompt, /CC BY 4\.0/i);
   assert.match(prompt, /model forecast/i);

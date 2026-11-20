@@ -13,14 +13,15 @@ import { createSandboxHttpHandler, isSandboxReservationRequest } from './_panda-
 import { applyGuard } from './_guard.js';
 import { answerOutingRequest } from './_panda-outing-intent.js';
 import { officialProgrammes } from './_panda-programmes.js';
-import { quickChatReply, shouldUseConversationalModel, wantsOpenNow, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, extractWeatherArea, isEventSearchQuestion, reserveEventGroundingBudget, settleEventGroundingBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues, isSessionVenueTransitFollowUp } from './_panda-chat-policy.js';
+import { quickChatReply, shouldUseConversationalModel, wantsOpenNow, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, extractWeatherArea, isEventSearchQuestion, isPriceLookupQuestion, reserveEventGroundingBudget, settleEventGroundingBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues, isSessionVenueTransitFollowUp } from './_panda-chat-policy.js';
 import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-directory.js';
 import { createDiscoveryService } from './_discovery-lite.js';
 import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage, MAX_INDEXED_FEED_PAGE_SIZE } from './_london-index.js';
 import { buildIndexedFeedPage, buildIndexedIdCandidatePage } from './_indexed-feed-page.js';
 import { currentWeatherResponse } from './_current-weather.js';
-import { groundingQueryCount, groundingSources, groundingSearchLinks, groundedEventText } from './_panda-event-search.js';
+import { groundingQueryCount, groundingSources, groundedEventText, buildLiveShowSearchInstruction, buildOfficialArtistWebsiteFallbackInstruction, buildPriceSearchInstruction, isFlightPriceQuestion, extractFlightRoute, extractPriceSearchArea } from './_panda-event-search.js';
 import { resolveEventSearchArea } from './_panda-event-location.js';
+import { parseRideRequest, pickRideDestination } from './_panda-ride-request.js';
 import { googleCategoryTags } from './_google-category-tags.js';
 import { classifyIndexedFeedCategory } from './_venue-taxonomy.js';
 import { conciergeTurn, conciergeInstruction, conciergeArea, conciergeTimeWindow, conciergeVenuePage, CONCIERGE_RESULT_LIMIT } from './_panda-concierge-turn.js';
@@ -855,6 +856,9 @@ export default async function handler(req,res){
     }
     const userText=turn.continuation ? turn.searchText : latestUserText(contents);
     const eventSearchQuestion=isEventSearchQuestion(userText);
+    const priceSearchQuestion=!eventSearchQuestion&&isPriceLookupQuestion(userText);
+    const groundedLookupQuestion=eventSearchQuestion||priceSearchQuestion;
+    const rideRequest=parseRideRequest(userText);
     const shortcut=quickVenueShortcut(userText);
     if(shortcut&&(!location||!Number.isFinite(Number(location.lat))||!Number.isFinite(Number(location.lng)))){
       return res.status(200).json({text:'Allow location access so I can find the best-rated places near you, or tell me an area to search.',venues:[],aiMode:'clarification'});
@@ -874,10 +878,79 @@ export default async function handler(req,res){
           &&(!requestedWindow.lateDinner||venueOpenAtRequestedTime(venue,requestedWindow)),
         shortcut?compareQuickVenueRatings:undefined);
     };
+    if(rideRequest){
+      const hasPickupLocation=Number.isFinite(Number(location?.lat))
+        &&Number.isFinite(Number(location?.lng))
+        &&Math.abs(Number(location.lat))<=90
+        &&Math.abs(Number(location.lng))<=180;
+      if(!rideRequest.destination){
+        res.status(200).json({
+          text:'Where would you like to go? Share your location or tell me your pickup area and I’ll find the destination card.',
+          venues:[],
+          aiMode:'clarification',
+          rideRequest:true,
+        });
+        return;
+      }
+      if(!hasPickupLocation){
+        res.status(200).json({
+          text:'Allow location access so I can estimate the ride from your current pickup point, or share your pickup area.',
+          venues:[],
+          aiMode:'clarification',
+          rideRequest:true,
+        });
+        return;
+      }
+      const searchResult=await searchVenuesSmart(
+        rideRequest.destination,
+        Number(location.lat),
+        Number(location.lng),
+        rideRequest.area,
+        false,
+      );
+      const destination=pickRideDestination(searchResult.venues,rideRequest.destination);
+      if(!destination){
+        res.status(200).json({
+          text:`I couldn’t confirm “${rideRequest.destination}” as a real destination nearby. Try the full venue name or add its city, and I’ll show one confirmed place rather than guess.`,
+          venues:[],
+          aiMode:'ride-destination-unavailable',
+          rideRequest:true,
+        });
+        return;
+      }
+      const hasDestinationCoordinates=Number.isFinite(Number(destination.lat))
+        &&Number.isFinite(Number(destination.lng))
+        &&Math.abs(Number(destination.lat))<=90
+        &&Math.abs(Number(destination.lng))<=180;
+      const rideDistance=hasDestinationCoordinates
+        ?distMeters(Number(location.lat),Number(location.lng),Number(destination.lat),Number(destination.lng))
+        :NaN;
+      if(!Number.isFinite(rideDistance)||rideDistance<=0||rideDistance>250000){
+        res.status(200).json({
+          text:`I found ${destination.name}, but I can’t make a reliable local ride estimate for that distance. Try a nearer destination and I’ll keep the fare estimate clearly labelled.`,
+          venues:[],
+          aiMode:'ride-estimate-unavailable',
+          rideRequest:true,
+        });
+        return;
+      }
+      const destinationVenue={
+        ...destination,
+        distanceMeters:rideDistance,
+      };
+      res.status(200).json({
+        text:`I found ${destination.name} 🚗 Tap the Uber estimate on its card to check the live fare and continue in Uber. I haven’t requested a ride.`,
+        venues:[destinationVenue],
+        richMetadata:true,
+        aiMode:'ride-destination',
+        rideRequest:true,
+      });
+      return;
+    }
     const sessionVenueTransitFollowUp=isSessionVenueTransitFollowUp(userText,body.sessionVenueContext);
     const quick=quickChatReply(userText,body.chatContext,contents);
     if(quick&&!shouldUseConversationalModel(userText,contents)){res.status(200).json({text:quick,venues:[],aiMode:'quick'});return;}
-    if(!sessionVenueTransitFollowUp&&!eventSearchQuestion){
+    if(!sessionVenueTransitFollowUp&&!groundedLookupQuestion){
       const outing=await answerOutingRequest({
         text:userText,contents,area:extractArea(userText),context:body.chatContext,
         location:{lat,lng},hasLocation:Number.isFinite(body.location?.lat)&&Number.isFinite(body.location?.lng),
@@ -890,7 +963,7 @@ export default async function handler(req,res){
     if(maySearchVenues(userText)&&ambiguousClub(userText,contents)){
       res.status(200).json({text:'Do you mean a nightclub for dancing, a private members’ club, or a sports/social club?',venues:[],aiMode:'clarification'});return;
     }
-    if(maySearchVenues(userText)&&(shortcut||isDirectVenueRequest(userText))&&!extractArea(userText)&&(!location||!Number.isFinite(Number(location.lat))||!Number.isFinite(Number(location.lng)))){
+    if(!groundedLookupQuestion&&maySearchVenues(userText)&&(shortcut||isDirectVenueRequest(userText))&&!extractArea(userText)&&(!location||!Number.isFinite(Number(location.lat))||!Number.isFinite(Number(location.lng)))){
       res.status(200).json({text:'Tell me your city or area, or allow location access, so I can find real nearby venues.',venues:[],aiMode:'clarification'});return;
     }
     if(maySearchVenues(userText)&&isPubCrawlRequest(userText)){res.status(200).json(await buildCustomPubCrawl(userText,lat,lng));return;}
@@ -918,6 +991,21 @@ export default async function handler(req,res){
     const eventTarget=eventSearchQuestion
       ? await resolveEventSearchArea({text:userText,location,apiKey:MAPS_KEY,fetchImpl:fetch})
       : null;
+    const flightPriceQuestion=priceSearchQuestion&&isFlightPriceQuestion(userText);
+    const flightRoute=flightPriceQuestion?extractFlightRoute(userText):'';
+    const explicitPriceArea=priceSearchQuestion?extractPriceSearchArea(userText):'';
+    const priceTarget=priceSearchQuestion
+      ? flightRoute
+        ? {area:flightRoute,source:'explicit'}
+        : explicitPriceArea
+        ? {area:explicitPriceArea,source:'explicit'}
+        : await resolveEventSearchArea({
+          text:'',
+          location,
+          apiKey:MAPS_KEY,
+          fetchImpl:fetch,
+        })
+      : null;
     if(eventSearchQuestion&&!eventTarget?.area){
       res.status(200).json({
         text:'Which city or area should I check for upcoming performances? I couldn’t identify your current area, and I won’t guess.',
@@ -925,6 +1013,18 @@ export default async function handler(req,res){
         sources:[],
         aiMode:'clarification',
         eventSearchStatus:'location_unavailable',
+      });
+      return;
+    }
+    if(priceSearchQuestion&&!priceTarget?.area){
+      res.status(200).json({
+        text:flightPriceQuestion
+          ?'Which departure city and destination should I price? If you only give me a destination, allow location access and I can use your city as the origin.'
+          :'Which city or country should I use for the price? Bottle and restaurant prices vary by market.',
+        venues:[],
+        sources:[],
+        aiMode:'clarification',
+        priceSearchStatus:'location_unavailable',
       });
       return;
     }
@@ -974,7 +1074,7 @@ export default async function handler(req,res){
     baseBody.systemInstruction={parts:[{text:buildChatInstruction(contents,body.chatContext,weather,body.sessionPreferences,body.sessionVenueContext,weatherArea)}]};
     baseBody.systemInstruction.parts[0].text += '\n' + conciergeInstruction(turn,body.chatContext);
     if(isWeatherQuestion(userText)&&!isDirectVenueRequest(userText))delete baseBody.tools;
-    if(!maySearchVenues(userText)||sessionVenueTransitFollowUp)delete baseBody.tools;
+    if(!maySearchVenues(userText)||sessionVenueTransitFollowUp||groundedLookupQuestion)delete baseBody.tools;
     const maxOutputTokens=boundedInteger(process.env.PANDA_MAX_OUTPUT_TOKENS,320,96,512);
     if(generationConfig||maxOutputTokens){
       baseBody.generationConfig={...(generationConfig||{})};
@@ -985,23 +1085,20 @@ export default async function handler(req,res){
           :maxOutputTokens;
       }
     }
-    if(eventSearchQuestion){
+    if(groundedLookupQuestion){
       // Vertex Google Search grounding cannot be combined with Panda's venue function tool.
       baseBody.tools=[{googleSearch:{}}];
       baseBody.generationConfig={...(baseBody.generationConfig||{}),temperature:1.0};
-      baseBody.systemInstruction.parts[0].text+=[
-        `LIVE SHOW SEARCH: Use Google Search grounding for current performances, concerts and ticket information. Search area: ${eventTarget.area}.`,
-        eventTarget.source === 'explicit'
-          ? 'The user named this destination; search that place, not the device location.'
-          : 'The user did not name another destination; prioritize this city/region from their device location. Do not return unrelated global tour dates. If no local or regional dates are verified, say so plainly.',
-        'Prefer the artist’s official site, the venue’s event page, or an official ticket seller. Cross-check with at least two independent reliable sources when available. Give only upcoming performances supported by the search results, with city/venue and date; include local time only when the source verifies it. The app renders up to six grounded source links below the answer, so do not invent or type raw URLs into the reply.',
-        'Never invent a performance, ticket availability or price. If no reliable upcoming listing is found, say so plainly. Keep the answer concise and show no more than three events. Panda can link to event pages but cannot purchase tickets or make reservations.',
-      ].join('\n');
+      baseBody.systemInstruction.parts[0].text+='\n'+(
+        eventSearchQuestion
+          ?buildLiveShowSearchInstruction(eventTarget.area,eventTarget.source)
+          :buildPriceSearchInstruction(priceTarget.area,priceTarget.source,flightPriceQuestion)
+      );
     }
     let venues=[];
     // An explicit venue request needs one grounded model reply, not a model decision plus
     // a second/third inference. Keep the established guarded, shared Places search.
-    if(maySearchVenues(userText)&&(shortcut||isDirectVenueRequest(userText))&&!isWeatherQuestion(userText)&&!sessionVenueTransitFollowUp){
+    if(!groundedLookupQuestion&&maySearchVenues(userText)&&(shortcut||isDirectVenueRequest(userText))&&!isWeatherQuestion(userText)&&!sessionVenueTransitFollowUp){
       const area=extractArea(userText);
       const q=sessionVenueQuery(fallbackQuery(userText),contents);
       prefetchedVenues=filterSessionVenues(limitChatVenues(await searchForTurn(q,lat,lng,area,/\bopen\b/i.test(userText),!/\b(all|more|another|different)\b/i.test(userText)),userText,q),contents);
@@ -1018,71 +1115,123 @@ export default async function handler(req,res){
       lng:Math.round(lng*10000)/10000,
       stage:'initial',
     };
-    if(eventSearchQuestion){
-      const monthlyLimit=boundedInteger(process.env.PANDA_EVENT_GROUNDING_MONTHLY_LIMIT,1000,1,1000);
-      // Reserve headroom for multi-query grounding responses, then reconcile to reported use.
+    if(groundedLookupQuestion){
+      const configuredLookupLimit=process.env.PANDA_LIVE_LOOKUP_MONTHLY_LIMIT
+        ??process.env.PANDA_EVENT_GROUNDING_MONTHLY_LIMIT;
+      const monthlyLimit=boundedInteger(configuredLookupLimit,10000,1,10000);
+      // One shared monthly cap covers grounded show searches and other live price lookups.
       const reservation=await reserveEventGroundingBudget(db(),monthlyLimit,20);
+      const statusField=eventSearchQuestion?'eventSearchStatus':'priceSearchStatus';
       if(!reservation.allowed){
         const limited=reservation.reason==='limit';
         res.status(limited?200:503).json({
           text:limited
-            ?'I’ve reached Panda’s monthly live-show search allowance, so I won’t guess at dates or ticket links. Please try again next month.'
-            :'I can’t verify live show listings right now, so I won’t guess. Please try again shortly.',
+            ?`I’ve reached Panda’s monthly live-search allowance of ${monthlyLimit.toLocaleString()} lookups, so I won’t guess at dates or prices. Please try again next month.`
+            :'I can’t verify current show or price information right now, so I won’t guess. Please try again shortly.',
           venues:[],
           sources:[],
-          aiMode:limited?'event-search-limit':'fallback',
-          eventSearchStatus:limited?'monthly_limit':'unavailable',
+          aiMode:limited?'live-search-limit':'fallback',
+          [statusField]:limited?'monthly_limit':'unavailable',
         });
         return;
       }
-      const eventResponse=await gemini(token,projectId,baseBody,{...cacheLocation,stage:'grounded-events'},{modelLimit:1});
-      if(!eventResponse.ok){
-        // Keep the full reservation on provider failure rather than risk an uncounted retry.
+      const lookupResponse=await gemini(
+        token,
+        projectId,
+        baseBody,
+        {...cacheLocation,stage:eventSearchQuestion?'grounded-events':'grounded-prices'},
+        {modelLimit:1},
+      );
+      if(!lookupResponse.ok){
+        // Keep a conservative charge on provider failure rather than risk an uncounted retry.
         await settleEventGroundingBudget(db(),reservation,10);
         res.status(200).json({
-          text:'I couldn’t verify an upcoming performance just now, so I won’t guess. Please try again shortly.',
+          text:eventSearchQuestion
+            ?'I couldn’t verify the artist’s latest or next performance just now, so I won’t guess.'
+            :'I couldn’t verify a current price just now, so I won’t guess. Please try again shortly.',
           venues:[],
           sources:[],
           aiMode:'fallback',
-          eventSearchStatus:'unavailable',
+          [statusField]:'unavailable',
         });
         return;
       }
-      const candidate=eventResponse.data?.candidates?.[0];
+      const candidate=lookupResponse.data?.candidates?.[0];
       const searches=groundingQueryCount(candidate);
       await settleEventGroundingBudget(db(),reservation,searches);
       recordCostEvent('event_grounding_query_count',{count:searches});
       if(!searches){
         res.status(200).json({
-          text:'Live show search wasn’t available for that request, so I can’t verify the next date or ticket page. I won’t guess.',
+          text:eventSearchQuestion
+            ?'Live show search wasn’t available for that request, so I can’t verify dates or ticket prices. I won’t guess.'
+            :'I couldn’t access live price sources for that request, so I won’t guess at a current price.',
           venues:[],
           sources:[],
           aiMode:'fallback',
-          eventSearchStatus:'unavailable',
+          [statusField]:'unavailable',
         });
         return;
       }
       const text=groundedEventText(candidate);
       const sources=groundingSources(candidate);
+      if(!sources.length&&eventSearchQuestion){
+        const officialSiteReservation=await reserveEventGroundingBudget(db(),monthlyLimit,5);
+        if(officialSiteReservation.allowed){
+          const officialSiteBody={
+            ...baseBody,
+            systemInstruction:{
+              parts:[{
+                text:baseBody.systemInstruction.parts[0].text+'\n'+buildOfficialArtistWebsiteFallbackInstruction(eventTarget.area),
+              }],
+            },
+          };
+          const officialSiteResponse=await gemini(
+            token,
+            projectId,
+            officialSiteBody,
+            {...cacheLocation,stage:'official-site-fallback'},
+            {modelLimit:1},
+          );
+          const officialSiteCandidate=officialSiteResponse.data?.candidates?.[0];
+          const officialSiteSearches=groundingQueryCount(officialSiteCandidate);
+          const chargedSearches=officialSiteResponse.ok?officialSiteSearches:5;
+          await settleEventGroundingBudget(db(),officialSiteReservation,chargedSearches);
+          recordCostEvent('event_grounding_query_count',{count:chargedSearches});
+          const officialSiteSources=groundingSources(officialSiteCandidate);
+          if(officialSiteResponse.ok&&officialSiteSearches>0&&officialSiteSources.length){
+            res.status(200).json({
+              text:'I couldn’t verify the artist’s latest or next performance or ticket prices just now, so I won’t guess. I’ve searched specifically for the official artist website; use the link below to check confirmed dates and ticket information.',
+              venues:[],
+              sources:officialSiteSources,
+              aiMode:'grounded-events',
+              eventSearchStatus:'official_site_fallback',
+            });
+            return;
+          }
+        }
+      }
       if(!sources.length){
-        const searches=groundingSearchLinks(candidate);
         res.status(200).json({
-          text:searches.length
-            ?'I ran a live Google search, but it did not return linkable source pages to verify the show dates. I won’t guess; you can open these searches or try again with a city or date.'
-            :'I couldn’t retrieve linkable sources for a live-show answer, so I won’t guess at dates. Please try again shortly.',
+          text:eventSearchQuestion
+            ?'I couldn’t verify the artist’s last or next performance, ticket prices, or an official website link just now, so I won’t guess. Please try again shortly or tell me the artist’s full name.'
+            :'I couldn’t verify a current price or a reliable price range just now, so I won’t guess. Try again with a city, route or date if you have one.',
           venues:[],
-          sources:searches,
+          sources:[],
           aiMode:'fallback',
-          eventSearchStatus:'sources_unavailable',
+          [statusField]:'sources_unavailable',
         });
         return;
       }
       res.status(200).json({
-        text:text||'I found live search results but couldn’t verify an upcoming performance clearly enough to give you a date.',
+        text:text||(
+          eventSearchQuestion
+            ?'I found live show sources but couldn’t verify a performance clearly enough to give you a date.'
+            :'I found live price sources but couldn’t verify a price clearly enough to quote one.'
+        ),
         venues:[],
         sources,
-        aiMode:'grounded-events',
-        eventSearchStatus:'verified_search',
+        aiMode:eventSearchQuestion?'grounded-events':'grounded-prices',
+        [statusField]:'verified_search',
       });
       return;
     }

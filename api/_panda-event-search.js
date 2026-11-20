@@ -56,25 +56,75 @@ export function groundingSources(candidate) {
   return sources;
 }
 
-export function groundingSearchLinks(candidate) {
-  const queries = candidate?.groundingMetadata?.webSearchQueries;
-  if (!Array.isArray(queries)) return [];
-  const seen = new Set();
-  const links = [];
-  for (const value of queries) {
-    if (typeof value !== 'string') continue;
-    const query = value.replace(/\s+/g, ' ').trim().slice(0, 180);
-    const key = query.toLowerCase();
-    if (!query || seen.has(key)) continue;
-    seen.add(key);
-    links.push({
-      title: `Google search: ${query}`,
-      url: `https://www.google.com/search?q=${encodeURIComponent(query)}`,
-      domain: 'google.com',
-    });
-    if (links.length >= MAX_GROUNDING_SOURCES) break;
+export function buildLiveShowSearchInstruction(area, source = 'device') {
+  const destination = String(area || 'the user’s local area').slice(0, 120);
+  return [
+    `LIVE PERFORMANCE SEARCH: Use Google Search grounding for the artist named in the conversation. Search area: ${destination}.`,
+    source === 'explicit'
+      ? 'The user named this destination; search that place, not the device location.'
+      : 'The user did not name another destination; prioritize the city/region derived from device location. Do not return unrelated global tour dates.',
+    'For a named performer, lead with the most recent confirmed performance you can verify (date, venue and city), then the next confirmed upcoming performance in the requested area. If none is announced, say so plainly and provide a clickable source link to the artist’s verified official website or official tour page.',
+    'If the artist name is ambiguous, especially a first name alone such as “Bruce”, ask one short clarification instead of guessing the person.',
+    'For ticket-cost questions, give a current source-backed price or range, currency, and whether fees are included when the source states it. If no verified price is published, say “ticket price not published or verified”; never estimate or claim availability.',
+    'Use only facts supported by the Google grounding sources. Prefer the artist’s official site, venue pages, and authorized ticket sellers; cross-check dates and prices when possible. The app renders up to six clickable source links. Never type or invent raw URLs, prices, fees, or event details.',
+    'If search returns no citable pages, do not give an uncited date or price. Do not substitute generic Google search-result cards for an artist website. Do not return venue recommendations for a performance question.',
+    'Keep the response warm, concise and useful. One relevant emoji such as 🎟️ may add warmth, but keep dates and prices easy to scan. Panda can share event links but cannot purchase tickets.',
+  ].join('\n');
+}
+
+export function buildOfficialArtistWebsiteFallbackInstruction(area) {
+  return [
+    `OFFICIAL ARTIST WEBSITE LOOKUP: Use Google Search grounding to find the performer’s first-party official website or official tour page. Search area context: ${String(area || 'the user’s local area').slice(0, 120)}.`,
+    'Use the artist named in the conversation. If the name is ambiguous, ask one short clarification instead of guessing.',
+    'Return only the verified official artist website or official tour page as a clickable source link. Do not return Google search-result pages, fan pages, news articles, venues, or ticket resellers as substitutes.',
+    'Do not state performance dates, ticket prices, or availability during this fallback lookup. If no official page is verified, say so plainly and do not invent a URL.',
+  ].join('\n');
+}
+
+export function isFlightPriceQuestion(text) {
+  return /\b(?:flight|flights|fly|airfare|airline fares?)\b/i.test(String(text || ''));
+}
+
+export function extractFlightRoute(text) {
+  const match = String(text || '').match(
+    /\bfrom\s+([\p{L}\p{M}\d][\p{L}\p{M}\d'’.-]*(?:[\s-]+[\p{L}\p{M}\d][\p{L}\p{M}\d'’.-]*){0,3})\s+(?:to|→)\s+([\p{L}\p{M}\d][\p{L}\p{M}\d'’.-]*(?:[\s-]+[\p{L}\p{M}\d][\p{L}\p{M}\d'’.-]*){0,3})(?=\s+\b(?:on|for|next|this|in|with|including|leaving|departing)\b|[?.!,]|$)/iu,
+  );
+  if (!match) return '';
+  const destination = match[2]
+    .replace(/\s+\b(?:on|for|next|this|in|with|including|leaving|departing)\b[\s\S]*$/i, '')
+    .trim();
+  return `${match[1].trim()} to ${destination}`;
+}
+
+export function extractPriceSearchArea(text) {
+  const candidates = [];
+  const stop = /\b(?:with|without|including|excluding|for|on|next|this|today|tomorrow|in|at|and)\b/i;
+  for (const match of String(text || '').matchAll(/\b(?:in|near|around)\s+([^\n?.!,;]+)/giu)) {
+    let candidate = match[1].trim();
+    const stopAt = candidate.search(stop);
+    if (stopAt >= 0) candidate = candidate.slice(0, stopAt);
+    candidate = candidate.replace(/[,\s.?!]+$/g, '').trim();
+    if (!candidate || /^(?:a|an|this|that|my|your|the menu|the bottle)$/i.test(candidate)) continue;
+    candidates.push(candidate);
   }
-  return links;
+  return candidates.at(-1) || '';
+}
+
+export function buildPriceSearchInstruction(area, source = 'device', travel = false) {
+  const market = String(area || 'the user’s local area').slice(0, 120);
+  return [
+    `LIVE PRICE SEARCH: Use Google Search grounding for current, source-backed prices. Market or route context: ${market}.`,
+    source === 'explicit'
+      ? 'The user named this city, country or route; use it rather than the device location.'
+      : 'The user did not name another market; use their device city/region for local retail and dining prices.',
+    travel
+      ? 'For flights, use the origin and destination in the user’s message. If the destination is named but no origin is given, use the device city as the origin when available; otherwise ask. If travel dates are missing, give a clearly labelled current indicative average or range from Google sources and state that dates are unspecified. State one-way or return only when verified; do not imply the fare is bookable or guaranteed.'
+      : 'For a restaurant meal, use current official menu prices where available. If asked for a meal with and without wine, show food-only and food plus one glass of wine as separate per-person totals, state the assumed dishes and glass size, and include service charge only when a source confirms it. For a bottle or retail product, specify size and market; assume a standard 750 ml bottle only when the user has not specified a size.',
+    'Give an exact price only when a current source lists it. Otherwise provide a Google-grounded indicative range or average only when the search results support it; label it as an estimate and say when it was checked. Include currency, taxes, delivery, baggage and fees when known, and clearly say when these are excluded or unknown.',
+    'Never invent prices, menus, fares, stock, ticket availability or fees. If reliable price sources are missing, say the price could not be verified instead of guessing.',
+    'Prefer official menus, retailers, airlines, airports and authorized ticket sellers. The app renders up to six clickable source links; do not type raw URLs or generic Google search links into the answer.',
+    'Use one or two relevant emojis naturally (for example 🍾, 🍽️ or ✈️) when they make the answer warmer; keep the figures and assumptions clear.',
+  ].join('\n');
 }
 
 export function groundedEventText(candidate) {

@@ -178,6 +178,6 @@ test('dedicated intent handling precedes the broad maySearchVenues gate in the l
   assert.ok(entry > 0);
   assert.ok(entry < code.indexOf('if(maySearchVenues(userText)&&ambiguousClub'));
   assert.match(code.slice(entry, entry + 800), /if\(outing\).*json\(outing\)/s);
-  assert.match(code.slice(0, entry), /if\(!sessionVenueTransitFollowUp&&!eventSearchQuestion\)/);
+  assert.match(code.slice(0, entry), /if\(!sessionVenueTransitFollowUp&&!groundedLookupQuestion\)/);
   assert.ok(code.indexOf('const eventSearchQuestion=isEventSearchQuestion(userText)') < entry);
 });
