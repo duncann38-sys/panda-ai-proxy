@@ -94,6 +94,11 @@ export function extractArtistName(text) {
   return /^(?:artist|performer|band|singer|musician)$/i.test(artist) ? '' : artist.slice(0, 120);
 }
 
+export function isArtistClarification(text) {
+  const value = String(text || '');
+  return /\b(?:which\s+(?:artist|performer|band|singer|musician|one)|which\s+\w+\s+do you mean|who\s+(?:do you mean|are you referring to)|do you mean|could you clarify|please clarify|full name)\b/i.test(value);
+}
+
 export function isVerifiedOfficialArtistSource(source, artistName = '') {
   const title = String(source?.title || '').trim();
   if (!title) return false;
@@ -115,9 +120,42 @@ export function isVerifiedOfficialArtistSource(source, artistName = '') {
     || /^(?:www\.)?[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/i.test(title);
 }
 
+export function extractArtistWebsiteCandidate(text, artistName = '') {
+  const artistTokens = String(artistName || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .split(/\s+/)
+    .filter(token => token.length >= 3 && !/^(?:the|and|band|artist|singer|musician)$/.test(token));
+  if (!artistTokens.length) return '';
+  const blocked = /(?:ultimateclassicrock|concertful|ticketmaster|livenation|songkick|setlist\.fm|bandsintown|wikipedia|instagram|facebook|twitter|x\.com|tiktok|youtube|linktr\.ee)/i;
+  const hosts = String(text || '').match(/\b(?:[a-z0-9-]+\.)+[a-z]{2,63}\b/gi) || [];
+  for (const host of hosts) {
+    if (blocked.test(host)) continue;
+    const normalizedHost = host
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '');
+    if (artistTokens.every(token => normalizedHost.includes(token))) return host.toLowerCase();
+  }
+  return '';
+}
+
+export function buildOfficialArtistCandidateVerificationInstruction(area, artistName, candidateHost) {
+  return [
+    `FIRST-PARTY SITE VERIFICATION: Use Google Search grounding to verify the official website for ${String(artistName || 'the named performer').slice(0, 120)}. Candidate domain to check: ${String(candidateHost || 'none supplied').slice(0, 160)}.`,
+    'Search the performer name and candidate domain together. Confirm from grounded evidence that the domain is the artist’s own official website or official tour page; a matching name alone is not proof.',
+    `Area context: ${String(area || 'the user’s local area').slice(0, 120)}. If the candidate cannot be verified, search independently for the official first-party artist site.`,
+    'Return only a grounded source whose page title clearly identifies the artist’s official site or whose domain matches the artist name. Do not return articles, fan pages, venues, social networks or ticket sellers.',
+    'Do not state performance dates, ticket prices or availability, and do not type raw URLs in reply text. If no official source is verified, say so plainly.',
+  ].join('\n');
+}
+
 export function shouldSearchOfficialArtistSite(text) {
   const value = String(text || '');
-  if (/\b(?:which|who|do you mean|could you clarify|please clarify|full name)\b/i.test(value)) return false;
+  if (isArtistClarification(value)) return false;
   return /https?:\/\/\S+/i.test(value)
     || /\b(?:no|none|not|without|hasn['’]?t|haven['’]?t)\b.{0,80}\b(?:confirmed|upcoming|announced|performances?|shows?|dates?|tour)\b/i.test(value)
     || /\bno\s+(?:concerts?|gigs?|events?)\b/i.test(value);
@@ -127,10 +165,11 @@ export function stripRawUrls(text) {
   return String(text || '')
     .replace(/\[([^\]]+)\]\(\s*(?:https?:\/\/[^)]*)?\s*\)/gi, '$1')
     .replace(/https?:\/\/[^\s<>()]+/gi, '')
+    .replace(/\b(?:[a-z0-9-]+\.)+(?:com|net|org|info|biz|co\.uk|org\.uk|ac\.uk|com\.au|co\.nz|it|de|fr|es|se|no|dk|fi|nl|be|ie|ca|us)\b/gi, '')
     .replace(/:\s+(?=[\u{1F000}-\u{1FAFF}])/gu, ' ')
     .replace(/\s+([,.;!?])/g, '$1')
     .replace(/\s{2,}/g, ' ')
-    .replace(/\b(?:at|via|here|the link is)\s*$/i, '')
+    .replace(/\b(?:at|via|here|the link is)\s*(?=$|[.,;!?])/i, '')
     .trim();
 }
 
