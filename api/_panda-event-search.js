@@ -211,10 +211,10 @@ export function buildPriceSearchInstruction(area, source = 'device', travel = fa
       : 'The user did not name another market; use their device city/region for local retail and dining prices.',
     travel
       ? 'For flights, use the origin and destination in the user’s message. If the destination is named but no origin is given, use the device city as the origin when available; otherwise ask. If travel dates are missing, give a clearly labelled current indicative average or range from Google sources and state that dates are unspecified. State one-way or return only when verified; do not imply the fare is bookable or guaranteed.'
-      : 'For a restaurant meal, use current official menu prices where available. If asked for a meal with and without wine, show food-only and food plus one glass of wine as separate per-person totals, state the assumed dishes and glass size, and include service charge only when a source confirms it. For a bottle or retail product, specify size and market; assume a standard 750 ml bottle only when the user has not specified a size.',
+      : 'Cover any product or service price the user asks about, not only restaurants or travel. For a restaurant meal, use current official menu prices where available. If asked for a meal with and without wine, show food-only and food plus one glass of wine as separate per-person totals, state the assumed dishes and glass size, and include service charge only when a source confirms it. For a bottle or retail product, specify size and market; assume a standard 750 ml bottle only when the user has not specified a size. For a vehicle or other product commonly bought new and used, give separate new and used price ranges when current sources support both; state the model/trim, age, mileage or condition assumptions that materially affect the used range.',
     'Give an exact price only when a current source lists it. Otherwise provide a Google-grounded indicative range or average only when the search results support it; label it as an estimate and say when it was checked. Include currency, taxes, delivery, baggage and fees when known, and clearly say when these are excluded or unknown.',
     'Never invent prices, menus, fares, stock, ticket availability or fees. If reliable price sources are missing, say the price could not be verified instead of guessing.',
-    'Prefer official menus, retailers, airlines, airports and authorized ticket sellers. The app renders up to six clickable source links; do not type raw URLs or generic Google search links into the answer.',
+    'Prefer official manufacturers, retailers, current menus, airlines, airports and authorized sellers; use reputable comparison sites for market-wide ranges. The app renders up to six clickable Google-grounded source links, labelled with their publisher; do not type raw URLs or generic Google search links into the answer.',
     'Use one or two relevant emojis naturally (for example 🍾, 🍽️ or ✈️) when they make the answer warmer; keep the figures and assumptions clear.',
   ].join('\n');
 }
@@ -224,10 +224,24 @@ export function buildPriceSourceFallbackInstruction(area, travel = false) {
     `TARGETED PRICE SOURCE RECHECK: Run one focused Google Search grounded recheck for the exact product, meal or route in the user’s latest question. Market/route: ${String(area || 'the user’s local area').slice(0, 120)}.`,
     travel
       ? 'Search current airline or reputable fare-comparison pages for the exact route. State the date assumptions and one-way/return basis only when verified.'
-      : 'For a named brand without a product variant, use a clearly stated standard/popular variant as an assumption; for dining, use the named restaurant’s current menu. Prefer retailer or restaurant pages that show a live price.',
+      : 'For a named brand without a product variant, use a clearly stated standard/popular variant as an assumption. For a car or product with a meaningful used market, search new and used prices separately and include both only when cited pages support them; for dining, use the named restaurant’s current menu. Prefer manufacturer, dealer, retailer or restaurant pages that show current prices.',
     'Give an exact price only when a current page supports it. Give a range only when multiple current source prices support the range. State currency, product size, date checked and material exclusions such as fees, service, tax or delivery when known.',
     'The app displays Google-grounded source pages as clickable cards. Do not write raw URLs or Google search links in the reply. If no citable price page is found, say that the price could not be verified and do not guess.',
     'Use one or two relevant emojis naturally only if they fit the answer.',
+  ].join('\n');
+}
+
+export function buildFeelGoodNewsSearchInstruction(area = '', source = 'global') {
+  const region = String(area || 'reputable international sources').slice(0, 120);
+  return [
+    `LIVE FEEL-GOOD NEWS SEARCH: Use Google Search grounding to find one or two recent, verifiable positive news stories. Reader region/source context: ${region}.`,
+    source === 'device'
+      ? 'Prefer credible stories relevant to the user’s current region when available; otherwise use reliable international sources.'
+      : 'Use the region or source context explicitly requested by the user.',
+    'Give each story a short, accurate headline-style description, publisher and publication date when verified. Explain the positive detail without exaggerating or implying a broader outcome than the source supports.',
+    'Prefer established newsrooms, public-interest organisations and primary sources. Exclude tragedies, sensationalism, unverified social posts and generic search-result pages.',
+    'The app renders Google-grounded source pages as clickable publisher cards. Do not type raw URLs or invent facts, dates or links. If no recent positive story can be verified, say so plainly.',
+    'Use one fitting emoji naturally, not a chain of emojis.',
   ].join('\n');
 }
 

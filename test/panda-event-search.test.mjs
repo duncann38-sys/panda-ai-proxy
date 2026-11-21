@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import {
   isEventSearchQuestion,
   isPriceLookupQuestion,
+  isFeelGoodNewsQuestion,
   reserveEventGroundingBudget,
   settleEventGroundingBudget,
   buildChatInstruction,
@@ -17,6 +18,7 @@ import {
   buildOfficialArtistCandidateVerificationInstruction,
   buildPriceSearchInstruction,
   buildPriceSourceFallbackInstruction,
+  buildFeelGoodNewsSearchInstruction,
   isFlightPriceQuestion,
   extractFlightRoute,
   extractPriceSearchArea,
@@ -80,6 +82,7 @@ test('event lookup does not intercept transport tickets or ordinary venue search
 });
 
 test('price lookup recognizes products, restaurant meals and flight fares', () => {
+  assert.equal(isPriceLookupQuestion('How much is a Range Rover?'), true);
   assert.equal(isPriceLookupQuestion('How much is a bottle of Bollinger?'), true);
   assert.equal(isPriceLookupQuestion('How much is lunch at The Ivy with and without wine?'), true);
   assert.equal(isPriceLookupQuestion('How much to fly from London to Paris?'), true);
@@ -264,6 +267,8 @@ test('price answers provide distinct guidance for flight fares and dining or ret
   assert.match(localPrompt, /current official menu prices/i);
   assert.match(localPrompt, /food-only and food plus one glass of wine/i);
   assert.match(localPrompt, /standard 750 ml bottle/i);
+  assert.match(localPrompt, /any product or service price/i);
+  assert.match(localPrompt, /separate new and used price ranges/i);
   assert.match(localPrompt, /currency/i);
   assert.match(localPrompt, /indicative range or average/i);
   assert.match(localPrompt, /one or two relevant emojis/i);
@@ -273,6 +278,17 @@ test('price answers provide distinct guidance for flight fares and dining or ret
   assert.match(flightPrompt, /current indicative average or range/i);
   assert.match(flightPrompt, /bookable or guaranteed/i);
   assert.match(flightPrompt, /baggage and fees/i);
+});
+
+test('positive-news requests are grounded, recent, source-linked and fail closed', () => {
+  assert.equal(isFeelGoodNewsQuestion('Tell me some good news'), true);
+  assert.equal(isFeelGoodNewsQuestion('Any uplifting news in London?'), true);
+  assert.equal(isFeelGoodNewsQuestion('Make me smile'), false);
+  const prompt = buildFeelGoodNewsSearchInstruction('London, United Kingdom', 'explicit');
+  assert.match(prompt, /recent, verifiable positive news stories/i);
+  assert.match(prompt, /publication date when verified/i);
+  assert.match(prompt, /Exclude tragedies/i);
+  assert.match(prompt, /clickable publisher cards/i);
 });
 
 test('price source recheck searches a clearer product or route and never emits raw URLs', () => {
@@ -323,6 +339,8 @@ test('Panda prompt supports natural warmth, hospitality, emojis, birthdays and w
   assert.match(prompt, /one or two relevant emojis naturally/i);
   assert.match(prompt, /birthday/i);
   assert.match(prompt, /CC BY 4\.0/i);
+  assert.match(prompt, /complete, specific uplifting moment/i);
+  assert.match(prompt, /mood-matched films/i);
   assert.match(prompt, /model forecast/i);
   assert.match(prompt, /requested area "Oslo"/i);
   assert.match(prompt, /one fitting weather emoji/i);

@@ -13,15 +13,15 @@ import { createSandboxHttpHandler, isSandboxReservationRequest } from './_panda-
 import { applyGuard } from './_guard.js';
 import { answerOutingRequest } from './_panda-outing-intent.js';
 import { officialProgrammes } from './_panda-programmes.js';
-import { quickChatReply, shouldUseConversationalModel, wantsOpenNow, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, extractWeatherArea, isEventSearchQuestion, isPriceLookupQuestion, reserveEventGroundingBudget, settleEventGroundingBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues, isSessionVenueTransitFollowUp } from './_panda-chat-policy.js';
+import { quickChatReply, shouldUseConversationalModel, wantsOpenNow, ambiguousClub, buildChatInstruction, safeProviderFailure, redactedProviderMessage, safeDegradedText, isDirectVenueRequest, isWeatherQuestion, extractWeatherArea, isEventSearchQuestion, isPriceLookupQuestion, isFeelGoodNewsQuestion, reserveEventGroundingBudget, settleEventGroundingBudget, sessionVenueQuery, filterSessionVenues, maySearchVenues, isSessionVenueTransitFollowUp } from './_panda-chat-policy.js';
 import { loadSharedVenueDirectory, VenueDirectoryError } from './_venue-directory.js';
 import { createDiscoveryService } from './_discovery-lite.js';
 import { indexPlaceIdentities, nearbyPlaceIdentities, nearbySeededPlacePage, MAX_INDEXED_FEED_PAGE_SIZE } from './_london-index.js';
 import { buildIndexedFeedPage, buildIndexedIdCandidatePage } from './_indexed-feed-page.js';
-import { currentWeatherResponse, weatherFallbackSummary, appendWeatherAttribution } from './_current-weather.js';
-import { groundingQueryCount, groundingSources, groundedEventText, buildLiveShowSearchInstruction, buildOfficialArtistWebsiteFallbackInstruction, buildOfficialArtistCandidateVerificationInstruction, buildPriceSearchInstruction, buildPriceSourceFallbackInstruction, isFlightPriceQuestion, extractFlightRoute, extractPriceSearchArea, extractArtistName, extractArtistWebsiteCandidate, isArtistClarification, isVerifiedOfficialArtistSource, shouldSearchOfficialArtistSite, stripRawUrls } from './_panda-event-search.js';
+import { currentWeatherResponse, weatherFallbackSummary } from './_current-weather.js';
+import { groundingQueryCount, groundingSources, groundedEventText, buildLiveShowSearchInstruction, buildOfficialArtistWebsiteFallbackInstruction, buildOfficialArtistCandidateVerificationInstruction, buildPriceSearchInstruction, buildPriceSourceFallbackInstruction, buildFeelGoodNewsSearchInstruction, isFlightPriceQuestion, extractFlightRoute, extractPriceSearchArea, extractArtistName, extractArtistWebsiteCandidate, isArtistClarification, isVerifiedOfficialArtistSource, shouldSearchOfficialArtistSite, stripRawUrls } from './_panda-event-search.js';
 import { resolveEventSearchArea } from './_panda-event-location.js';
-import { parseRideRequest, pickRideDestination } from './_panda-ride-request.js';
+import { parseRideRequest, pickRideDestination, rankRideDestinations } from './_panda-ride-request.js';
 import { googleCategoryTags } from './_google-category-tags.js';
 import { classifyIndexedFeedCategory } from './_venue-taxonomy.js';
 import { conciergeTurn, conciergeInstruction, conciergeArea, conciergeTimeWindow, conciergeVenuePage, CONCIERGE_RESULT_LIMIT } from './_panda-concierge-turn.js';
@@ -528,20 +528,20 @@ function extractArea(text){
 function isThemedRequest(text){return /\b(pub crawl|crawl|cozy|cosy|cheap|expensive|christmas|theme|live music|dj|music)\b/i.test(String(text||''));}
 const CHAT_CARD_LIMIT=20;
 const CHAT_MAX_DISTANCE_METERS=60000;
-function nearbyChatVenues(venues,compare=(a,b)=>a.distanceMeters-b.distanceMeters){
+function nearbyChatVenues(venues,compare=(a,b)=>a.distanceMeters-b.distanceMeters,minPhotoCount=5){
   const unique=new Map();
   for(const venue of venues||[]){
-    if(!venue?.id||!venue.photoName||Number(venue.photoCount)<5)continue;
+    if(!venue?.id||!venue.photoName||Number(venue.photoCount)<minPhotoCount)continue;
     if(!Number.isFinite(venue.distanceMeters)||venue.distanceMeters<0||venue.distanceMeters>CHAT_MAX_DISTANCE_METERS)continue;
     if(!unique.has(venue.id))unique.set(venue.id,venue);
   }
   return [...unique.values()].sort(compare).slice(0,CHAT_CARD_LIMIT);
 }
-async function searchChatVenues(query,lat,lng,area,openNow,fast=false,excludedPlaceIds=[],acceptVenue=()=>true,compare){
+async function searchChatVenues(query,lat,lng,area,openNow,fast=false,excludedPlaceIds=[],acceptVenue=()=>true,compare,minPhotoCount=5){
   const first=await searchVenuesSmart(query,lat,lng,area,openNow);
   const excluded = new Set(excludedPlaceIds);
   let all = first.venues || [];
-  let venues=nearbyChatVenues(all.filter(venue => !excluded.has(venue.id) && acceptVenue(venue)),compare);
+  let venues=nearbyChatVenues(all.filter(venue => !excluded.has(venue.id) && acceptVenue(venue)),compare,minPhotoCount);
   let cursor = first.nextPageToken;
   const searchContext = first.searchContext;
   const used = new Set();
@@ -550,7 +550,7 @@ async function searchChatVenues(query,lat,lng,area,openNow,fast=false,excludedPl
     used.add(cursor);
     const next = await searchVenues(searchContext.query,searchContext.lat,searchContext.lng,cursor,openNow);
     all = [...all, ...(strictLocationResult(next,area).venues || [])];
-    venues=nearbyChatVenues(all.filter(venue => !excluded.has(venue.id) && acceptVenue(venue)),compare);
+    venues=nearbyChatVenues(all.filter(venue => !excluded.has(venue.id) && acceptVenue(venue)),compare,minPhotoCount);
     cursor = next.nextPageToken;
   }
   return venues;
@@ -857,7 +857,8 @@ export default async function handler(req,res){
     const userText=turn.continuation ? turn.searchText : latestUserText(contents);
     const eventSearchQuestion=isEventSearchQuestion(userText);
     const priceSearchQuestion=!eventSearchQuestion&&isPriceLookupQuestion(userText);
-    const groundedLookupQuestion=eventSearchQuestion||priceSearchQuestion;
+    const feelGoodNewsQuestion=!eventSearchQuestion&&!priceSearchQuestion&&isFeelGoodNewsQuestion(userText);
+    const groundedLookupQuestion=eventSearchQuestion||priceSearchQuestion||feelGoodNewsQuestion;
     const rideRequest=parseRideRequest(userText);
     const shortcut=quickVenueShortcut(userText);
     if(shortcut&&(!location||!Number.isFinite(Number(location.lat))||!Number.isFinite(Number(location.lng)))){
@@ -883,21 +884,34 @@ export default async function handler(req,res){
         &&Number.isFinite(Number(location?.lng))
         &&Math.abs(Number(location.lat))<=90
         &&Math.abs(Number(location.lng))<=180;
-      if(!rideRequest.destination){
-        res.status(200).json({
-          text:'Where would you like to go? Share your location or tell me your pickup area and I’ll find the destination card.',
-          venues:[],
-          aiMode:'clarification',
-          rideRequest:true,
-        });
-        return;
-      }
       if(!hasPickupLocation){
         res.status(200).json({
           text:'Allow location access so I can estimate the ride from your current pickup point, or share your pickup area.',
           venues:[],
           aiMode:'clarification',
           rideRequest:true,
+        });
+        return;
+      }
+      if(!rideRequest.destination){
+        const options=await searchChatVenues(
+          'popular bars pubs restaurants cafes',
+          Number(location.lat),
+          Number(location.lng),
+          rideRequest.area,
+          false,
+          true,
+          [],
+          ()=>true,
+          undefined,
+          1,
+        );
+        res.status(200).json({
+          text:options.length
+            ?'Of course 🚗 Choose a nearby place below and tap its Uber estimate. If you have a destination in mind, tell me its name instead.'
+            :'Where would you like to go? Tell me a venue or area and I’ll find a confirmed destination.',
+          venues:options.slice(0,4),
+          aiMode:options.length?'ride-options':'clarification',
         });
         return;
       }
@@ -910,6 +924,29 @@ export default async function handler(req,res){
       );
       const destination=pickRideDestination(searchResult.venues,rideRequest.destination);
       if(!destination){
+        const ranked=rankRideDestinations(searchResult.venues,rideRequest.destination);
+        const topScore=ranked[0]?.score;
+        const ambiguous=Number.isFinite(topScore)
+          ?ranked.filter(candidate=>candidate.score===topScore).slice(0,4)
+          :[];
+        if(ambiguous.length>1){
+          const choices=ambiguous.map(({venue})=>{
+            const hasCoordinates=Number.isFinite(Number(venue.lat))&&Number.isFinite(Number(venue.lng));
+            return {
+              ...venue,
+              ...(hasCoordinates?{
+                distanceMeters:distMeters(Number(location.lat),Number(location.lng),Number(venue.lat),Number(venue.lng)),
+              }:{}),
+            };
+          });
+          res.status(200).json({
+            text:`I found a few places matching “${rideRequest.destination}” 🚗 Choose the right venue card below, then tap its Uber estimate.`,
+            venues:choices,
+            richMetadata:true,
+            aiMode:'ride-choices',
+          });
+          return;
+        }
         res.status(200).json({
           text:`I couldn’t confirm “${rideRequest.destination}” as a real destination nearby. Try the full venue name or add its city, and I’ll show one confirmed place rather than guess.`,
           venues:[],
@@ -1034,7 +1071,7 @@ export default async function handler(req,res){
       }
       if(isWeatherQuestion(userText)){
         const summary=weather
-          ?appendWeatherAttribution(weatherFallbackSummary(weather,weatherArea,userText),weather)
+          ?weatherFallbackSummary(weather,weatherArea,userText)
           :'I couldn’t retrieve a reliable forecast just now, so I won’t guess. Please try again shortly.';
         res.status(200).json({text:summary,venues:[],aiMode:'fallback',aiFallbackReason:reason,weatherStatus,weather});return;
       }
@@ -1092,7 +1129,9 @@ export default async function handler(req,res){
       baseBody.systemInstruction.parts[0].text+='\n'+(
         eventSearchQuestion
           ?buildLiveShowSearchInstruction(eventTarget.area,eventTarget.source)
-          :buildPriceSearchInstruction(priceTarget.area,priceTarget.source,flightPriceQuestion)
+          :priceSearchQuestion
+            ?buildPriceSearchInstruction(priceTarget.area,priceTarget.source,flightPriceQuestion)
+            :buildFeelGoodNewsSearchInstruction(extractEventArea(userText),extractEventArea(userText)?'explicit':'global')
       );
     }
     let venues=[];
@@ -1119,15 +1158,19 @@ export default async function handler(req,res){
       const configuredLookupLimit=process.env.PANDA_LIVE_LOOKUP_MONTHLY_LIMIT
         ??process.env.PANDA_EVENT_GROUNDING_MONTHLY_LIMIT;
       const monthlyLimit=boundedInteger(configuredLookupLimit,10000,1,10000);
-      // One shared monthly cap covers grounded show searches and other live price lookups.
+      // One shared monthly cap covers grounded show, price and positive-news searches.
       const reservation=await reserveEventGroundingBudget(db(),monthlyLimit,20);
-      const statusField=eventSearchQuestion?'eventSearchStatus':'priceSearchStatus';
+      const statusField=eventSearchQuestion
+        ?'eventSearchStatus'
+        :priceSearchQuestion
+          ?'priceSearchStatus'
+          :'newsSearchStatus';
       if(!reservation.allowed){
         const limited=reservation.reason==='limit';
         res.status(limited?200:503).json({
           text:limited
-            ?`I’ve reached Panda’s monthly live-search allowance of ${monthlyLimit.toLocaleString()} lookups, so I won’t guess at dates or prices. Please try again next month.`
-            :'I can’t verify current show or price information right now, so I won’t guess. Please try again shortly.',
+            ?`I’ve reached Panda’s monthly live-search allowance of ${monthlyLimit.toLocaleString()} lookups, so I won’t guess at current information. Please try again next month.`
+            :'I can’t verify current information right now, so I won’t guess. Please try again shortly.',
           venues:[],
           sources:[],
           aiMode:limited?'live-search-limit':'fallback',
@@ -1139,7 +1182,7 @@ export default async function handler(req,res){
         token,
         projectId,
         baseBody,
-        {...cacheLocation,stage:eventSearchQuestion?'grounded-events':'grounded-prices'},
+        {...cacheLocation,stage:eventSearchQuestion?'grounded-events':priceSearchQuestion?'grounded-prices':'grounded-feel-good-news'},
         {modelLimit:1},
       );
       if(!lookupResponse.ok){
@@ -1148,7 +1191,9 @@ export default async function handler(req,res){
         res.status(200).json({
           text:eventSearchQuestion
             ?'I couldn’t verify the artist’s latest or next performance just now, so I won’t guess.'
-            :'I couldn’t verify a current price just now, so I won’t guess. Please try again shortly.',
+            :priceSearchQuestion
+              ?'I couldn’t verify a current price just now, so I won’t guess. Please try again shortly.'
+              :'I couldn’t verify a recent positive news story just now, so I won’t invent one. Please try again shortly.',
           venues:[],
           sources:[],
           aiMode:'fallback',
@@ -1164,7 +1209,9 @@ export default async function handler(req,res){
         res.status(200).json({
           text:eventSearchQuestion
             ?'Live show search wasn’t available for that request, so I can’t verify dates or ticket prices. I won’t guess.'
-            :'I couldn’t access live price sources for that request, so I won’t guess at a current price.',
+            :priceSearchQuestion
+              ?'I couldn’t access live price sources for that request, so I won’t guess at a current price.'
+              :'I couldn’t access live news sources for that request, so I won’t invent a current story.',
           venues:[],
           sources:[],
           aiMode:'fallback',
@@ -1308,7 +1355,9 @@ export default async function handler(req,res){
             ?artistClarification&&text
               ?text
               :'I couldn’t verify the artist’s last or next performance, ticket prices, or an official website link just now, so I won’t guess. Please try again shortly or tell me the artist’s full name.'
-            :'I couldn’t verify a current price or a reliable price range just now, so I won’t guess. Try again with a city, route or date if you have one.',
+            :priceSearchQuestion
+              ?'I couldn’t verify a current price or a reliable price range just now, so I won’t guess. Try again with a city, route or date if you have one.'
+              :'I couldn’t verify a recent positive news story just now, so I won’t invent one. Try again shortly.',
           venues:[],
           sources:[],
           aiMode:'fallback',
@@ -1320,11 +1369,13 @@ export default async function handler(req,res){
         text:text||(
           eventSearchQuestion
             ?'I found live show sources but couldn’t verify a performance clearly enough to give you a date.'
-            :'I found live price sources but couldn’t verify a price clearly enough to quote one.'
+            :priceSearchQuestion
+              ?'I found live price sources but couldn’t verify a price clearly enough to quote one.'
+              :'I found live news sources but couldn’t verify a positive story clearly enough to share.'
         ),
         venues:[],
         sources,
-        aiMode:eventSearchQuestion?'grounded-events':'grounded-prices',
+        aiMode:eventSearchQuestion?'grounded-events':priceSearchQuestion?'grounded-prices':'grounded-news',
         [statusField]:lookupStatus,
       });
       return;
@@ -1368,7 +1419,6 @@ export default async function handler(req,res){
     if (requestedWindow.lateDinner && venues.length && !/\bkitchen\b/i.test(text)) {
       text += ' These are venue opening hours; kitchen service at that time still needs confirmation.';
     }
-    if(isWeatherQuestion(userText)&&weather)text=appendWeatherAttribution(text,weather);
     res.status(200).json({text,venues,richMetadata:true,aiMode:'vertex',weatherStatus,weather});
   }catch(err){
     try{
