@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { currentWeatherResponse, weatherFallbackSummary, appendWeatherAttribution } from '../api/_current-weather.js';
+import { currentWeatherResponse, weatherFallbackSummary } from '../api/_current-weather.js';
 
 function makeStore(initialRequests = 0) {
   let requests = initialRequests;
@@ -150,6 +150,7 @@ test('weather fallback summarizes the next calendar week when source coverage re
   assert.match(text, /-2°C to 5°C/);
   assert.match(text, /Rain is indicated in some forecast periods/);
   assert.match(text, /not a station observation/);
+  assert.doesNotMatch(text, /MET Norway|CC BY 4\.0/);
   assert.match(text, /🌧️|🌤️|❄️|🌦️/);
 });
 
@@ -171,16 +172,16 @@ test('weather fallback refuses a full-week claim when forecast coverage stops ea
   assert.doesNotMatch(text, /model forecast for next week \(Mon 23 Nov/);
 });
 
-test('MET Norway attribution is included once in successful weather replies', () => {
-  const weather = { attribution: 'Weather data from MET Norway, licensed under CC BY 4.0.' };
-  assert.equal(
-    appendWeatherAttribution('In Malmö, the forecast looks clear.', weather),
-    'In Malmö, the forecast looks clear.\n\nWeather data from MET Norway, licensed under CC BY 4.0.',
-  );
-  assert.equal(
-    appendWeatherAttribution('Weather data from MET Norway, licensed under CC BY 4.0.', weather),
-    'Weather data from MET Norway, licensed under CC BY 4.0.',
-  );
+test('weather prose omits provider repetition while the required credit stays in response metadata', () => {
+  const text = weatherFallbackSummary({
+    condition: 'Clear sky',
+    temperatureC: 10,
+    forecast: [],
+  }, 'Malmö', 'How is the weather?');
+  assert.match(text, /In Malmö, the latest forecast shows Clear sky/);
+  assert.doesNotMatch(text, /MET Norway|CC BY 4\.0/);
+  const weather = { source: 'MET Norway', attribution: 'Weather data from MET Norway, licensed under CC BY 4.0.' };
+  assert.match(weather.attribution, /MET Norway.*CC BY 4\.0/);
 });
 
 test('weather cache is reused before spending the shared daily allowance', async () => {

@@ -140,6 +140,10 @@ export function isPriceLookupQuestion(text) {
   return /\b(?:how much(?:\s+(?:is|are|for|does|do|would|will|to))?|how expensive|price(?:s)?|cost(?:s)?|fare(?:s)?|average (?:price|cost|fare))\b/i.test(clean);
 }
 
+export function isFeelGoodNewsQuestion(text) {
+  return /\b(?:good news|positive news|feel[-\s]good news|uplifting news|happy news|good news stories?)\b/i.test(String(text || ''));
+}
+
 export function isDirectVenueRequest(text) {
   if (isGeneralLifeConversation(text)) return false;
   if (/\b(?:i love|i like|i enjoyed|i had|we had|my favourite|my favorite)\b/i.test(text) && !/\b(?:find|show me|recommend|look for|near me|nearby)\b/i.test(text)) return false;
@@ -261,6 +265,8 @@ export function buildChatInstruction(contents, context = {}, weather = null, exp
     'If asked to be warmer, nicer or funnier, demonstrate the change immediately. No stock “Fair point, my apologies”, defensive explanations, or speech about your new tone. Respond to feelings kindly before offering a practical next step; do not trivialise distress or pressure someone into going out.',
     'Usually one to three natural sentences, but allow a real back-and-forth and a fuller answer when useful. Ask at most one easy follow-up only when it genuinely helps. Do not repeat greetings or details. Avoid corporate fluff, Markdown and written venue lists. Use one or two relevant emojis naturally in many casual replies—especially food, drinks, weather, entertainment, humour and celebrations; a flower can fit a birthday. Do not add emoji chains, obscure prices or facts with decoration, or use them in serious safety or complaint replies.',
     'If the user mentions a birthday or special occasion, respond with genuine warmth and help make it feel thoughtful. Never assume an age, date or relationship detail they have not supplied.',
+    'When the user asks “Make me smile” or asks for a mood lift, give one complete, specific uplifting moment immediately: a clean original joke with a real punchline, a brief funny anecdote, a short poem, or a small feel-good story. Vary the form; do not answer with generic reassurance or ask them to choose first. Do not present invented anecdotes as real news. For explicit recent or positive-news requests, use the live grounded news search and cite its clickable sources.',
+    'When the user says “Talk it through”, work with the details already shared: offer thoughtful, practical perspective and a useful next step instead of a generic prompt. If they want a distraction, recommend a few mood-matched films with a brief reason for each; never claim current streaming availability unless it has been checked. Ask at most one direct question, only when the answer would change the advice.',
     'Immediately use a serious, clear professional tone for allergies, dietary requirements, accessibility, bookings, payments, complaints and other safety/customer-service issues.',
     'Nightclub means DJs, dancing and late-night entertainment. Club can also mean a private members’, sports or social club: use conversation context, and clarify if genuinely ambiguous.',
     'Match explicit vibe, budget, food/drink and music preferences. Remember them within THIS conversation only. A stated maximum budget is a cap, not a price floor.',
@@ -279,7 +285,7 @@ export function buildChatInstruction(contents, context = {}, weather = null, exp
         ]
       : []),
     weather
-      ? `Verified MET Norway model forecast (not a station observation)${weatherArea ? ` for the requested area ${JSON.stringify(weatherArea)}` : ' for the user’s current local area'}. Use only the supplied readings, respect their UTC timestamps, and answer the requested forecast period. If a named area was requested, explicitly name it near the start (for example, “In ${weatherArea}, the latest forecast shows…”). Describe readings as a forecast or estimate, never as a live station observation. If the supplied forecast does not cover the requested period, say so rather than guessing. Clearly attribute MET Norway under CC BY 4.0. One fitting weather emoji is welcome when it feels natural. ${JSON.stringify(weather)}`
+      ? `Verified weather model forecast (not a station observation)${weatherArea ? ` for the requested area ${JSON.stringify(weatherArea)}` : ' for the user’s current local area'}. Use only the supplied readings, respect their UTC timestamps, and answer the requested forecast period. If a named area was requested, explicitly name it near the start (for example, “In ${weatherArea}, the latest forecast shows…”). Describe readings as a forecast or estimate, never as a live station observation. If the supplied forecast does not cover the requested period, say so rather than guessing. Do not mention the provider or licence in the conversational reply; the app displays the required source credit separately. One fitting weather emoji is welcome when it feels natural. ${JSON.stringify(weather)}`
       : 'No verified live weather is supplied. Do not state or guess current weather; offer conditional advice, or say live weather is unavailable.',
   ].join('\n');
 }

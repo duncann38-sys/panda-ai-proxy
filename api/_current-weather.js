@@ -161,17 +161,16 @@ export function weatherFallbackSummary(weather, area = '', userText = '') {
   const currentTemperature = Number.isFinite(Number(weather?.temperatureC))
     ? `, around ${Math.round(Number(weather.temperatureC))}°C`
     : '';
-  const attribution = 'Weather data from MET Norway, licensed under CC BY 4.0.';
   const asksNextWeek = /\b(?:next\s+(?:week|7 days|seven days)|week ahead|coming week)\b/i.test(String(userText || ''));
   if (!asksNextWeek) {
-    return `The latest MET Norway forecast${area ? ` for ${area}` : ' for your local area'} shows ${currentCondition}${currentTemperature}. It is a forecast, not a station observation. ${attribution}`;
+    return `${place}, the latest forecast shows ${currentCondition}${currentTemperature}. It is a forecast, not a station observation.`;
   }
 
   const points = Array.isArray(weather?.forecast)
     ? weather.forecast.filter(point => Number.isFinite(Date.parse(point?.time)))
     : [];
   if (!points.length) {
-    return `${place}, I couldn’t retrieve forecast details for next week, so I won’t guess. ${attribution}`;
+    return `${place}, I couldn’t retrieve forecast details for next week, so I won’t guess.`;
   }
 
   const firstTime = Date.parse(points[0].time);
@@ -197,7 +196,7 @@ export function weatherFallbackSummary(weather, area = '', userText = '') {
   });
   const rangeLabel = `${utcDateLabel(periodStart)}–${utcDateLabel(periodEnd - 24 * 3_600_000)} (UTC)`;
   if (!periodPoints.length || lastTime < periodEnd - 6 * 3_600_000) {
-    return `${place}, MET Norway’s available forecast currently runs through ${utcDateTimeLabel(lastTime)}, which does not cover the full next-week window (${rangeLabel}). The current reading is ${currentCondition}${currentTemperature}; I won’t guess beyond the published forecast. ${attribution}`;
+    return `${place}, the available forecast currently runs through ${utcDateTimeLabel(lastTime)}, which does not cover the full next-week window (${rangeLabel}). The current reading is ${currentCondition}${currentTemperature}; I won’t guess beyond the published forecast.`;
   }
 
   const temperatures = periodPoints
@@ -234,15 +233,7 @@ export function weatherFallbackSummary(weather, area = '', userText = '') {
       : /clear|fair|partly/.test(conditionText)
         ? '🌤️'
         : '🌦️';
-  return `${place}, the MET Norway model forecast for next week (${rangeLabel}) shows ${temperatureSummary}; ${conditionSummary}. ${precipitationSummary} This is a model forecast, not a station observation. ${attribution} ${emoji}`;
-}
-
-export function appendWeatherAttribution(text, weather) {
-  const reply = String(text || '').trim();
-  if (!weather) return reply;
-  const attribution = String(weather.attribution || ATTRIBUTION);
-  if (/MET Norway/i.test(reply) && /CC BY 4\.0/i.test(reply)) return reply;
-  return [reply, attribution].filter(Boolean).join('\n\n');
+  return `${place}, the forecast for next week (${rangeLabel}) shows ${temperatureSummary}; ${conditionSummary}. ${precipitationSummary} This is a model forecast, not a station observation. ${emoji}`;
 }
 
 async function inspectCache(store, key, now) {

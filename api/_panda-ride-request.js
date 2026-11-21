@@ -22,6 +22,9 @@ export function parseRideRequest(text) {
     area = areaMatch[1].replace(/\b(?:please|now|tonight|today|tomorrow)\s*$/i, '').trim();
     destination = destination.slice(0, areaMatch.index).replace(/[,\s]+$/g, '').trim();
   }
+  if (/^(?:there|here|it|that|this|that place|this place|that venue|this venue|the same place|home)$/i.test(destination)) {
+    return { destination: '', area };
+  }
   return { destination, area };
 }
 
@@ -34,9 +37,9 @@ function normalizedTokens(value) {
     .filter(token => token && !['the', 'a', 'an', 'hotel', 'hotels', 'venue'].includes(token));
 }
 
-export function pickRideDestination(venues, destination) {
+export function rankRideDestinations(venues, destination) {
   const requestedTokens = normalizedTokens(destination);
-  if (!requestedTokens.length) return null;
+  if (!requestedTokens.length) return [];
   const requested = requestedTokens.join(' ');
   const wantsHotel = /\b(?:hotel|inn|resort)\b/i.test(destination);
   const ranked = (Array.isArray(venues) ? venues : [])
@@ -56,12 +59,31 @@ export function pickRideDestination(venues, destination) {
           overlap / requestedTokens.length,
           requested.includes(venueName) || venueName.includes(requested) ? 0.8 : 0,
         );
-      return { venue, score };
+      return { venue, score, typeText };
     })
     .filter(item => item && item.score >= 0.5)
     .sort((left, right) =>
       right.score - left.score
       || Number(left.venue.distanceMeters ?? Infinity) - Number(right.venue.distanceMeters ?? Infinity),
     );
-  return ranked[0]?.venue || null;
+  return ranked;
+}
+
+export function pickRideDestination(venues, destination) {
+  const ranked = rankRideDestinations(venues, destination);
+  const best = ranked[0];
+  if (!best) return null;
+  const tied = ranked.filter(candidate => candidate.score === best.score);
+  const kind = candidate => {
+    const text = `${candidate.venue?.name || ''} ${candidate.typeText || ''}`.toLowerCase();
+    if (/\b(?:hotel|lodging|resort|inn)\b/.test(text)) return 'lodging';
+    if (/\b(?:theatre|theater|concert hall|performing arts)\b/.test(text)) return 'theatre';
+    if (/\b(?:pub|bar|nightclub|night club)\b/.test(text)) return 'nightlife';
+    if (/\b(?:restaurant|cafe|café|coffee shop)\b/.test(text)) return 'dining';
+    if (/\b(?:station|railway|train)\b/.test(text)) return 'station';
+    if (/\b(?:airport|terminal)\b/.test(text)) return 'airport';
+    return '';
+  };
+  const distinctKinds = new Set(tied.map(kind).filter(Boolean));
+  return distinctKinds.size > 1 ? null : best.venue;
 }
