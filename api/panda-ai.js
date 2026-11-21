@@ -663,6 +663,9 @@ async function gemini(token,projectId,body,cacheContext={},options={}){
   const modelLimit=Number.isInteger(options.modelLimit)
     ?Math.max(1,Math.min(MODELS.length,options.modelLimit))
     :MODELS.length;
+  const timeoutMs=Number.isInteger(options.timeoutMs)
+    ?Math.max(6500,Math.min(15_000,options.timeoutMs))
+    :6500;
   const selectedModels=MODELS.slice(0,modelLimit);
   const key=requestFingerprint({body,cacheContext,modelLimit});
   const cached=recentGemini.get(key);
@@ -694,7 +697,7 @@ async function gemini(token,projectId,body,cacheContext={},options={}){
       const host=region==='global'?'aiplatform.googleapis.com':`${region}-aiplatform.googleapis.com`;
       const url=`https://${host}/v1/projects/${projectId}/locations/${region}/publishers/google/models/${model}:generateContent`;
       const requestBody={...body,generationConfig:{...body.generationConfig,thinkingConfig:model.startsWith('gemini-3')?{thinkingLevel:'MINIMAL'}:{thinkingBudget:0}}};
-      const r=await fetch(url,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify(requestBody),signal:AbortSignal.timeout(6500)});
+      const r=await fetch(url,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify(requestBody),signal:AbortSignal.timeout(timeoutMs)});
       const data=await r.json().catch(()=>({}));
       if(r.ok) {
         const result={ok:true,status:r.status,data};
@@ -1183,7 +1186,7 @@ export default async function handler(req,res){
         projectId,
         baseBody,
         {...cacheLocation,stage:eventSearchQuestion?'grounded-events':priceSearchQuestion?'grounded-prices':'grounded-feel-good-news'},
-        {modelLimit:1},
+        {modelLimit:1,timeoutMs:15_000},
       );
       if(!lookupResponse.ok){
         // Keep a conservative charge on provider failure rather than risk an uncounted retry.
@@ -1264,7 +1267,7 @@ export default async function handler(req,res){
             projectId,
             officialSiteBody,
             {...cacheLocation,stage:'official-site-fallback'},
-            {modelLimit:1},
+            {modelLimit:1,timeoutMs:15_000},
           );
           const officialSiteCandidate=officialSiteResponse.data?.candidates?.[0];
           const officialSiteSearches=groundingQueryCount(officialSiteCandidate);
@@ -1298,7 +1301,7 @@ export default async function handler(req,res){
               projectId,
               verificationBody,
               {...cacheLocation,stage:'official-site-verification-retry'},
-              {modelLimit:1},
+              {modelLimit:1,timeoutMs:15_000},
             );
             const verificationCandidate=verificationResponse.data?.candidates?.[0];
             const verificationSearches=groundingQueryCount(verificationCandidate);
@@ -1333,7 +1336,7 @@ export default async function handler(req,res){
             projectId,
             priceRetryBody,
             {...cacheLocation,stage:'grounded-price-recheck'},
-            {modelLimit:1},
+            {modelLimit:1,timeoutMs:15_000},
           );
           const priceRetryCandidate=priceRetryResponse.data?.candidates?.[0];
           const priceRetrySearches=groundingQueryCount(priceRetryCandidate);

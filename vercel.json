@@ -1,5 +1,8 @@
 {
   "functions": {
+    "api/panda-ai.js": {
+      "maxDuration": 60
+    },
     "api/seed-london.js": {
       "maxDuration": 60
     }
