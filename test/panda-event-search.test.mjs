@@ -151,8 +151,27 @@ test('local event searches resolve only a coarse device location and cache the c
   assert.doesNotMatch(urls[0], /51\.5074|-0\.1278/);
 });
 
-test('event search asks for an area instead of silently defaulting to a global answer', async () => {
-  assert.deepEqual(await resolveEventSearchArea({ text: 'When is Bruce performing next?', apiKey: 'test-key' }), {
+test('show searches go worldwide if neither a named area nor device city is available', async () => {
+  const global = await resolveEventSearchArea({
+    text: 'When is Bruce Springsteen performing next?',
+    apiKey: 'test-key',
+    allowGlobalFallback: true,
+  });
+  assert.deepEqual(global, { area: 'worldwide', source: 'global' });
+  const failedLocalGeocode = await resolveEventSearchArea({
+    text: 'When is Bruce Springsteen performing next?',
+    location: { lat: 51.5074, lng: -0.1278 },
+    apiKey: 'test-key',
+    fetchImpl: async () => ({ ok: false }),
+    allowGlobalFallback: true,
+  });
+  assert.deepEqual(failedLocalGeocode, { area: 'worldwide', source: 'global' });
+  const handler = readFileSync(new URL('../api/panda-ai.js', import.meta.url), 'utf8');
+  assert.match(handler, /resolveEventSearchArea\(\{text:userText,location,apiKey:MAPS_KEY,fetchImpl:fetch,allowGlobalFallback:true\}\)/);
+});
+
+test('price searches still ask for a market instead of assuming worldwide', async () => {
+  assert.deepEqual(await resolveEventSearchArea({ text: '', apiKey: 'test-key' }), {
     area: '',
     source: 'unavailable',
   });
@@ -212,8 +231,13 @@ test('grounding source links accept unique HTTPS pages and exclude search-result
 
 test('live show answers prioritize the last verified show, next date, ticket price and official fallback', () => {
   const prompt = buildLiveShowSearchInstruction('London, United Kingdom', 'device');
+  const explicitPrompt = buildLiveShowSearchInstruction('Malmö', 'explicit');
+  const globalPrompt = buildLiveShowSearchInstruction('worldwide', 'global');
   assert.match(prompt, /most recent confirmed performance.*date, venue and city/i);
   assert.match(prompt, /next confirmed upcoming performance/i);
+  assert.match(prompt, /If no upcoming date is confirmed there, search worldwide/i);
+  assert.match(explicitPrompt, /search that place first.*search worldwide/i);
+  assert.match(globalPrompt, /No destination or device city is available; search worldwide/i);
   assert.match(prompt, /verified official website or official tour page/i);
   assert.match(prompt, /price or range, currency/i);
   assert.match(prompt, /whether fees are included/i);

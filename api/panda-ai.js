@@ -1029,7 +1029,7 @@ export default async function handler(req,res){
       else weatherStatus=result.body.error||'weather_unavailable';
     }
     const eventTarget=eventSearchQuestion
-      ? await resolveEventSearchArea({text:userText,location,apiKey:MAPS_KEY,fetchImpl:fetch})
+      ? await resolveEventSearchArea({text:userText,location,apiKey:MAPS_KEY,fetchImpl:fetch,allowGlobalFallback:true})
       : null;
     const flightPriceQuestion=priceSearchQuestion&&isFlightPriceQuestion(userText);
     const flightRoute=flightPriceQuestion?extractFlightRoute(userText):'';
@@ -1239,7 +1239,7 @@ export default async function handler(req,res){
         ];
         officialSiteAdded=true;
         if(!initialSourceCount){
-          text=`I couldn’t confirm the performer’s latest or next show in ${eventTarget.area} from live event sources. The verified official artist page is linked below for current dates. 🎟️`;
+          text='I couldn’t confirm the performer’s latest or next show from live event sources. The verified official artist page is linked below for current dates. 🎟️';
           lookupStatus='official_site_fallback';
         }
         return true;

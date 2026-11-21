@@ -29,14 +29,18 @@ export async function resolveEventSearchArea({
   apiKey,
   fetchImpl = fetch,
   now = Date.now(),
+  allowGlobalFallback = false,
 } = {}) {
   const explicitArea = extractEventArea(text);
   if (explicitArea) return { area: explicitArea, source: 'explicit' };
+  const unavailable = () => allowGlobalFallback
+    ? { area: 'worldwide', source: 'global' }
+    : { area: '', source: 'unavailable' };
 
   const lat = Number(location?.lat);
   const lng = Number(location?.lng);
   if (!apiKey || !Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
-    return { area: '', source: 'unavailable' };
+    return unavailable();
   }
 
   // Round to roughly kilometre scale: enough to identify a city, without sending
@@ -56,10 +60,10 @@ export async function resolveEventSearchArea({
     const latlng = encodeURIComponent(`${coarseLat.toFixed(2)},${coarseLng.toFixed(2)}`);
     const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${latlng}&result_type=locality%7Cpostal_town%7Cadministrative_area_level_1&key=${apiKey}`;
     const response = await fetchImpl(url);
-    if (!response.ok) return { area: '', source: 'unavailable' };
+    if (!response.ok) return unavailable();
     const data = await response.json();
     const area = localAreaFromResults(data?.results);
-    if (!area) return { area: '', source: 'unavailable' };
+    if (!area) return unavailable();
 
     eventAreaCache.set(key, { area, savedAt: now });
     if (eventAreaCache.size > EVENT_AREA_CACHE_LIMIT) {
@@ -67,7 +71,7 @@ export async function resolveEventSearchArea({
     }
     return { area, source: 'device-location' };
   } catch {
-    return { area: '', source: 'unavailable' };
+    return unavailable();
   }
 }
 
