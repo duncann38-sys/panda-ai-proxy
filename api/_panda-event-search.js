@@ -61,9 +61,11 @@ export function buildLiveShowSearchInstruction(area, source = 'device') {
   return [
     `LIVE PERFORMANCE SEARCH: Use Google Search grounding for the artist named in the conversation. Search area: ${destination}.`,
     source === 'explicit'
-      ? 'The user named this destination; search that place, not the device location.'
-      : 'The user did not name another destination; prioritize the city/region derived from device location. Do not return unrelated global tour dates.',
-    'For a named performer, lead with the most recent confirmed performance you can verify (date, venue and city), then the next confirmed upcoming performance in the requested area. If none is announced, say so plainly and provide a clickable source link to the artist’s verified official website or official tour page.',
+      ? 'The user named this destination; search that place first, not the device location. If no upcoming date is confirmed there, search worldwide for the next confirmed performance and label its city and country.'
+      : source === 'global'
+        ? 'No destination or device city is available; search worldwide and clearly label the city and country for each performance.'
+        : 'The user did not name another destination; prioritize the city/region derived from device location. If no upcoming date is confirmed there, search worldwide for the next confirmed performance and label its city and country.',
+    'For a named performer, lead with the most recent confirmed performance you can verify (date, venue and city/country), then the next confirmed upcoming performance in the requested area or worldwide fallback. If none is announced, say so plainly and provide a clickable source link to the artist’s verified official website or official tour page.',
     'If the artist name is ambiguous, especially a first name alone such as “Bruce”, ask one short clarification instead of guessing the person.',
     'For ticket-cost questions, give a current source-backed price or range, currency, and whether fees are included when the source states it. If no verified price is published, say “ticket price not published or verified”; never estimate or claim availability.',
     'Use only facts supported by the Google grounding sources. Prefer the artist’s official site, venue pages, and authorized ticket sellers; cross-check dates and prices when possible. The app renders up to six clickable source links. Never type or invent raw URLs, prices, fees, or event details.',
