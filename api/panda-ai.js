@@ -26,9 +26,7 @@ import { googleCategoryTags } from './_google-category-tags.js';
 import { classifyIndexedFeedCategory } from './_venue-taxonomy.js';
 import { conciergeTurn, conciergeInstruction, conciergeArea, conciergeTimeWindow, conciergeVenuePage, CONCIERGE_RESULT_LIMIT } from './_panda-concierge-turn.js';
 import { venueOpenAtRequestedTime } from './_panda-dining-hours.js';
-import { createNewRestaurantFeed, createFirestoreNewPool, newVenueDistance } from './_panda-new-restaurants.js';
-import { getVenueProfile } from './_venue-live.js';
-import { OT_BINDINGS } from './_opentable-match.js';
+import { createNewOpeningsFeed, buildNewOpeningSearchPrompt } from './_panda-new-openings.js';
 import {
   boundedInteger,
   cacheablePlacesResult,
@@ -50,27 +48,13 @@ const MODELS = [...new Set([
 const LOCATION = process.env.PANDA_LOCATION || 'us-central1';
 const MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY;
 let coverDiscovery;
-let newRestaurantFeed;
+let newOpeningsFeed;
 function sharedNewFeed() {
-  return newRestaurantFeed ||= createNewRestaurantFeed({
-    readPool: createFirestoreNewPool(db()),
-    hydrateVenue: async row => {
-      const snap = await db().collection(OT_BINDINGS).doc(row.placeId).get();
-      const binding = snap.exists ? snap.data() : null;
-      if (!binding || binding.environment !== 'production' || binding.placeId !== row.placeId
-        || String(binding.rid) !== row.rid || Number(binding.expiresAt) <= Date.now()) {
-        throw new Error('new_selection_binding_unavailable');
-      }
-      const budget = await consumeDailyBudget(db(), 'places', process.env.PANDA_DAILY_PLACES_LIMIT);
-      if (!budget.allowed) throw new Error('new_selection_budget_unavailable');
-      const venue = await getVenueProfile(row.placeId);
-      if (!venue || venue.id !== row.placeId || !Number.isFinite(venue.latitude)
-        || !Number.isFinite(venue.longitude)
-        || newVenueDistance(row, { lat: venue.latitude, lng: venue.longitude }) > 150) return null;
-      return { ...venue, type: venue.primaryType, lat: venue.latitude, lng: venue.longitude,
-        photoName: venue.photoNames?.[0]?.name, photoCount: venue.photoNames?.length ?? 0,
-        photoAttribution: venue.photoNames?.[0]?.attribution ?? '' };
-    },
+  return newOpeningsFeed ||= createNewOpeningsFeed({
+    store: db(),
+    reverseGeocode: reverseGeocodeOpeningCity,
+    searchGrounded: searchGroundedOpenings,
+    hydratePlace: searchOpeningPlace,
   });
 }
 const DEFAULT_LAT = 51.5074, DEFAULT_LNG = -0.1278;
@@ -150,6 +134,43 @@ async function geocodeArea(area){
     if(store){ try{ await store.collection(GEO_COLLECTION).doc(id).set({...out, area:clean, ts:Date.now()}); }catch(e){} }
     return out;
   }catch(e){ return null; }
+}
+async function reverseGeocodeOpeningCity({lat,lng}){
+  if(!MAPS_KEY || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  const gridLat=(Math.round(lat*100)/100).toFixed(2);
+  const gridLng=(Math.round(lng*100)/100).toFixed(2);
+  const key=Buffer.from(gridLat+','+gridLng).toString('base64url').slice(0,80);
+  const store=db();
+  const collection='new_openings_geocode_v1';
+  if(store){
+    try{
+      const snap=await store.collection(collection).doc(key).get();
+      const value=snap.exists?snap.data():null;
+      if(value && Date.now()-Number(value.ts||0)<30*24*60*60_000) return value.cityInfo||null;
+    }catch{}
+  }
+  try{
+    const resultTypes=encodeURIComponent('locality|postal_town|administrative_area_level_2');
+    const url='https://maps.googleapis.com/maps/api/geocode/json?latlng='+encodeURIComponent(gridLat+','+gridLng)+'&result_type='+resultTypes+'&key='+MAPS_KEY;
+    const response=await fetch(url,{signal:AbortSignal.timeout(10000)});
+    if(!response.ok) return null;
+    const data=await response.json();
+    const results=Array.isArray(data.results)?data.results:[];
+    const preferred=results.find(result=>(result.address_components||[]).some(component=>component.types?.includes('postal_town')))
+      ||results.find(result=>(result.address_components||[]).some(component=>component.types?.includes('locality')))
+      ||results.find(result=>(result.address_components||[]).some(component=>component.types?.includes('administrative_area_level_2')));
+    if(!preferred) return null;
+    const components=preferred.address_components||[];
+    const pick=(type)=>components.find(component=>component.types?.includes(type));
+    const cityComponent=pick('postal_town')||pick('locality')||pick('administrative_area_level_2');
+    const countryComponent=pick('country');
+    const location=preferred.geometry?.location;
+    if(!cityComponent?.long_name||!countryComponent?.long_name||!countryComponent?.short_name
+      ||!Number.isFinite(location?.lat)||!Number.isFinite(location?.lng)) return null;
+    const cityInfo={city:cityComponent.long_name,country:countryComponent.long_name,countryCode:countryComponent.short_name.toLowerCase(),lat:location.lat,lng:location.lng};
+    if(store){try{await store.collection(collection).doc(key).set({cityInfo,ts:Date.now()});}catch{}}
+    return cityInfo;
+  }catch{return null;}
 }
 function cacheKey(query,lat,lng,openNow,pageToken){
   const gLat=Math.round(lat*CACHE_GRID)/CACHE_GRID;
@@ -757,6 +778,69 @@ const FIND_PLACES_TOOL={functionDeclarations:[{
     area:{type:'string',description:"Optional. A neighbourhood, area, postcode or landmark to centre the search on, e.g. 'Mayfair', 'Shoreditch', 'SW1A', 'near Borough Market'. Omit entirely for 'near me' searches."}
   },required:['query']}
 }]};
+async function vertexGroundingContext(){
+  let credentials;
+  try{credentials=JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT||'');}catch{throw new Error('google_credentials_unavailable');}
+  if(!credentials?.project_id) throw new Error('google_project_unavailable');
+  if(!vertexAuth) vertexAuth=new GoogleAuth({credentials,scopes:['https://www.googleapis.com/auth/cloud-platform']});
+  const client=await vertexAuth.getClient();
+  const access=await client.getAccessToken();
+  const token=typeof access==='string'?access:access?.token;
+  if(!token) throw new Error('google_access_token_unavailable');
+  return {token,projectId:credentials.project_id};
+}
+
+async function searchGroundedOpenings({city,country,maxCandidates}){
+  const store=db();
+  const configuredLimit=process.env.PANDA_LIVE_LOOKUP_MONTHLY_LIMIT??process.env.PANDA_EVENT_GROUNDING_MONTHLY_LIMIT;
+  const monthlyLimit=boundedInteger(configuredLimit,10000,1,10000);
+  const reservation=await reserveEventGroundingBudget(store,monthlyLimit,20);
+  if(!reservation.allowed) return {ok:false,budgetExceeded:reservation.reason==='limit'};
+  try{
+    const {token,projectId}=await vertexGroundingContext();
+    const prompt=buildNewOpeningSearchPrompt({city,country,maxCandidates});
+    const response=await gemini(token,projectId,{
+      contents:[{role:'user',parts:[{text:prompt}]}],
+      tools:[{googleSearch:{}}],
+      generationConfig:{temperature:1.0,maxOutputTokens:6500},
+    },{stage:'grounded-new-openings',city,country},{modelLimit:1,timeoutMs:15000});
+    if(!response.ok){await settleEventGroundingBudget(store,reservation,10);return {ok:false};}
+    const candidate=response.data?.candidates?.[0];
+    const queries=groundingQueryCount(candidate);
+    await settleEventGroundingBudget(store,reservation,queries);
+    recordCostEvent('new_openings_grounding_query_count',{count:queries});
+    if(!queries) return {ok:false};
+    const text=(candidate?.content?.parts||[]).map(part=>typeof part?.text==='string'?part.text:'').filter(Boolean).join('\n');
+    return {ok:true,text,groundingMetadata:candidate?.groundingMetadata||{}};
+  }catch{
+    await settleEventGroundingBudget(store,reservation,10);
+    return {ok:false};
+  }
+}
+
+async function searchOpeningPlace(candidate,city){
+  if(!MAPS_KEY) throw new Error('places_key_unavailable');
+  const budget=await consumeDailyBudget(db(),'places',process.env.PANDA_DAILY_PLACES_LIMIT);
+  if(!budget.allowed) throw new Error('places_budget_exceeded');
+  const query=[candidate.name,candidate.cuisine,city.city,city.country].filter(Boolean).join(' ');
+  const majorCity=/^(london|new york|paris|tokyo|dubai|los angeles|singapore|hong kong)$/i.test(city.city);
+  const radiusMeters=majorCity?50000:30000;
+  const fieldMask=[
+    'places.id','places.displayName','places.formattedAddress','places.location','places.businessStatus',
+    'places.priceLevel','places.rating','places.userRatingCount','places.regularOpeningHours.weekdayDescriptions',
+    'places.currentOpeningHours.openNow','places.photos.name','places.photos.authorAttributions',
+    'places.websiteUri','places.googleMapsUri','places.primaryType','places.primaryTypeDisplayName'
+  ].join(',');
+  const response=await fetch('https://places.googleapis.com/v1/places:searchText',{
+    method:'POST',headers:{'Content-Type':'application/json','X-Goog-Api-Key':MAPS_KEY,'X-Goog-FieldMask':fieldMask},
+    body:JSON.stringify({textQuery:query,maxResultCount:5,locationBias:{circle:{center:{latitude:city.lat,longitude:city.lng},radius:radiusMeters}}}),
+    signal:AbortSignal.timeout(10000),
+  });
+  if(!response.ok) throw new Error('places_search_failed');
+  const data=await response.json().catch(()=>({}));
+  return Array.isArray(data.places)?data.places:[];
+}
+
 export default async function handler(req,res){
   if(applyGuard(req,res,{methods:['GET','POST','OPTIONS'],limit:true})) return;
   if (isSandboxReservationRequest(req)) {
@@ -773,13 +857,15 @@ export default async function handler(req,res){
       const area = typeof body.area === 'string' ? body.area.slice(0,120) : extractArea(turn.searchText);
       const centre = area ? await geocodeArea(area) : location;
       if (area && !centre) return res.status(200).json({status:'area_unavailable',
-        newOpeningsSearch:true,venues:[],text:`I couldn’t locate ${area} reliably. Please give me the town or postcode.`});
+        newOpeningsSearch:true,venues:[],text:'I couldn’t locate '+area+' reliably. Please give me the town or postcode.'});
       try {
-        const result = await sharedNewFeed()({location:centre,excludedPlaceIds:turn.excludedPlaceIds});
+        const clientExcluded = Array.isArray(body.excludedPlaceIds) ? body.excludedPlaceIds.filter(id => typeof id === 'string').slice(-500) : [];
+        const excludedPlaceIds = [...new Set([...(turn.excludedPlaceIds || []), ...clientExcluded])].slice(-500);
+        const result = await sharedNewFeed()({location:centre,offset:body.offset,limit:body.limit,excludedPlaceIds});
         return res.status(200).json({...result,area:area || null});
       } catch {
         return res.status(503).json({status:'verification_unavailable',newOpeningsSearch:true,venues:[],
-          text:'The OpenTable New selection could not be verified just now. Please try again shortly; I won’t substitute ordinary restaurants.'});
+          text:'Panda couldn’t verify new openings just now, so I won’t guess. Please try again shortly.'});
       }
     }
     if(body.weatherOnly===true){
@@ -1428,7 +1514,7 @@ export default async function handler(req,res){
       const b=req.body||{};const loc=b.location||{};const lat=loc.lat??DEFAULT_LAT,lng=loc.lng??DEFAULT_LNG;
       if (b.newOpeningsOnly === true || conciergeTurn(b.contents).wantsNew) {
         res.status(503).json({status:'verification_unavailable',newOpeningsSearch:true,venues:[],
-          text:'The OpenTable New selection could not be verified just now. I won’t substitute ordinary restaurants.'});return;
+          text:'Panda couldn’t verify recent openings just now. I won’t substitute ordinary restaurants.'});return;
       }
       if (conciergeTimeWindow(conciergeTurn(b.contents).searchText,b.chatContext).lateDinner) {
         res.status(503).json({venues:[],text:'I couldn’t verify the late-night opening hours just now. I won’t guess which kitchens are still serving.'});return;

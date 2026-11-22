@@ -5,6 +5,15 @@
     },
     "api/seed-london.js": {
       "maxDuration": 60
+    },
+    "api/discovery/new-openings.js": {
+      "maxDuration": 60
+    },
+    "api/new-openings-notifications.js": {
+      "maxDuration": 60
+    },
+    "api/new-openings-weekly.js": {
+      "maxDuration": 60
     }
   }
 }
