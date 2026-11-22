@@ -790,7 +790,7 @@ async function vertexGroundingContext(){
   return {token,projectId:credentials.project_id};
 }
 
-async function searchGroundedOpenings({city,country,maxCandidates}){
+async function searchGroundedOpenings({city,country,maxCandidates,focus}){
   const store=db();
   const configuredLimit=process.env.PANDA_LIVE_LOOKUP_MONTHLY_LIMIT??process.env.PANDA_EVENT_GROUNDING_MONTHLY_LIMIT;
   const monthlyLimit=boundedInteger(configuredLimit,10000,1,10000);
@@ -798,7 +798,7 @@ async function searchGroundedOpenings({city,country,maxCandidates}){
   if(!reservation.allowed) return {ok:false,budgetExceeded:reservation.reason==='limit'};
   try{
     const {token,projectId}=await vertexGroundingContext();
-    const prompt=buildNewOpeningSearchPrompt({city,country,maxCandidates});
+    const prompt=buildNewOpeningSearchPrompt({city,country,focus,maxCandidates});
     const response=await gemini(token,projectId,{
       contents:[{role:'user',parts:[{text:prompt}]}],
       tools:[{googleSearch:{}}],

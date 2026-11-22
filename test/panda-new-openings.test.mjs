@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  NEW_OPENINGS_CACHE_MS, buildNewOpeningSearchPrompt, createNewOpeningsFeed,
+  NEW_OPENINGS_CACHE_MS, NEW_OPENINGS_SEARCH_VERSION, buildNewOpeningSearchPrompt, createNewOpeningsFeed,
   normalizeCitySlug, openingPlaceIsEligible, parseGroundedOpeningCandidates, parseGroundedOpeningCandidatesDetailed,
 } from '../api/_panda-new-openings.js';
 
@@ -39,6 +39,8 @@ test('uses stable city-country cache slugs and appropriate candidate limits', ()
   assert.match(buildNewOpeningSearchPrompt({ city: 'London', country: 'UK', now: NOW, maxCandidates: 40 }), /up to 40/);
   assert.match(buildNewOpeningSearchPrompt({ city: 'Malmö', country: 'Sweden', now: NOW }), /no more than 15/);
   assert.match(buildNewOpeningSearchPrompt({ city: 'London', country: 'UK', now: NOW }), /new restaurants London/);
+  assert.match(buildNewOpeningSearchPrompt({ city: 'London', country: 'UK', focus: 'Zone 1–3 central areas', now: NOW }), /Search specifically within these neighborhoods/);
+  assert.match(buildNewOpeningSearchPrompt({ city: 'London', country: 'UK', now: NOW }), /hotel restaurant, cocktail bar, wine bar/);
 });
 
 test('accepts only recent dated premium independent candidates with grounded sources', () => {
@@ -60,7 +62,7 @@ test('reports grounding-stage rejection counts without exposing candidate text',
   assert.equal(invalid.candidates.length, 0);
   assert.equal(invalid.diagnostics.jsonArrayFound, false);
   assert.equal(invalid.diagnostics.groundingChunkCount, 0);
-  assert.equal(invalid.diagnostics.version, 2);
+  assert.equal(invalid.diagnostics.version, 3);
   const missingSource = parseGroundedOpeningCandidatesDetailed({ text: JSON.stringify([candidate]), groundingMetadata: { groundingChunks: [] } }, { city: 'London', country: 'UK', now: NOW });
   assert.equal(missingSource.diagnostics.parsedItems, 1);
   assert.equal(missingSource.diagnostics.rejected.noGroundedSource, 1);
@@ -94,7 +96,7 @@ test('rejects non-operational, moderate, poorly rated, or over-established place
 test('limits pages to 15, advances, avoids repeats, and wraps at the end', async () => {
   const store = makeStore();
   const venues = Array.from({ length: 22 }, (_, i) => ({ id: 'ChI' + String(i).padStart(12, '0'), name: 'Place ' + i, lat: 59.9 + i / 1000, lng: 10.7, openingDate: '2026-11-02' }));
-  await store.collection('new_openings_by_city').doc('oslo-no').set({ updatedAt: NOW, venues });
+  await store.collection('new_openings_by_city').doc('oslo-no').set({ updatedAt: NOW, searchVersion: NEW_OPENINGS_SEARCH_VERSION, venues });
   const feed = createNewOpeningsFeed({ store, reverseGeocode, searchGrounded: async () => { throw new Error('must use fresh cache'); }, hydratePlace: async () => { throw new Error('must use fresh cache'); }, now: () => NOW });
   const first = await feed({ location: { lat: 59.91, lng: 10.75 }, limit: 50 });
   assert.equal(first.venues.length, 15); assert.equal(first.nextOffset, 15); assert.equal(first.hasMore, true);
@@ -109,6 +111,25 @@ test('limits pages to 15, advances, avoids repeats, and wraps at the end', async
   assert.match(freshRotation.text, /fresh rotation/);
 });
 
+
+
+test('searches London in priority passes without exposing zone labels in results', async () => {
+  const store = makeStore(); const focuses = [];
+  const feed = createNewOpeningsFeed({ store,
+    reverseGeocode: async () => ({ city: 'London', country: 'United Kingdom', countryCode: 'GB', lat: 51.5074, lng: -0.1278 }),
+    searchGrounded: async ({ focus }) => { focuses.push(focus); return { ok: true, queryCount: 2, text: '[]', groundingMetadata: { groundingChunks: [], webSearchQueries: ['new restaurants London'] } }; },
+    hydratePlace: async () => { throw new Error('no candidates should be hydrated'); }, now: () => NOW,
+  });
+  const result = await feed({ location: { lat: 51.5074, lng: -0.1278 } });
+  assert.equal(focuses.length, 3);
+  assert.match(focuses[0], /highest-priority inner zones/);
+  assert.match(focuses[1], /next priority ring/);
+  assert.match(focuses[2], /outer-London/);
+  assert.equal(result.status, 'no_results');
+  assert.equal(result.diagnostics.searchPassCount, 3);
+  assert.equal(result.diagnostics.groundingQueryCount, 6);
+  assert.equal(JSON.stringify(result).includes('zone1-3'), false);
+});
 
 test('reports whether the live venue verification stage rejected grounded candidates', async () => {
   const store = makeStore();

@@ -5,8 +5,9 @@ export const NEW_OPENINGS_REFRESH_COLLECTION = 'new_openings_refresh_state';
 export const NEW_OPENINGS_CACHE_MS = 7 * DAY_MS;
 export const NEW_OPENINGS_MAX_PAGE_SIZE = 15;
 export const NEW_OPENINGS_MAX_MAJOR_CANDIDATES = 40;
+export const NEW_OPENINGS_SEARCH_VERSION = 3;
 const EMPTY_RETRY_MS = 24 * 60 * 60_000;
-const PREMIUM_SIGNAL = /\b(high[ -]end|fine[ -]dining|michelin|chef[ -]led|celebrated chef|renowned chef|critically acclaimed|luxury|upscale|premium|tasting menu|signature dining|cocktail lounge|rooftop bar|hotel dining|destination restaurant|award[ -]winning (?:chef|restaurant)|exclusive dining|special[ -]occasion dining|world[ -]class)\b|£{3,4}/i;
+const PREMIUM_SIGNAL = /\b(high[ -]end|fine[ -]dining|michelin|chef[ -]led|celebrated chef|renowned chef|critically acclaimed|luxury|upscale|premium|tasting menu|signature dining|cocktail lounge|cocktail bar|wine bar|rooftop bar|destination bar|hotel bar|hotel dining|hotel restaurant|luxury hotel restaurant|destination restaurant|gastropub|upscale pub|high[ -]end pub|destination pub|award[ -]winning (?:chef|restaurant|pub|bar)|exclusive dining|special[ -]occasion dining|world[ -]class|mixology)\b|£{3,4}/i;
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 export function validCoordinates(lat, lng) {
@@ -37,6 +38,34 @@ function openingDiagnosticText(diagnostics, city) {
   }
   if (diagnostics?.stage === 'places') return 'I found recent opening reports for ' + city + ', but Google Places could not confirm matching venues that meet Panda’s checks. I won’t label ordinary restaurants as new.';
   return 'I couldn’t verify recent high-end openings in ' + city + ' yet. Try again later or name another city.';
+}
+
+function mergeOpeningSearchResults(searchResults, { city, country, now, maxCandidates }) {
+  const successful = searchResults.filter(result => result?.ok);
+  const parsedRounds = successful.map(result => parseGroundedOpeningCandidatesDetailed(result, { city, country, now, max: maxCandidates }));
+  const rejectedKeys = ['invalidName','duplicate','invalidDate','missingEvidence','notIndependent','notPremium','noGroundedSource','evidenceNameMismatch'];
+  const diagnostics = { version: 3, stage: 'grounding', jsonArrayFound: parsedRounds.some(item => item.diagnostics.jsonArrayFound),
+    textChars: parsedRounds.reduce((sum,item) => sum + item.diagnostics.textChars,0),
+    groundingChunkCount: parsedRounds.reduce((sum,item) => sum + item.diagnostics.groundingChunkCount,0),
+    parsedItems: parsedRounds.reduce((sum,item) => sum + item.diagnostics.parsedItems,0),
+    sourceMatchedItems: parsedRounds.reduce((sum,item) => sum + item.diagnostics.sourceMatchedItems,0),
+    sourceViaGroundingSupport: parsedRounds.reduce((sum,item) => sum + item.diagnostics.sourceViaGroundingSupport,0),
+    sourceViaTitleMatch: parsedRounds.reduce((sum,item) => sum + item.diagnostics.sourceViaTitleMatch,0),
+    sourceViaGoogleSearch: parsedRounds.reduce((sum,item) => sum + item.diagnostics.sourceViaGoogleSearch,0),
+    acceptedItems: 0, groundingQueryCount: successful.reduce((sum,item) => sum + (Number(item.queryCount)||0),0),
+    searchPassCount: searchResults.length, searchPassFailures: searchResults.length - successful.length,
+    rejected: Object.fromEntries(rejectedKeys.map(key => [key, parsedRounds.reduce((sum,item) => sum + (item.diagnostics.rejected[key]||0),0)])),
+  };
+  const candidates = [];
+  const seen = new Set();
+  for (const round of parsedRounds) for (const candidate of round.candidates) {
+    const key = normalizedName(candidate.name);
+    if (!key || seen.has(key)) { diagnostics.rejected.duplicate++; continue; }
+    seen.add(key); candidates.push(candidate);
+    if (candidates.length >= maxCandidates) break;
+  }
+  diagnostics.acceptedItems = candidates.length;
+  return { candidates, diagnostics };
 }
 
 function normalizedUrl(value) {
@@ -118,7 +147,7 @@ export function parseGroundedOpeningCandidatesDetailed(response, { city, country
   const raw = safeText(response?.text, 60_000);
   const match = raw.match(/\[[\s\S]*\]/);
   const chunks = response?.groundingMetadata?.groundingChunks || [];
-  const diagnostics = { version: 2, stage: 'grounding', jsonArrayFound: Boolean(match), textChars: raw.length,
+  const diagnostics = { version: 3, stage: 'grounding', jsonArrayFound: Boolean(match), textChars: raw.length,
     groundingChunkCount: chunks.length, parsedItems: 0, sourceMatchedItems: 0, sourceViaGroundingSupport: 0, sourceViaTitleMatch: 0, sourceViaGoogleSearch: 0, acceptedItems: 0,
     rejected: { invalidName: 0, duplicate: 0, invalidDate: 0, missingEvidence: 0,
       notIndependent: 0, notPremium: 0, noGroundedSource: 0, evidenceNameMismatch: 0 } };
@@ -139,6 +168,7 @@ export function parseGroundedOpeningCandidatesDetailed(response, { city, country
     const independenceEvidence = safeText(item.independenceEvidence, 500);
     const editorialNote = safeText(item.editorialNote, 320);
     const cuisine = safeText(item.cuisine, 100);
+    const venueType = safeText(item.venueType, 60);
     const url = safeText(item.sourceUrl, 1200);
     const key = name.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '');
     if (!name || key.length < 3) { diagnostics.rejected.invalidName++; continue; }
@@ -156,7 +186,7 @@ export function parseGroundedOpeningCandidatesDetailed(response, { city, country
     if (!evidence.toLowerCase().includes(name.toLowerCase().split(' ')[0])) { diagnostics.rejected.evidenceNameMismatch++; continue; }
     seen.add(key);
     accepted.push({ name, openingDate, openingEvidence: evidence, positioningEvidence: positioning,
-      editorialNote, cuisine, independentVenue, independenceEvidence, sourceUrl: source.url, sourceName: source.title, sourceType: source.matchType,
+      editorialNote, cuisine, venueType, independentVenue, independenceEvidence, sourceUrl: source.url, sourceName: source.title, sourceType: source.matchType,
       city: safeText(city, 100), country: safeText(country, 100) });
     if (accepted.length >= Math.min(NEW_OPENINGS_MAX_MAJOR_CANDIDATES, Math.max(1, max))) break;
   }
@@ -168,17 +198,19 @@ export function parseGroundedOpeningCandidates(response, options = {}) {
   return parseGroundedOpeningCandidatesDetailed(response, options).candidates;
 }
 
-export function buildNewOpeningSearchPrompt({ city, country, now = Date.now(), maxCandidates = 15 } = {}) {
+export function buildNewOpeningSearchPrompt({ city, country, focus = '', now = Date.now(), maxCandidates = 15 } = {}) {
   const today = new Date(now).toISOString().slice(0, 10);
   const cap = Math.max(1, Math.min(NEW_OPENINGS_MAX_MAJOR_CANDIDATES, Number(maxCandidates) || 15));
   const major = /^(london|new york|paris|tokyo|dubai|los angeles|singapore|hong kong)$/i.test(String(city || '').trim());
-  const districts = /^london$/i.test(String(city || '').trim())
-    ? ' Search London districts including Mayfair, Soho, Marylebone, Chelsea, Knightsbridge, Fitzrovia, Shoreditch, Covent Garden, City of London, Notting Hill, Kensington and Battersea.' : '';
-  return 'Use Google Search grounding to identify up to ' + cap + ' distinct high-end restaurant or cocktail-dining openings in ' + city + ', ' + country + ' that actually opened to the public in the last 60 days as of ' + today + '.'
+  const districts = String(focus || '').trim()
+    ? ' Search specifically within these neighborhoods: ' + String(focus).slice(0, 500) + '. Do not substitute openings elsewhere in the city.'
+    : /^london$/i.test(String(city || '').trim())
+      ? ' Search London districts including Mayfair, Soho, Marylebone, Chelsea, Knightsbridge, Fitzrovia, Shoreditch, Covent Garden, City of London, Notting Hill, Kensington and Battersea.' : '';
+  return 'Use Google Search grounding to identify up to ' + cap + ' distinct high-end restaurant, pub, hotel restaurant, cocktail bar, wine bar or bar openings in ' + city + ', ' + country + ' that actually opened to the public in the last 60 days as of ' + today + '.'
     + ' Search several complementary angles, including “new restaurants ' + city + '”, “recently opened restaurants ' + city + ' ' + today.slice(0, 4) + '”, and “new independent high-end restaurant openings ' + city + '”.'
-    + ' Include fine dining, chef-led restaurants, luxury hotel dining and genuinely upscale cocktail dining lounges. Exclude chains, multi-location brands, cafes, casual fast food, announced or future venues, and places with no dated opening evidence.'
+    + ' Include high-end independent restaurants, gastropubs and pubs, hotel restaurants, cocktail bars, wine bars, rooftop bars and destination lounges. Include a hotel restaurant when it is a distinct single venue, even if the hotel group has multiple properties; exclude restaurant/pub/bar chains and multi-location dining brands. Exclude cafes, casual fast food, announced or future venues, and places with no dated opening evidence.'
     + districts
-    + ' Return only a JSON array. Each object must have name, openingDate (YYYY-MM-DD), openingEvidence (short factual statement including the opening date and venue name), positioningEvidence (a source-backed phrase explaining the high-end positioning, using explicit evidence such as high-end, Michelin, fine dining, a celebrated chef, a tasting menu, luxury-hotel dining, or premium pricing where the source supports it), independentVenue (must be true only when evidence shows it is not a chain), independenceEvidence (a source-backed explanation that it is an independent/single-venue operator), editorialNote (one concise sentence), cuisine, and sourceUrl (exact publisher HTTPS URL from a Google Search grounding chunk when available; otherwise leave empty). Do not invent dates, sources or venues; Panda may provide a clearly labeled Google Search verification link. If fewer than ' + cap + ' are verifiable, return fewer.'
+    + ' Return only a JSON array. Each object must have name, openingDate (YYYY-MM-DD), openingEvidence (short factual statement including the opening date and venue name), positioningEvidence (a source-backed phrase explaining the high-end positioning, using explicit evidence such as high-end, Michelin, fine dining, a celebrated chef, a tasting menu, luxury-hotel dining, or premium pricing where the source supports it), independentVenue (true for a one-off restaurant/pub/bar or a distinct hotel restaurant, false for a restaurant/pub/bar chain), independenceEvidence (source-backed evidence it is a one-off venue or distinct hotel restaurant), editorialNote (one concise sentence), cuisine, venueType (restaurant, pub, gastropub, hotel restaurant, cocktail bar, wine bar, rooftop bar or similar), and sourceUrl (exact publisher HTTPS URL from a Google Search grounding chunk when available; otherwise leave empty). Do not invent dates, sources or venues; Panda may provide a clearly labeled Google Search verification link. If fewer than ' + cap + ' are verifiable, return fewer.'
     + (major ? ' Prioritize well-documented openings across the city rather than one neighborhood.' : ' Return no more than 15 candidates for this regional city or town.');
 }
 
@@ -242,7 +274,7 @@ function normalizeVerifiedVenue(place, candidate, cityInfo, now) {
     name: safeText(place.displayName?.text || place.name, 140),
     address: safeText(place.formattedAddress, 240),
     fullAddress: safeText(place.formattedAddress, 240),
-    type: candidate.cuisine || place.primaryTypeDisplayName?.text || place.primaryType || 'Restaurant',
+    type: candidate.venueType || candidate.cuisine || place.primaryTypeDisplayName?.text || place.primaryType || 'Restaurant',
     lat: Number(location.latitude), lng: Number(location.longitude),
     rating: Number.isFinite(Number(place.rating)) ? Number(place.rating) : null,
     ratingCount: Number(place.userRatingCount || 0),
@@ -294,11 +326,11 @@ export function createNewOpeningsFeed({
     if (!store) return { status: 'storage_unavailable', venues: [] };
     const old = await readDocument(store, NEW_OPENINGS_COLLECTION, city.slug);
     const oldUpdatedAt = epoch(old?.updatedAt);
-    if (Array.isArray(old?.venues) && old.venues.length > 0 && now() - oldUpdatedAt < NEW_OPENINGS_CACHE_MS) {
+    if (Array.isArray(old?.venues) && old.venues.length > 0 && old.searchVersion === NEW_OPENINGS_SEARCH_VERSION && now() - oldUpdatedAt < NEW_OPENINGS_CACHE_MS) {
       return { status: 'ready', venues: old.venues, updatedAt: oldUpdatedAt, newlyAddedPlaceIds: [], cached: true, diagnostics: old.diagnostics };
     }
     const emptyState = await readDocument(store, NEW_OPENINGS_REFRESH_COLLECTION, city.slug);
-    if (emptyState?.diagnostics?.version === 2 && epoch(emptyState?.lastEmptyAt) && now() - epoch(emptyState.lastEmptyAt) < EMPTY_RETRY_MS) {
+    if (emptyState?.diagnostics?.version === 3 && epoch(emptyState?.lastEmptyAt) && now() - epoch(emptyState.lastEmptyAt) < EMPTY_RETRY_MS) {
       return { status: 'no_results', venues: [], updatedAt: epoch(emptyState.lastEmptyAt), newlyAddedPlaceIds: [], cached: true,
         diagnostics: emptyState.diagnostics, text: openingDiagnosticText(emptyState.diagnostics, city.city) };
     }
@@ -306,12 +338,32 @@ export function createNewOpeningsFeed({
     const task = (async () => {
       const major = /^(london|new york|paris|tokyo|dubai|los angeles|singapore|hong kong)$/i.test(city.city);
       const maxCandidates = major ? NEW_OPENINGS_MAX_MAJOR_CANDIDATES : 15;
-      const search = await searchGrounded({ city: city.city, country: city.country, center: { lat: city.lat, lng: city.lng }, maxCandidates });
-      if (!search?.ok) return { status: search?.budgetExceeded ? 'monthly_limit' : 'search_unavailable', venues: [], newlyAddedPlaceIds: [],
-        diagnostics: { version: 2, stage: 'grounding', reason: search?.budgetExceeded ? 'monthly_limit' : 'search_unavailable' } };
-      const parsed = parseGroundedOpeningCandidatesDetailed(search, { city: city.city, country: city.country, now: now(), max: maxCandidates });
+      const london = /^london$/i.test(city.city);
+      const searchPlans = london ? [
+        'Central London areas normally associated with the highest-priority inner zones: Mayfair, Soho, Covent Garden, Fitzrovia, Marylebone, Holborn, Bloomsbury, City of London and South Bank. Search these first; do not output fare-zone labels.',
+        'Additional London areas in the next priority ring, including Hammersmith, Stratford, Canary Wharf, Acton, Ealing, Wimbledon and Greenwich. Search only after the central-area pass; do not output fare-zone labels.',
+        'Further outer-London areas through the wider priority catchment. Search only after the inner-area passes; include verified venue addresses and do not output fare-zone labels.',
+      ] : [''];
+      const searchResults = [];
+      const firstPlan = searchPlans[0];
+      searchResults.push(await searchGrounded({ city: city.city, country: city.country, center: { lat: city.lat, lng: city.lng }, maxCandidates: london ? 20 : maxCandidates, focus: firstPlan }));
+      const firstParsed = searchResults[0]?.ok
+        ? parseGroundedOpeningCandidatesDetailed(searchResults[0], { city: city.city, country: city.country, now: now(), max: london ? 20 : maxCandidates })
+        : null;
+      if (searchPlans.length > 1 && (!firstParsed || firstParsed.candidates.length < maxCandidates)) {
+        const supplemental = await Promise.all(searchPlans.slice(1).map(focus => searchGrounded({ city: city.city, country: city.country,
+          center: { lat: city.lat, lng: city.lng }, maxCandidates: 20, focus })));
+        searchResults.push(...supplemental);
+      }
+      if (!searchResults.some(result => result?.ok)) {
+        const budgetExceeded = searchResults.some(result => result?.budgetExceeded);
+        return { status: budgetExceeded ? 'monthly_limit' : 'search_unavailable', venues: [], newlyAddedPlaceIds: [],
+          diagnostics: { version: 3, stage: 'grounding', reason: budgetExceeded ? 'monthly_limit' : 'search_unavailable',
+            searchPassCount: searchResults.length, searchPassFailures: searchResults.length } };
+      }
+      const parsed = mergeOpeningSearchResults(searchResults, { city: city.city, country: city.country, now: now(), maxCandidates });
       const candidates = parsed.candidates;
-      const diagnostics = { ...parsed.diagnostics, groundingQueryCount: Number(search.queryCount) || 0,
+      const diagnostics = { ...parsed.diagnostics,
         placeLookupCount: 0, placeLookupFailures: 0, placeIneligibleResults: 0, placeNameMismatches: 0, placeMatches: 0 };
       if (!candidates.length) {
         const updatedAt = now();
@@ -354,7 +406,7 @@ export function createNewOpeningsFeed({
       const updatedAt = now();
       diagnostics.stage = 'complete';
       const document = { city: city.city, country: city.country, countryCode: city.countryCode,
-        citySlug: city.slug, center: { lat: city.lat, lng: city.lng }, updatedAt,
+        citySlug: city.slug, center: { lat: city.lat, lng: city.lng }, updatedAt, searchVersion: NEW_OPENINGS_SEARCH_VERSION,
         venues: verified.slice(0, NEW_OPENINGS_MAX_MAJOR_CANDIDATES), newlyAddedPlaceIds, diagnostics };
       await store.collection(NEW_OPENINGS_COLLECTION).doc(city.slug).set(document);
       if (newlyAddedPlaceIds.length) {
