@@ -1,0 +1,22 @@
+name: Panda weekly new openings
+on:
+  schedule:
+    # Both UTC slots map to Friday 15:00 in Europe/London; the API rejects the unused DST slot.
+    - cron: '0 14,15 * * 5'
+permissions:
+  contents: read
+  id-token: write
+concurrency:
+  group: panda-weekly-new-openings
+  cancel-in-progress: false
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Send the verified weekly opening digest
+        run: node scripts/send-new-openings-weekly.mjs https://panda-ai-proxy.vercel.app
