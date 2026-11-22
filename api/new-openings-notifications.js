@@ -140,7 +140,7 @@ export default async function handler(req, res) {
       }
       await Promise.all(consumed.map(ref => ref.set({ seenInChat: true, seenInChatAt: Date.now() }, { merge: true })));
       return res.status(200).json({ status: 'ready', newOpeningsSearch: true, venues, text: venues.length
-        ? 'A few new high-end openings are worth a look â¨ Here are the latest verified picks for your city.' : '',
+        ? 'A few new high-end openings are worth a look ✨ Here are the latest verified picks for your city.' : '',
       });
     } catch { return res.status(503).json({ status: 'notification_storage_unavailable', venues: [] }); }
   }
