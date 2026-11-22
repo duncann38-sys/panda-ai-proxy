@@ -5,7 +5,8 @@ export const NEW_OPENINGS_REFRESH_COLLECTION = 'new_openings_refresh_state';
 export const NEW_OPENINGS_CACHE_MS = 7 * DAY_MS;
 export const NEW_OPENINGS_MAX_PAGE_SIZE = 15;
 export const NEW_OPENINGS_MAX_MAJOR_CANDIDATES = 40;
-export const NEW_OPENINGS_SEARCH_VERSION = 3;
+export const NEW_OPENINGS_SEARCH_VERSION = 5;
+export const OPENING_LOOKBACK_MONTHS = 3;
 const EMPTY_RETRY_MS = 24 * 60 * 60_000;
 const PREMIUM_SIGNAL = /\b(high[ -]end|fine[ -]dining|michelin|chef[ -]led|celebrated chef|renowned chef|critically acclaimed|luxury|upscale|premium|tasting menu|signature dining|cocktail lounge|cocktail bar|wine bar|rooftop bar|destination bar|hotel bar|hotel dining|hotel restaurant|luxury hotel restaurant|destination restaurant|gastropub|upscale pub|high[ -]end pub|destination pub|award[ -]winning (?:chef|restaurant|pub|bar)|exclusive dining|special[ -]occasion dining|world[ -]class|mixology)\b|£{3,4}/i;
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -44,7 +45,7 @@ function mergeOpeningSearchResults(searchResults, { city, country, now, maxCandi
   const successful = searchResults.filter(result => result?.ok);
   const parsedRounds = successful.map(result => parseGroundedOpeningCandidatesDetailed(result, { city, country, now, max: maxCandidates }));
   const rejectedKeys = ['invalidName','duplicate','invalidDate','missingEvidence','notIndependent','notPremium','noGroundedSource','evidenceNameMismatch'];
-  const diagnostics = { version: 3, stage: 'grounding', jsonArrayFound: parsedRounds.some(item => item.diagnostics.jsonArrayFound),
+  const diagnostics = { version: 5, stage: 'grounding', jsonArrayFound: parsedRounds.some(item => item.diagnostics.jsonArrayFound),
     textChars: parsedRounds.reduce((sum,item) => sum + item.diagnostics.textChars,0),
     groundingChunkCount: parsedRounds.reduce((sum,item) => sum + item.diagnostics.groundingChunkCount,0),
     parsedItems: parsedRounds.reduce((sum,item) => sum + item.diagnostics.parsedItems,0),
@@ -137,17 +138,23 @@ function safeText(value, max = 500) {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, max) : '';
 }
 
+export function openingWindowStartDate(now = Date.now()) {
+  const current = new Date(now);
+  return new Date(Date.UTC(current.getUTCFullYear(), current.getUTCMonth() - OPENING_LOOKBACK_MONTHS, 1, 12, 0, 0)).toISOString().slice(0, 10);
+}
+
 function isRecentIsoDay(value, now) {
   if (typeof value !== 'string' || !ISO_DAY.test(value)) return false;
   const parsed = Date.parse(value + 'T12:00:00Z');
-  return Number.isFinite(parsed) && parsed <= now && parsed >= now - 60 * DAY_MS;
+  const start = Date.parse(openingWindowStartDate(now) + 'T12:00:00Z');
+  return Number.isFinite(parsed) && parsed <= now && parsed >= start;
 }
 
 export function parseGroundedOpeningCandidatesDetailed(response, { city, country, now = Date.now(), max = NEW_OPENINGS_MAX_MAJOR_CANDIDATES } = {}) {
   const raw = safeText(response?.text, 60_000);
   const match = raw.match(/\[[\s\S]*\]/);
   const chunks = response?.groundingMetadata?.groundingChunks || [];
-  const diagnostics = { version: 3, stage: 'grounding', jsonArrayFound: Boolean(match), textChars: raw.length,
+  const diagnostics = { version: 5, stage: 'grounding', jsonArrayFound: Boolean(match), textChars: raw.length,
     groundingChunkCount: chunks.length, parsedItems: 0, sourceMatchedItems: 0, sourceViaGroundingSupport: 0, sourceViaTitleMatch: 0, sourceViaGoogleSearch: 0, acceptedItems: 0,
     rejected: { invalidName: 0, duplicate: 0, invalidDate: 0, missingEvidence: 0,
       notIndependent: 0, notPremium: 0, noGroundedSource: 0, evidenceNameMismatch: 0 } };
@@ -200,13 +207,14 @@ export function parseGroundedOpeningCandidates(response, options = {}) {
 
 export function buildNewOpeningSearchPrompt({ city, country, focus = '', now = Date.now(), maxCandidates = 15 } = {}) {
   const today = new Date(now).toISOString().slice(0, 10);
+  const windowStart = openingWindowStartDate(now);
   const cap = Math.max(1, Math.min(NEW_OPENINGS_MAX_MAJOR_CANDIDATES, Number(maxCandidates) || 15));
   const major = /^(london|new york|paris|tokyo|dubai|los angeles|singapore|hong kong)$/i.test(String(city || '').trim());
   const districts = String(focus || '').trim()
     ? ' Search specifically within these neighborhoods: ' + String(focus).slice(0, 500) + '. Do not substitute openings elsewhere in the city.'
     : /^london$/i.test(String(city || '').trim())
       ? ' Search London districts including Mayfair, Soho, Marylebone, Chelsea, Knightsbridge, Fitzrovia, Shoreditch, Covent Garden, City of London, Notting Hill, Kensington and Battersea.' : '';
-  return 'Use Google Search grounding to identify up to ' + cap + ' distinct high-end restaurant, pub, hotel restaurant, cocktail bar, wine bar or bar openings in ' + city + ', ' + country + ' that actually opened to the public in the last 60 days as of ' + today + '.'
+  return 'Use Google Search grounding to identify up to ' + cap + ' distinct high-end restaurant, pub, hotel restaurant, cocktail bar, wine bar or bar openings in ' + city + ', ' + country + ' that actually opened to the public on or after ' + windowStart + ' (the current calendar month plus the previous ' + OPENING_LOOKBACK_MONTHS + ' calendar months), as of ' + today + '.'
     + ' Search several complementary angles, including “new restaurants ' + city + '”, “recently opened restaurants ' + city + ' ' + today.slice(0, 4) + '”, and “new independent high-end restaurant openings ' + city + '”.'
     + ' Include high-end independent restaurants, gastropubs and pubs, hotel restaurants, cocktail bars, wine bars, rooftop bars and destination lounges. Include a hotel restaurant when it is a distinct single venue, even if the hotel group has multiple properties; exclude restaurant/pub/bar chains and multi-location dining brands. Exclude cafes, casual fast food, announced or future venues, and places with no dated opening evidence.'
     + districts
@@ -330,7 +338,7 @@ export function createNewOpeningsFeed({
       return { status: 'ready', venues: old.venues, updatedAt: oldUpdatedAt, newlyAddedPlaceIds: [], cached: true, diagnostics: old.diagnostics };
     }
     const emptyState = await readDocument(store, NEW_OPENINGS_REFRESH_COLLECTION, city.slug);
-    if (emptyState?.diagnostics?.version === 3 && epoch(emptyState?.lastEmptyAt) && now() - epoch(emptyState.lastEmptyAt) < EMPTY_RETRY_MS) {
+    if (emptyState?.diagnostics?.version === 5 && epoch(emptyState?.lastEmptyAt) && now() - epoch(emptyState.lastEmptyAt) < EMPTY_RETRY_MS) {
       return { status: 'no_results', venues: [], updatedAt: epoch(emptyState.lastEmptyAt), newlyAddedPlaceIds: [], cached: true,
         diagnostics: emptyState.diagnostics, text: openingDiagnosticText(emptyState.diagnostics, city.city) };
     }
@@ -358,7 +366,7 @@ export function createNewOpeningsFeed({
       if (!searchResults.some(result => result?.ok)) {
         const budgetExceeded = searchResults.some(result => result?.budgetExceeded);
         return { status: budgetExceeded ? 'monthly_limit' : 'search_unavailable', venues: [], newlyAddedPlaceIds: [],
-          diagnostics: { version: 3, stage: 'grounding', reason: budgetExceeded ? 'monthly_limit' : 'search_unavailable',
+          diagnostics: { version: 5, stage: 'grounding', reason: budgetExceeded ? 'monthly_limit' : 'search_unavailable',
             searchPassCount: searchResults.length, searchPassFailures: searchResults.length } };
       }
       const parsed = mergeOpeningSearchResults(searchResults, { city: city.city, country: city.country, now: now(), maxCandidates });

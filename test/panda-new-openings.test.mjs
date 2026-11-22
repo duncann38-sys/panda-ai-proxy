@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  NEW_OPENINGS_CACHE_MS, NEW_OPENINGS_SEARCH_VERSION, buildNewOpeningSearchPrompt, createNewOpeningsFeed,
+  NEW_OPENINGS_CACHE_MS, NEW_OPENINGS_SEARCH_VERSION, OPENING_LOOKBACK_MONTHS, openingWindowStartDate, buildNewOpeningSearchPrompt, createNewOpeningsFeed,
   normalizeCitySlug, openingPlaceIsEligible, parseGroundedOpeningCandidates, parseGroundedOpeningCandidatesDetailed,
 } from '../api/_panda-new-openings.js';
 
@@ -38,6 +38,9 @@ test('uses stable city-country cache slugs and appropriate candidate limits', ()
   assert.equal(normalizeCitySlug('Malmö', 'SE'), 'malmo-se');
   assert.match(buildNewOpeningSearchPrompt({ city: 'London', country: 'UK', now: NOW, maxCandidates: 40 }), /up to 40/);
   assert.match(buildNewOpeningSearchPrompt({ city: 'Malmö', country: 'Sweden', now: NOW }), /no more than 15/);
+  assert.equal(OPENING_LOOKBACK_MONTHS, 3);
+  assert.equal(openingWindowStartDate(NOW), '2026-08-01');
+  assert.match(buildNewOpeningSearchPrompt({ city: 'London', country: 'UK', now: NOW }), /on or after 2026-08-01/);
   assert.match(buildNewOpeningSearchPrompt({ city: 'London', country: 'UK', now: NOW }), /new restaurants London/);
   assert.match(buildNewOpeningSearchPrompt({ city: 'London', country: 'UK', focus: 'Zone 1–3 central areas', now: NOW }), /Search specifically within these neighborhoods/);
   assert.match(buildNewOpeningSearchPrompt({ city: 'London', country: 'UK', now: NOW }), /hotel restaurant, cocktail bar, wine bar/);
@@ -48,8 +51,14 @@ test('accepts only recent dated premium independent candidates with grounded sou
   assert.equal(valid.length, 1);
   assert.equal(valid[0].sourceName, 'City Dining News');
   assert.equal(valid[0].sourceUrl, source.web.uri);
+  const windowStart = { ...candidate, openingDate: '2026-08-01', openingEvidence: 'Noma New opened on 1 August 2026 in Oslo.' };
+  const beforeWindow = { ...candidate, openingDate: '2026-07-31', openingEvidence: 'Noma New opened on 31 July 2026 in Oslo.' };
+  const grounded = value => ({ text: JSON.stringify([value]), groundingMetadata: { groundingChunks: [source] } });
+  assert.equal(parseGroundedOpeningCandidates(grounded(windowStart), { city: 'Oslo', country: 'Norway', now: NOW }).length, 1);
+  assert.equal(parseGroundedOpeningCandidates(grounded(beforeWindow), { city: 'Oslo', country: 'Norway', now: NOW }).length, 0);
   for (const rejected of [
     { ...candidate, openingDate: '2026-12-02' },
+    { ...candidate, openingDate: '2026-07-31' },
     { ...candidate, independentVenue: false },
     { ...candidate, positioningEvidence: 'A casual neighborhood cafe.' },
   ]) assert.equal(parseGroundedOpeningCandidates({ text: JSON.stringify([rejected]), groundingMetadata: { groundingChunks: [source] } }, { city: 'Oslo', country: 'Norway', now: NOW }).length, 0);
@@ -62,7 +71,7 @@ test('reports grounding-stage rejection counts without exposing candidate text',
   assert.equal(invalid.candidates.length, 0);
   assert.equal(invalid.diagnostics.jsonArrayFound, false);
   assert.equal(invalid.diagnostics.groundingChunkCount, 0);
-  assert.equal(invalid.diagnostics.version, 3);
+  assert.equal(invalid.diagnostics.version, 5);
   const missingSource = parseGroundedOpeningCandidatesDetailed({ text: JSON.stringify([candidate]), groundingMetadata: { groundingChunks: [] } }, { city: 'London', country: 'UK', now: NOW });
   assert.equal(missingSource.diagnostics.parsedItems, 1);
   assert.equal(missingSource.diagnostics.rejected.noGroundedSource, 1);
