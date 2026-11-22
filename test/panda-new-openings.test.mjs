@@ -60,6 +60,7 @@ test('reports grounding-stage rejection counts without exposing candidate text',
   assert.equal(invalid.candidates.length, 0);
   assert.equal(invalid.diagnostics.jsonArrayFound, false);
   assert.equal(invalid.diagnostics.groundingChunkCount, 0);
+  assert.equal(invalid.diagnostics.version, 2);
   const missingSource = parseGroundedOpeningCandidatesDetailed({ text: JSON.stringify([candidate]), groundingMetadata: { groundingChunks: [] } }, { city: 'London', country: 'UK', now: NOW });
   assert.equal(missingSource.diagnostics.parsedItems, 1);
   assert.equal(missingSource.diagnostics.rejected.noGroundedSource, 1);
@@ -71,6 +72,12 @@ test('reports grounding-stage rejection counts without exposing candidate text',
   assert.equal(supported.candidates.length, 1);
   assert.equal(supported.candidates[0].sourceUrl, source.web.uri);
   assert.equal(supported.diagnostics.sourceViaGroundingSupport, 1);
+  const googleFallback = parseGroundedOpeningCandidatesDetailed({ text: JSON.stringify([supportedCandidate]),
+    groundingMetadata: { groundingChunks: [], webSearchQueries: ['new restaurants Oslo'] } }, { city: 'Oslo', country: 'Norway', now: NOW });
+  assert.equal(googleFallback.candidates.length, 1);
+  assert.equal(googleFallback.candidates[0].sourceType, 'google_search');
+  assert.match(googleFallback.candidates[0].sourceUrl, /^https:\/\/www\.google\.com\/search\?q=/);
+  assert.equal(googleFallback.diagnostics.sourceViaGoogleSearch, 1);
 });
 
 test('rejects non-operational, moderate, poorly rated, or over-established places', () => {
@@ -131,6 +138,22 @@ test('does not let a legacy empty cooldown hide new diagnostic searches', async 
   const result = await feed({ location: { lat: 59.91, lng: 10.75 } });
   assert.equal(searches, 1);
   assert.equal(result.status, 'ready');
+});
+
+
+test('keeps search-only evidence visibly labeled when Google supplies queries without citation chunks', async () => {
+  const store = makeStore();
+  const place = { id: 'ChI12345678901234567890', displayName: { text: 'Noma New' }, formattedAddress: 'Oslo, Norway', location: { latitude: 59.9, longitude: 10.7 }, businessStatus: 'OPERATIONAL', priceLevel: 'PRICE_LEVEL_EXPENSIVE', rating: 4.6, userRatingCount: 25, photos: [] };
+  const feed = createNewOpeningsFeed({ store, reverseGeocode,
+    searchGrounded: async () => ({ ok: true, queryCount: 2, text: JSON.stringify([candidate]), groundingMetadata: { groundingChunks: [], webSearchQueries: ['new restaurants Oslo'] } }),
+    hydratePlace: async () => [place], now: () => NOW,
+  });
+  const result = await feed({ location: { lat: 59.91, lng: 10.75 } });
+  assert.equal(result.status, 'ready');
+  assert.equal(result.venues[0].openingDesignation, 'panda-search-reported-new');
+  assert.equal(result.venues[0].openingSourceName, 'Google Search results · verify opening');
+  assert.match(result.venues[0].openingSourceUrl, /^https:\/\/www\.google\.com\/search\?q=/);
+  assert.equal(result.venues[0].openingSourceType, 'google_search');
 });
 
 test('coalesces concurrent refreshes and stores only verified Place results', async () => {

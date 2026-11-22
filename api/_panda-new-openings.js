@@ -95,6 +95,12 @@ function sourceMatches(candidateUrl, chunks, context = {}) {
       if (matched >= Math.min(2, tokens.length)) return result(chunk, 'title_match');
     }
   }
+  const queryAvailable = Array.isArray(context.groundingQueries) && context.groundingQueries.some(query => typeof query === 'string' && query.trim());
+  if (queryAvailable && name && context.city) {
+    const query = '"' + name + '" restaurant opened ' + (openingDate || '') + ' ' + context.city + ' ' + (context.country || '');
+    const url = 'https://www.google.com/search?q=' + encodeURIComponent(query.trim().replace(/\s+/g, ' '));
+    return { url, title: 'Google Search results · verify opening', domain: 'google.com', matchType: 'google_search' };
+  }
   return null;
 }
 
@@ -112,8 +118,8 @@ export function parseGroundedOpeningCandidatesDetailed(response, { city, country
   const raw = safeText(response?.text, 60_000);
   const match = raw.match(/\[[\s\S]*\]/);
   const chunks = response?.groundingMetadata?.groundingChunks || [];
-  const diagnostics = { version: 1, stage: 'grounding', jsonArrayFound: Boolean(match), textChars: raw.length,
-    groundingChunkCount: chunks.length, parsedItems: 0, sourceMatchedItems: 0, sourceViaGroundingSupport: 0, sourceViaTitleMatch: 0, acceptedItems: 0,
+  const diagnostics = { version: 2, stage: 'grounding', jsonArrayFound: Boolean(match), textChars: raw.length,
+    groundingChunkCount: chunks.length, parsedItems: 0, sourceMatchedItems: 0, sourceViaGroundingSupport: 0, sourceViaTitleMatch: 0, sourceViaGoogleSearch: 0, acceptedItems: 0,
     rejected: { invalidName: 0, duplicate: 0, invalidDate: 0, missingEvidence: 0,
       notIndependent: 0, notPremium: 0, noGroundedSource: 0, evidenceNameMismatch: 0 } };
   if (!match) return { candidates: [], diagnostics };
@@ -141,15 +147,16 @@ export function parseGroundedOpeningCandidatesDetailed(response, { city, country
     if (!evidence || !positioning || !editorialNote) { diagnostics.rejected.missingEvidence++; continue; }
     if (!independentVenue || !independenceEvidence) { diagnostics.rejected.notIndependent++; continue; }
     if (!PREMIUM_SIGNAL.test(positioning + ' ' + evidence + ' ' + editorialNote)) { diagnostics.rejected.notPremium++; continue; }
-    const source = sourceMatches(url, chunks, { name, openingDate, evidence, groundingSupports: response?.groundingMetadata?.groundingSupports });
+    const source = sourceMatches(url, chunks, { name, openingDate, evidence, city, country, groundingSupports: response?.groundingMetadata?.groundingSupports, groundingQueries: response?.groundingMetadata?.webSearchQueries || response?.groundingQueries || [] });
     if (!source) { diagnostics.rejected.noGroundedSource++; continue; }
     diagnostics.sourceMatchedItems++;
     if (source.matchType === 'grounding_support') diagnostics.sourceViaGroundingSupport++;
     if (source.matchType === 'title_match') diagnostics.sourceViaTitleMatch++;
+    if (source.matchType === 'google_search') diagnostics.sourceViaGoogleSearch++; 
     if (!evidence.toLowerCase().includes(name.toLowerCase().split(' ')[0])) { diagnostics.rejected.evidenceNameMismatch++; continue; }
     seen.add(key);
     accepted.push({ name, openingDate, openingEvidence: evidence, positioningEvidence: positioning,
-      editorialNote, cuisine, independentVenue, independenceEvidence, sourceUrl: source.url, sourceName: source.title,
+      editorialNote, cuisine, independentVenue, independenceEvidence, sourceUrl: source.url, sourceName: source.title, sourceType: source.matchType,
       city: safeText(city, 100), country: safeText(country, 100) });
     if (accepted.length >= Math.min(NEW_OPENINGS_MAX_MAJOR_CANDIDATES, Math.max(1, max))) break;
   }
@@ -171,7 +178,7 @@ export function buildNewOpeningSearchPrompt({ city, country, now = Date.now(), m
     + ' Search several complementary angles, including “new restaurants ' + city + '”, “recently opened restaurants ' + city + ' ' + today.slice(0, 4) + '”, and “new independent high-end restaurant openings ' + city + '”.'
     + ' Include fine dining, chef-led restaurants, luxury hotel dining and genuinely upscale cocktail dining lounges. Exclude chains, multi-location brands, cafes, casual fast food, announced or future venues, and places with no dated opening evidence.'
     + districts
-    + ' Return only a JSON array. Each object must have name, openingDate (YYYY-MM-DD), openingEvidence (short factual statement including the opening date and venue name), positioningEvidence (a source-backed phrase explaining the high-end positioning, using explicit evidence such as high-end, Michelin, fine dining, a celebrated chef, a tasting menu, luxury-hotel dining, or premium pricing where the source supports it), independentVenue (must be true only when evidence shows it is not a chain), independenceEvidence (a source-backed explanation that it is an independent/single-venue operator), editorialNote (one concise sentence), cuisine, and sourceUrl (the exact HTTPS URL of a source page present in Google Search grounding). Do not invent dates, sources or venues. If fewer than ' + cap + ' are verifiable, return fewer.'
+    + ' Return only a JSON array. Each object must have name, openingDate (YYYY-MM-DD), openingEvidence (short factual statement including the opening date and venue name), positioningEvidence (a source-backed phrase explaining the high-end positioning, using explicit evidence such as high-end, Michelin, fine dining, a celebrated chef, a tasting menu, luxury-hotel dining, or premium pricing where the source supports it), independentVenue (must be true only when evidence shows it is not a chain), independenceEvidence (a source-backed explanation that it is an independent/single-venue operator), editorialNote (one concise sentence), cuisine, and sourceUrl (exact publisher HTTPS URL from a Google Search grounding chunk when available; otherwise leave empty). Do not invent dates, sources or venues; Panda may provide a clearly labeled Google Search verification link. If fewer than ' + cap + ' are verifiable, return fewer.'
     + (major ? ' Prioritize well-documented openings across the city rather than one neighborhood.' : ' Return no more than 15 candidates for this regional city or town.');
 }
 
@@ -227,7 +234,9 @@ function normalizeVerifiedVenue(place, candidate, cityInfo, now) {
   })).filter(photo => photo.name);
   const first = photoNames[0];
   const location = place.location || {};
-  const openingSource = sourceMatches(candidate.sourceUrl, [{ web: { uri: candidate.sourceUrl, title: candidate.sourceName } }]);
+  const openingSource = candidate.sourceType === 'google_search'
+    ? (() => { try { const url = new URL(candidate.sourceUrl); return url.protocol === 'https:' && url.hostname === 'www.google.com' && url.pathname === '/search' && url.searchParams.has('q') ? { url: url.toString(), title: candidate.sourceName, domain: 'google.com' } : null; } catch { return null; } })()
+    : sourceMatches(candidate.sourceUrl, [{ web: { uri: candidate.sourceUrl, title: candidate.sourceName } }]);
   return {
     id: place.id,
     name: safeText(place.displayName?.text || place.name, 140),
@@ -244,7 +253,9 @@ function normalizeVerifiedVenue(place, candidate, cityInfo, now) {
     phone: '', photoName: first?.name || '', photoCount: photoNames.length,
     photoAttribution: first?.attribution || '', photoNames,
     photoAttributions: photoNames.map(photo => photo.attribution).filter(Boolean),
-    openingDesignation: 'panda-verified-new', openingSourceName: openingSource?.title || candidate.sourceName,
+    openingDesignation: candidate.sourceType === 'google_search' ? 'panda-search-reported-new' : 'panda-verified-new',
+    openingSourceType: candidate.sourceType === 'google_search' ? 'google_search' : 'publisher',
+    openingSourceName: openingSource?.title || candidate.sourceName,
     openingSourceUrl: candidate.sourceUrl, openingReportedAt: new Date(now).toISOString(),
     openingDate: candidate.openingDate, openingEvidence: candidate.openingEvidence,
     positioningEvidence: candidate.positioningEvidence, editorialNote: candidate.editorialNote,
@@ -287,7 +298,7 @@ export function createNewOpeningsFeed({
       return { status: 'ready', venues: old.venues, updatedAt: oldUpdatedAt, newlyAddedPlaceIds: [], cached: true };
     }
     const emptyState = await readDocument(store, NEW_OPENINGS_REFRESH_COLLECTION, city.slug);
-    if (emptyState?.diagnostics?.version === 1 && epoch(emptyState?.lastEmptyAt) && now() - epoch(emptyState.lastEmptyAt) < EMPTY_RETRY_MS) {
+    if (emptyState?.diagnostics?.version === 2 && epoch(emptyState?.lastEmptyAt) && now() - epoch(emptyState.lastEmptyAt) < EMPTY_RETRY_MS) {
       return { status: 'no_results', venues: [], updatedAt: epoch(emptyState.lastEmptyAt), newlyAddedPlaceIds: [], cached: true,
         diagnostics: emptyState.diagnostics, text: openingDiagnosticText(emptyState.diagnostics, city.city) };
     }
@@ -297,7 +308,7 @@ export function createNewOpeningsFeed({
       const maxCandidates = major ? NEW_OPENINGS_MAX_MAJOR_CANDIDATES : 15;
       const search = await searchGrounded({ city: city.city, country: city.country, center: { lat: city.lat, lng: city.lng }, maxCandidates });
       if (!search?.ok) return { status: search?.budgetExceeded ? 'monthly_limit' : 'search_unavailable', venues: [], newlyAddedPlaceIds: [],
-        diagnostics: { version: 1, stage: 'grounding', reason: search?.budgetExceeded ? 'monthly_limit' : 'search_unavailable' } };
+        diagnostics: { version: 2, stage: 'grounding', reason: search?.budgetExceeded ? 'monthly_limit' : 'search_unavailable' } };
       const parsed = parseGroundedOpeningCandidatesDetailed(search, { city: city.city, country: city.country, now: now(), max: maxCandidates });
       const candidates = parsed.candidates;
       const diagnostics = { ...parsed.diagnostics, groundingQueryCount: Number(search.queryCount) || 0,
@@ -346,8 +357,9 @@ export function createNewOpeningsFeed({
         venues: verified.slice(0, NEW_OPENINGS_MAX_MAJOR_CANDIDATES), newlyAddedPlaceIds };
       await store.collection(NEW_OPENINGS_COLLECTION).doc(city.slug).set(document);
       if (newlyAddedPlaceIds.length) {
+        const hasSearchOnlySource = verified.some(venue => venue.openingDesignation === 'panda-search-reported-new');
         const notification = { title: newlyAddedPlaceIds.length + ' new high-end openings in ' + city.city,
-          subtitle: 'Recently opened and verified by Panda', venueIds: newlyAddedPlaceIds.slice(0, 15), city: city.city,
+          subtitle: hasSearchOnlySource ? 'Recent Google Search reports · check linked results' : 'Recently opened and source-verified', venueIds: newlyAddedPlaceIds.slice(0, 15), city: city.city,
           slug: city.slug, read: false, seenInChat: false, createdAt: updatedAt };
         try { await store.collection(NEW_OPENINGS_NOTICE_COLLECTION).doc(city.slug).set(notification, { merge: true }); } catch {}
       }
