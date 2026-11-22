@@ -6,7 +6,7 @@ export const NEW_OPENINGS_CACHE_MS = 7 * DAY_MS;
 export const NEW_OPENINGS_MAX_PAGE_SIZE = 15;
 export const NEW_OPENINGS_MAX_MAJOR_CANDIDATES = 40;
 const EMPTY_RETRY_MS = 24 * 60 * 60_000;
-const PREMIUM_SIGNAL = /\b(fine[ -]dining|michelin|chef[ -]led|luxury|upscale|premium|tasting menu|signature dining|cocktail lounge|rooftop bar|hotel dining|destination restaurant|award[ -]winning chef)\b/i;
+const PREMIUM_SIGNAL = /\b(high[ -]end|fine[ -]dining|michelin|chef[ -]led|celebrated chef|renowned chef|critically acclaimed|luxury|upscale|premium|tasting menu|signature dining|cocktail lounge|rooftop bar|hotel dining|destination restaurant|award[ -]winning (?:chef|restaurant)|exclusive dining|special[ -]occasion dining|world[ -]class)\b|£{3,4}/i;
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 export function validCoordinates(lat, lng) {
@@ -51,14 +51,48 @@ function normalizedUrl(value) {
   } catch { return null; }
 }
 
-function sourceMatches(candidateUrl, chunks) {
+function sourceMatches(candidateUrl, chunks, context = {}) {
+  const sourceChunks = chunks || [];
   const candidate = normalizedUrl(candidateUrl);
-  if (!candidate) return null;
-  for (const chunk of chunks || []) {
+  const isDirectSource = url => url && !/(^|\.)google\./i.test(url.hostname) && url.hostname !== 'google.com';
+  const result = (chunk, matchType) => {
     const uri = normalizedUrl(chunk?.web?.uri);
-    if (!uri) continue;
-    if (candidate.hostname === uri.hostname && candidate.pathname === uri.pathname) {
-      return { url: chunk.web.uri, title: String(chunk.web.title || uri.hostname).slice(0, 140), domain: uri.hostname };
+    if (!uri || !isDirectSource(uri)) return null;
+    return { url: chunk.web.uri, title: String(chunk.web.title || uri.hostname).slice(0, 140), domain: uri.hostname, matchType };
+  };
+  if (candidate && isDirectSource(candidate)) {
+    for (const chunk of sourceChunks) {
+      const uri = normalizedUrl(chunk?.web?.uri);
+      if (uri && isDirectSource(uri) && candidate.hostname === uri.hostname && candidate.pathname === uri.pathname) return result(chunk, 'exact');
+    }
+  }
+  const name = safeText(context.name, 140);
+  const openingDate = safeText(context.openingDate, 10);
+  const evidence = safeText(context.evidence, 700);
+  const nameKey = normalizedName(name);
+  const supportIndices = new Set();
+  for (const support of context.groundingSupports || []) {
+    const segment = safeText(support?.segment?.text, 3000);
+    const segmentKey = normalizedName(segment);
+    const hasName = nameKey.length >= 3 && segmentKey.includes(nameKey);
+    const hasOpeningEvidence = /\b(open|opened|opening|launch|launched|began|debut|welcomed its first guests)\b/i.test(segment)
+      || (openingDate && segment.includes(openingDate))
+      || (evidence && segmentKey.includes(normalizedName(evidence).slice(0, 50)));
+    if (!hasName || !hasOpeningEvidence) continue;
+    for (const index of support?.groundingChunkIndices || []) if (Number.isInteger(index) && index >= 0) supportIndices.add(index);
+  }
+  for (const index of supportIndices) {
+    const match = result(sourceChunks[index], 'grounding_support');
+    if (match) return match;
+  }
+  const tokens = nameKey.split(' ').filter(token => token.length > 2 && !['the','new','restaurant','restaurants','hotel','london'].includes(token));
+  if (tokens.length) {
+    for (const chunk of sourceChunks) {
+      const uri = normalizedUrl(chunk?.web?.uri);
+      if (!uri || !isDirectSource(uri)) continue;
+      const titleKey = normalizedName(chunk?.web?.title || '');
+      const matched = tokens.filter(token => titleKey.includes(token)).length;
+      if (matched >= Math.min(2, tokens.length)) return result(chunk, 'title_match');
     }
   }
   return null;
@@ -79,7 +113,7 @@ export function parseGroundedOpeningCandidatesDetailed(response, { city, country
   const match = raw.match(/\[[\s\S]*\]/);
   const chunks = response?.groundingMetadata?.groundingChunks || [];
   const diagnostics = { version: 1, stage: 'grounding', jsonArrayFound: Boolean(match), textChars: raw.length,
-    groundingChunkCount: chunks.length, parsedItems: 0, sourceMatchedItems: 0, acceptedItems: 0,
+    groundingChunkCount: chunks.length, parsedItems: 0, sourceMatchedItems: 0, sourceViaGroundingSupport: 0, sourceViaTitleMatch: 0, acceptedItems: 0,
     rejected: { invalidName: 0, duplicate: 0, invalidDate: 0, missingEvidence: 0,
       notIndependent: 0, notPremium: 0, noGroundedSource: 0, evidenceNameMismatch: 0 } };
   if (!match) return { candidates: [], diagnostics };
@@ -107,9 +141,11 @@ export function parseGroundedOpeningCandidatesDetailed(response, { city, country
     if (!evidence || !positioning || !editorialNote) { diagnostics.rejected.missingEvidence++; continue; }
     if (!independentVenue || !independenceEvidence) { diagnostics.rejected.notIndependent++; continue; }
     if (!PREMIUM_SIGNAL.test(positioning + ' ' + evidence + ' ' + editorialNote)) { diagnostics.rejected.notPremium++; continue; }
-    const source = sourceMatches(url, chunks);
+    const source = sourceMatches(url, chunks, { name, openingDate, evidence, groundingSupports: response?.groundingMetadata?.groundingSupports });
     if (!source) { diagnostics.rejected.noGroundedSource++; continue; }
     diagnostics.sourceMatchedItems++;
+    if (source.matchType === 'grounding_support') diagnostics.sourceViaGroundingSupport++;
+    if (source.matchType === 'title_match') diagnostics.sourceViaTitleMatch++;
     if (!evidence.toLowerCase().includes(name.toLowerCase().split(' ')[0])) { diagnostics.rejected.evidenceNameMismatch++; continue; }
     seen.add(key);
     accepted.push({ name, openingDate, openingEvidence: evidence, positioningEvidence: positioning,
@@ -135,7 +171,7 @@ export function buildNewOpeningSearchPrompt({ city, country, now = Date.now(), m
     + ' Search several complementary angles, including “new restaurants ' + city + '”, “recently opened restaurants ' + city + ' ' + today.slice(0, 4) + '”, and “new independent high-end restaurant openings ' + city + '”.'
     + ' Include fine dining, chef-led restaurants, luxury hotel dining and genuinely upscale cocktail dining lounges. Exclude chains, multi-location brands, cafes, casual fast food, announced or future venues, and places with no dated opening evidence.'
     + districts
-    + ' Return only a JSON array. Each object must have name, openingDate (YYYY-MM-DD), openingEvidence (short factual statement including the opening date and venue name), positioningEvidence (a source-backed phrase explaining the high-end positioning), independentVenue (must be true only when evidence shows it is not a chain), independenceEvidence (a source-backed explanation that it is an independent/single-venue operator), editorialNote (one concise sentence), cuisine, and sourceUrl (the exact HTTPS URL of a source page present in Google Search grounding). Do not invent dates, sources or venues. If fewer than ' + cap + ' are verifiable, return fewer.'
+    + ' Return only a JSON array. Each object must have name, openingDate (YYYY-MM-DD), openingEvidence (short factual statement including the opening date and venue name), positioningEvidence (a source-backed phrase explaining the high-end positioning, using explicit evidence such as high-end, Michelin, fine dining, a celebrated chef, a tasting menu, luxury-hotel dining, or premium pricing where the source supports it), independentVenue (must be true only when evidence shows it is not a chain), independenceEvidence (a source-backed explanation that it is an independent/single-venue operator), editorialNote (one concise sentence), cuisine, and sourceUrl (the exact HTTPS URL of a source page present in Google Search grounding). Do not invent dates, sources or venues. If fewer than ' + cap + ' are verifiable, return fewer.'
     + (major ? ' Prioritize well-documented openings across the city rather than one neighborhood.' : ' Return no more than 15 candidates for this regional city or town.');
 }
 

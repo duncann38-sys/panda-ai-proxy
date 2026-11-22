@@ -64,6 +64,13 @@ test('reports grounding-stage rejection counts without exposing candidate text',
   assert.equal(missingSource.diagnostics.parsedItems, 1);
   assert.equal(missingSource.diagnostics.rejected.noGroundedSource, 1);
   assert.equal(JSON.stringify(missingSource.diagnostics).includes(candidate.name), false);
+  const supportedCandidate = { ...candidate, sourceUrl: 'https://unmatched.example.org/article', positioningEvidence: 'A high-end restaurant led by a celebrated chef.' };
+  const supported = parseGroundedOpeningCandidatesDetailed({ text: JSON.stringify([supportedCandidate]),
+    groundingMetadata: { groundingChunks: [source], groundingSupports: [{ segment: { text: 'Noma New opened on 2 November 2026 in Oslo.' }, groundingChunkIndices: [0] }] } },
+    { city: 'Oslo', country: 'Norway', now: NOW });
+  assert.equal(supported.candidates.length, 1);
+  assert.equal(supported.candidates[0].sourceUrl, source.web.uri);
+  assert.equal(supported.diagnostics.sourceViaGroundingSupport, 1);
 });
 
 test('rejects non-operational, moderate, poorly rated, or over-established places', () => {
