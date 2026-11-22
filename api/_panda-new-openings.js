@@ -295,7 +295,7 @@ export function createNewOpeningsFeed({
     const old = await readDocument(store, NEW_OPENINGS_COLLECTION, city.slug);
     const oldUpdatedAt = epoch(old?.updatedAt);
     if (Array.isArray(old?.venues) && old.venues.length > 0 && now() - oldUpdatedAt < NEW_OPENINGS_CACHE_MS) {
-      return { status: 'ready', venues: old.venues, updatedAt: oldUpdatedAt, newlyAddedPlaceIds: [], cached: true };
+      return { status: 'ready', venues: old.venues, updatedAt: oldUpdatedAt, newlyAddedPlaceIds: [], cached: true, diagnostics: old.diagnostics };
     }
     const emptyState = await readDocument(store, NEW_OPENINGS_REFRESH_COLLECTION, city.slug);
     if (emptyState?.diagnostics?.version === 2 && epoch(emptyState?.lastEmptyAt) && now() - epoch(emptyState.lastEmptyAt) < EMPTY_RETRY_MS) {
@@ -352,9 +352,10 @@ export function createNewOpeningsFeed({
       const oldIds = new Set((Array.isArray(old?.venues) ? old.venues : []).map(venue => venue?.id).filter(Boolean));
       const newlyAddedPlaceIds = verified.map(venue => venue.id).filter(id => !oldIds.has(id));
       const updatedAt = now();
+      diagnostics.stage = 'complete';
       const document = { city: city.city, country: city.country, countryCode: city.countryCode,
         citySlug: city.slug, center: { lat: city.lat, lng: city.lng }, updatedAt,
-        venues: verified.slice(0, NEW_OPENINGS_MAX_MAJOR_CANDIDATES), newlyAddedPlaceIds };
+        venues: verified.slice(0, NEW_OPENINGS_MAX_MAJOR_CANDIDATES), newlyAddedPlaceIds, diagnostics };
       await store.collection(NEW_OPENINGS_COLLECTION).doc(city.slug).set(document);
       if (newlyAddedPlaceIds.length) {
         const hasSearchOnlySource = verified.some(venue => venue.openingDesignation === 'panda-search-reported-new');
@@ -364,7 +365,6 @@ export function createNewOpeningsFeed({
         try { await store.collection(NEW_OPENINGS_NOTICE_COLLECTION).doc(city.slug).set(notification, { merge: true }); } catch {}
       }
       try { await store.collection(NEW_OPENINGS_REFRESH_COLLECTION).doc(city.slug).delete(); } catch {}
-      diagnostics.stage = 'complete';
       return { status: 'ready', venues: document.venues, updatedAt, newlyAddedPlaceIds, cached: false, diagnostics };
     })();
     inFlight.set(city.slug, task);
@@ -401,13 +401,19 @@ export function createNewOpeningsFeed({
     }));
     const nextOffset = pageOffset + page.length >= available.length ? 0 : pageOffset + page.length;
     const more = nextOffset > 0;
+    const searchOnlyCount = page.filter(venue => venue.openingDesignation === 'panda-search-reported-new').length;
     const text = page.length
-      ? 'Here are ' + page.length + ' recently opened, independently verified high-end places in ' + city.city + ', ' + city.country + '. Each card links to the dated opening report.' + (more ? ' Tap “Next 15” for more.' : '') + (wrapped ? ' You’ve seen the previous set, so this starts a fresh rotation.' : '')
-      : 'I’ve shown all the verified new openings in ' + city.city + ' for this search. I won’t repeat them.';
+      ? (searchOnlyCount === page.length
+        ? 'I found ' + page.length + ' recent high-end opening reports in ' + city.city + '. Google Places confirms these venues are operating; each card opens Google Search results so you can check the reported opening date.'
+        : searchOnlyCount > 0
+          ? 'I found ' + page.length + ' recent high-end openings in ' + city.city + '. Google Places confirms the venues are operating; cards link to publisher reports or clearly labeled Google results for checking opening dates.'
+          : 'Here are ' + page.length + ' recently opened high-end venues in ' + city.city + ', ' + city.country + '. Google Places confirms they are operating, and each card links to the dated publisher report.')
+        + (more ? ' Tap “Next 15” for more.' : '') + (wrapped ? ' You’ve seen the previous set, so this starts a fresh rotation.' : '')
+      : 'I’ve shown all matches that passed Panda’s checks for ' + city.city + ' in this search. I won’t repeat them.';
     return { status: 'ready', newOpeningsSearch: true, city: city.city, country: city.country,
       citySlug: city.slug, venues: page, totalCount: pool.venues.length,
       offset: pageOffset, limit: pageSize, nextOffset, hasMore: more,
       newlyAddedPlaceIds: pool.newlyAddedPlaceIds || [], cached: pool.cached === true,
-      updatedAt: pool.updatedAt || null, text };
+      updatedAt: pool.updatedAt || null, text, diagnostics: pool.diagnostics };
   };
 }

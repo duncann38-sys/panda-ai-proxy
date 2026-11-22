@@ -154,6 +154,8 @@ test('keeps search-only evidence visibly labeled when Google supplies queries wi
   assert.equal(result.venues[0].openingSourceName, 'Google Search results · verify opening');
   assert.match(result.venues[0].openingSourceUrl, /^https:\/\/www\.google\.com\/search\?q=/);
   assert.equal(result.venues[0].openingSourceType, 'google_search');
+  assert.equal(result.diagnostics.sourceViaGoogleSearch, 1);
+  assert.match(result.text, /Google Places confirms these venues are operating/);
 });
 
 test('coalesces concurrent refreshes and stores only verified Place results', async () => {
