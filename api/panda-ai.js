@@ -811,7 +811,7 @@ async function searchGroundedOpenings({city,country,maxCandidates}){
     recordCostEvent('new_openings_grounding_query_count',{count:queries});
     if(!queries) return {ok:false};
     const text=(candidate?.content?.parts||[]).map(part=>typeof part?.text==='string'?part.text:'').filter(Boolean).join('\n');
-    return {ok:true,text,groundingMetadata:candidate?.groundingMetadata||{}};
+    return {ok:true,text,groundingMetadata:candidate?.groundingMetadata||{},queryCount:queries};
   }catch{
     await settleEventGroundingBudget(store,reservation,10);
     return {ok:false};

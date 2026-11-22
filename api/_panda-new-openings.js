@@ -30,6 +30,15 @@ function epoch(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function openingDiagnosticText(diagnostics, city) {
+  if (diagnostics?.stage === 'grounding') {
+    if (diagnostics.jsonArrayFound === false || diagnostics.jsonParseFailed) return 'I found restaurant-opening search results for ' + city + ', but couldn’t extract source-backed opening details yet. I won’t guess.';
+    return 'I couldn’t verify dated opening reports for ' + city + ' from the available search sources yet. Try again later.';
+  }
+  if (diagnostics?.stage === 'places') return 'I found recent opening reports for ' + city + ', but Google Places could not confirm matching venues that meet Panda’s checks. I won’t label ordinary restaurants as new.';
+  return 'I couldn’t verify recent high-end openings in ' + city + ' yet. Try again later or name another city.';
+}
+
 function normalizedUrl(value) {
   try {
     const url = new URL(value);
@@ -65,18 +74,23 @@ function isRecentIsoDay(value, now) {
   return Number.isFinite(parsed) && parsed <= now && parsed >= now - 60 * DAY_MS;
 }
 
-export function parseGroundedOpeningCandidates(response, { city, country, now = Date.now(), max = NEW_OPENINGS_MAX_MAJOR_CANDIDATES } = {}) {
+export function parseGroundedOpeningCandidatesDetailed(response, { city, country, now = Date.now(), max = NEW_OPENINGS_MAX_MAJOR_CANDIDATES } = {}) {
   const raw = safeText(response?.text, 60_000);
   const match = raw.match(/\[[\s\S]*\]/);
-  if (!match) return [];
-  let values;
-  try { values = JSON.parse(match[0]); } catch { return []; }
-  if (!Array.isArray(values)) return [];
   const chunks = response?.groundingMetadata?.groundingChunks || [];
+  const diagnostics = { version: 1, stage: 'grounding', jsonArrayFound: Boolean(match), textChars: raw.length,
+    groundingChunkCount: chunks.length, parsedItems: 0, sourceMatchedItems: 0, acceptedItems: 0,
+    rejected: { invalidName: 0, duplicate: 0, invalidDate: 0, missingEvidence: 0,
+      notIndependent: 0, notPremium: 0, noGroundedSource: 0, evidenceNameMismatch: 0 } };
+  if (!match) return { candidates: [], diagnostics };
+  let values;
+  try { values = JSON.parse(match[0]); } catch { diagnostics.jsonParseFailed = true; return { candidates: [], diagnostics }; }
+  if (!Array.isArray(values)) return { candidates: [], diagnostics };
+  diagnostics.parsedItems = values.length;
   const seen = new Set();
   const accepted = [];
   for (const item of values) {
-    if (!item || typeof item !== 'object') continue;
+    if (!item || typeof item !== 'object') { diagnostics.rejected.invalidName++; continue; }
     const name = safeText(item.name, 140);
     const openingDate = safeText(item.openingDate, 10);
     const evidence = safeText(item.openingEvidence, 700);
@@ -86,19 +100,29 @@ export function parseGroundedOpeningCandidates(response, { city, country, now = 
     const editorialNote = safeText(item.editorialNote, 320);
     const cuisine = safeText(item.cuisine, 100);
     const url = safeText(item.sourceUrl, 1200);
-    const source = sourceMatches(url, chunks);
     const key = name.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]/g, '');
-    if (!name || key.length < 3 || seen.has(key) || !isRecentIsoDay(openingDate, now)
-      || !evidence || !positioning || !independentVenue || !independenceEvidence
-      || !PREMIUM_SIGNAL.test(positioning + ' ' + evidence + ' ' + editorialNote)
-      || !source || !evidence.toLowerCase().includes(name.toLowerCase().split(' ')[0])) continue;
+    if (!name || key.length < 3) { diagnostics.rejected.invalidName++; continue; }
+    if (seen.has(key)) { diagnostics.rejected.duplicate++; continue; }
+    if (!isRecentIsoDay(openingDate, now)) { diagnostics.rejected.invalidDate++; continue; }
+    if (!evidence || !positioning || !editorialNote) { diagnostics.rejected.missingEvidence++; continue; }
+    if (!independentVenue || !independenceEvidence) { diagnostics.rejected.notIndependent++; continue; }
+    if (!PREMIUM_SIGNAL.test(positioning + ' ' + evidence + ' ' + editorialNote)) { diagnostics.rejected.notPremium++; continue; }
+    const source = sourceMatches(url, chunks);
+    if (!source) { diagnostics.rejected.noGroundedSource++; continue; }
+    diagnostics.sourceMatchedItems++;
+    if (!evidence.toLowerCase().includes(name.toLowerCase().split(' ')[0])) { diagnostics.rejected.evidenceNameMismatch++; continue; }
     seen.add(key);
     accepted.push({ name, openingDate, openingEvidence: evidence, positioningEvidence: positioning,
       editorialNote, cuisine, independentVenue, independenceEvidence, sourceUrl: source.url, sourceName: source.title,
       city: safeText(city, 100), country: safeText(country, 100) });
     if (accepted.length >= Math.min(NEW_OPENINGS_MAX_MAJOR_CANDIDATES, Math.max(1, max))) break;
   }
-  return accepted;
+  diagnostics.acceptedItems = accepted.length;
+  return { candidates: accepted, diagnostics };
+}
+
+export function parseGroundedOpeningCandidates(response, options = {}) {
+  return parseGroundedOpeningCandidatesDetailed(response, options).candidates;
 }
 
 export function buildNewOpeningSearchPrompt({ city, country, now = Date.now(), maxCandidates = 15 } = {}) {
@@ -108,6 +132,7 @@ export function buildNewOpeningSearchPrompt({ city, country, now = Date.now(), m
   const districts = /^london$/i.test(String(city || '').trim())
     ? ' Search London districts including Mayfair, Soho, Marylebone, Chelsea, Knightsbridge, Fitzrovia, Shoreditch, Covent Garden, City of London, Notting Hill, Kensington and Battersea.' : '';
   return 'Use Google Search grounding to identify up to ' + cap + ' distinct high-end restaurant or cocktail-dining openings in ' + city + ', ' + country + ' that actually opened to the public in the last 60 days as of ' + today + '.'
+    + ' Search several complementary angles, including “new restaurants ' + city + '”, “recently opened restaurants ' + city + ' ' + today.slice(0, 4) + '”, and “new independent high-end restaurant openings ' + city + '”.'
     + ' Include fine dining, chef-led restaurants, luxury hotel dining and genuinely upscale cocktail dining lounges. Exclude chains, multi-location brands, cafes, casual fast food, announced or future venues, and places with no dated opening evidence.'
     + districts
     + ' Return only a JSON array. Each object must have name, openingDate (YYYY-MM-DD), openingEvidence (short factual statement including the opening date and venue name), positioningEvidence (a source-backed phrase explaining the high-end positioning), independentVenue (must be true only when evidence shows it is not a chain), independenceEvidence (a source-backed explanation that it is an independent/single-venue operator), editorialNote (one concise sentence), cuisine, and sourceUrl (the exact HTTPS URL of a source page present in Google Search grounding). Do not invent dates, sources or venues. If fewer than ' + cap + ' are verifiable, return fewer.'
@@ -226,38 +251,56 @@ export function createNewOpeningsFeed({
       return { status: 'ready', venues: old.venues, updatedAt: oldUpdatedAt, newlyAddedPlaceIds: [], cached: true };
     }
     const emptyState = await readDocument(store, NEW_OPENINGS_REFRESH_COLLECTION, city.slug);
-    if (epoch(emptyState?.lastEmptyAt) && now() - epoch(emptyState.lastEmptyAt) < EMPTY_RETRY_MS) {
-      return { status: 'no_results', venues: [], updatedAt: epoch(emptyState.lastEmptyAt), newlyAddedPlaceIds: [], cached: true };
+    if (emptyState?.diagnostics?.version === 1 && epoch(emptyState?.lastEmptyAt) && now() - epoch(emptyState.lastEmptyAt) < EMPTY_RETRY_MS) {
+      return { status: 'no_results', venues: [], updatedAt: epoch(emptyState.lastEmptyAt), newlyAddedPlaceIds: [], cached: true,
+        diagnostics: emptyState.diagnostics, text: openingDiagnosticText(emptyState.diagnostics, city.city) };
     }
     if (inFlight.has(city.slug)) return inFlight.get(city.slug);
     const task = (async () => {
       const major = /^(london|new york|paris|tokyo|dubai|los angeles|singapore|hong kong)$/i.test(city.city);
       const maxCandidates = major ? NEW_OPENINGS_MAX_MAJOR_CANDIDATES : 15;
       const search = await searchGrounded({ city: city.city, country: city.country, center: { lat: city.lat, lng: city.lng }, maxCandidates });
-      if (!search?.ok) return { status: search?.budgetExceeded ? 'monthly_limit' : 'search_unavailable', venues: [], newlyAddedPlaceIds: [] };
-      const candidates = parseGroundedOpeningCandidates(search, { city: city.city, country: city.country, now: now(), max: maxCandidates });
+      if (!search?.ok) return { status: search?.budgetExceeded ? 'monthly_limit' : 'search_unavailable', venues: [], newlyAddedPlaceIds: [],
+        diagnostics: { version: 1, stage: 'grounding', reason: search?.budgetExceeded ? 'monthly_limit' : 'search_unavailable' } };
+      const parsed = parseGroundedOpeningCandidatesDetailed(search, { city: city.city, country: city.country, now: now(), max: maxCandidates });
+      const candidates = parsed.candidates;
+      const diagnostics = { ...parsed.diagnostics, groundingQueryCount: Number(search.queryCount) || 0,
+        placeLookupCount: 0, placeLookupFailures: 0, placeIneligibleResults: 0, placeNameMismatches: 0, placeMatches: 0 };
+      if (!candidates.length) {
+        const updatedAt = now();
+        try { await store.collection(NEW_OPENINGS_REFRESH_COLLECTION).doc(city.slug).set({ lastEmptyAt: updatedAt, city: city.city, country: city.country, diagnostics }, { merge: true }); } catch {}
+        return { status: 'no_results', venues: [], newlyAddedPlaceIds: [], updatedAt, diagnostics, text: openingDiagnosticText(diagnostics, city.city) };
+      }
       const verified = [];
       const seenIds = new Set();
       let hydrationFailures = 0;
       for (let i = 0; i < candidates.length && verified.length < maxCandidates; i += 5) {
         const batch = candidates.slice(i, i + 5);
+        diagnostics.placeLookupCount += batch.length;
         const settled = await Promise.allSettled(batch.map(candidate => hydratePlace(candidate, city)));
         for (let j = 0; j < settled.length; j++) {
           const item = settled[j];
-          if (item.status === 'rejected') { hydrationFailures++; continue; }
-          if (!item.value) continue;
+          if (item.status === 'rejected') { hydrationFailures++; diagnostics.placeLookupFailures++; continue; }
+          if (!item.value) { diagnostics.placeNameMismatches++; continue; }
           const hydrated = item.value;
           const candidate = batch[j];
-          const place = findOpeningPlaceMatch(Array.isArray(hydrated) ? hydrated : [hydrated], candidate, city);
-          if (!place || seenIds.has(place.id)) continue;
+          const places = Array.isArray(hydrated) ? hydrated : [hydrated];
+          if (!places.some(openingPlaceIsEligible)) diagnostics.placeIneligibleResults++;
+          const place = findOpeningPlaceMatch(places, candidate, city);
+          if (!place) { diagnostics.placeNameMismatches++; continue; }
+          if (seenIds.has(place.id)) continue;
           seenIds.add(place.id);
+          diagnostics.placeMatches++;
           verified.push(normalizeVerifiedVenue(place, candidate, city, now()));
         }
       }
       if (!verified.length) {
-        if (hydrationFailures > 0) return { status: 'verification_unavailable', venues: [], newlyAddedPlaceIds: [] };
-        try { await store.collection(NEW_OPENINGS_REFRESH_COLLECTION).doc(city.slug).set({ lastEmptyAt: now(), city: city.city, country: city.country }, { merge: true }); } catch {}
-        return { status: 'no_results', venues: [], newlyAddedPlaceIds: [] };
+        diagnostics.stage = 'places';
+        if (hydrationFailures > 0 && hydrationFailures === candidates.length) return { status: 'verification_unavailable', venues: [], newlyAddedPlaceIds: [], diagnostics,
+          text: 'I found recent opening reports for ' + city.city + ', but live venue verification is temporarily unavailable. Please try again shortly.' };
+        const updatedAt = now();
+        try { await store.collection(NEW_OPENINGS_REFRESH_COLLECTION).doc(city.slug).set({ lastEmptyAt: updatedAt, city: city.city, country: city.country, diagnostics }, { merge: true }); } catch {}
+        return { status: 'no_results', venues: [], newlyAddedPlaceIds: [], updatedAt, diagnostics, text: openingDiagnosticText(diagnostics, city.city) };
       }
       const oldIds = new Set((Array.isArray(old?.venues) ? old.venues : []).map(venue => venue?.id).filter(Boolean));
       const newlyAddedPlaceIds = verified.map(venue => venue.id).filter(id => !oldIds.has(id));
@@ -273,7 +316,8 @@ export function createNewOpeningsFeed({
         try { await store.collection(NEW_OPENINGS_NOTICE_COLLECTION).doc(city.slug).set(notification, { merge: true }); } catch {}
       }
       try { await store.collection(NEW_OPENINGS_REFRESH_COLLECTION).doc(city.slug).delete(); } catch {}
-      return { status: 'ready', venues: document.venues, updatedAt, newlyAddedPlaceIds, cached: false };
+      diagnostics.stage = 'complete';
+      return { status: 'ready', venues: document.venues, updatedAt, newlyAddedPlaceIds, cached: false, diagnostics };
     })();
     inFlight.set(city.slug, task);
     try { return await task; } finally { if (inFlight.get(city.slug) === task) inFlight.delete(city.slug); }
@@ -288,14 +332,15 @@ export function createNewOpeningsFeed({
     const pool = await loadPool(city);
     const pageSize = Math.max(1, Math.min(NEW_OPENINGS_MAX_PAGE_SIZE, Number.parseInt(String(limit), 10) || 15));
     if (pool.status !== 'ready' || !Array.isArray(pool.venues) || !pool.venues.length) {
-      const text = pool.status === 'monthly_limit'
+      const defaultText = pool.status === 'monthly_limit'
         ? 'Panda has reached this month’s live-search allowance, so I won’t guess about new openings.'
         : pool.status === 'search_unavailable' || pool.status === 'storage_unavailable' || pool.status === 'verification_unavailable'
           ? 'I couldn’t verify new openings just now, so I won’t guess. Please try again shortly.'
           : 'I couldn’t verify any recent high-end openings in ' + city.city + ' yet. Try again later or name another city.';
+      const text = typeof pool.text === 'string' ? pool.text : defaultText;
       return { status: pool.status, newOpeningsSearch: true, city: city.city, country: city.country,
         citySlug: city.slug, venues: [], totalCount: 0, offset: 0, limit: pageSize,
-        nextOffset: 0, hasMore: false, newlyAddedPlaceIds: [], text };
+        nextOffset: 0, hasMore: false, newlyAddedPlaceIds: [], text, diagnostics: pool.diagnostics };
     }
     const excluded = new Set((Array.isArray(excludedPlaceIds) ? excludedPlaceIds : []).filter(id => typeof id === 'string').slice(-500));
     let available = pool.venues.filter(venue => !excluded.has(venue.id));

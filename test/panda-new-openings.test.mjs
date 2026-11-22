@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   NEW_OPENINGS_CACHE_MS, buildNewOpeningSearchPrompt, createNewOpeningsFeed,
-  normalizeCitySlug, openingPlaceIsEligible, parseGroundedOpeningCandidates,
+  normalizeCitySlug, openingPlaceIsEligible, parseGroundedOpeningCandidates, parseGroundedOpeningCandidatesDetailed,
 } from '../api/_panda-new-openings.js';
 
 const NOW = Date.parse('2026-11-22T12:00:00Z');
@@ -38,6 +38,7 @@ test('uses stable city-country cache slugs and appropriate candidate limits', ()
   assert.equal(normalizeCitySlug('Malmö', 'SE'), 'malmo-se');
   assert.match(buildNewOpeningSearchPrompt({ city: 'London', country: 'UK', now: NOW, maxCandidates: 40 }), /up to 40/);
   assert.match(buildNewOpeningSearchPrompt({ city: 'Malmö', country: 'Sweden', now: NOW }), /no more than 15/);
+  assert.match(buildNewOpeningSearchPrompt({ city: 'London', country: 'UK', now: NOW }), /new restaurants London/);
 });
 
 test('accepts only recent dated premium independent candidates with grounded sources', () => {
@@ -51,6 +52,18 @@ test('accepts only recent dated premium independent candidates with grounded sou
     { ...candidate, positioningEvidence: 'A casual neighborhood cafe.' },
   ]) assert.equal(parseGroundedOpeningCandidates({ text: JSON.stringify([rejected]), groundingMetadata: { groundingChunks: [source] } }, { city: 'Oslo', country: 'Norway', now: NOW }).length, 0);
   assert.equal(parseGroundedOpeningCandidates({ text: JSON.stringify([candidate]), groundingMetadata: { groundingChunks: [] } }, { city: 'Oslo', country: 'Norway', now: NOW }).length, 0);
+});
+
+
+test('reports grounding-stage rejection counts without exposing candidate text', () => {
+  const invalid = parseGroundedOpeningCandidatesDetailed({ text: 'No structured results returned.', groundingMetadata: { groundingChunks: [] } }, { city: 'London', country: 'UK', now: NOW });
+  assert.equal(invalid.candidates.length, 0);
+  assert.equal(invalid.diagnostics.jsonArrayFound, false);
+  assert.equal(invalid.diagnostics.groundingChunkCount, 0);
+  const missingSource = parseGroundedOpeningCandidatesDetailed({ text: JSON.stringify([candidate]), groundingMetadata: { groundingChunks: [] } }, { city: 'London', country: 'UK', now: NOW });
+  assert.equal(missingSource.diagnostics.parsedItems, 1);
+  assert.equal(missingSource.diagnostics.rejected.noGroundedSource, 1);
+  assert.equal(JSON.stringify(missingSource.diagnostics).includes(candidate.name), false);
 });
 
 test('rejects non-operational, moderate, poorly rated, or over-established places', () => {
@@ -80,6 +93,37 @@ test('limits pages to 15, advances, avoids repeats, and wraps at the end', async
   const freshRotation = await feed({ location: { lat: 59.91, lng: 10.75 }, excludedPlaceIds: venues.map(venue => venue.id) });
   assert.equal(freshRotation.venues[0].id, first.venues[0].id);
   assert.match(freshRotation.text, /fresh rotation/);
+});
+
+
+test('reports whether the live venue verification stage rejected grounded candidates', async () => {
+  const store = makeStore();
+  const feed = createNewOpeningsFeed({ store, reverseGeocode,
+    searchGrounded: async () => ({ ok: true, queryCount: 3, text: JSON.stringify([candidate]), groundingMetadata: { groundingChunks: [source] } }),
+    hydratePlace: async () => [{ id: 'ChI12345678901234567890', displayName: { text: 'Noma New' }, location: { latitude: 59.9, longitude: 10.7 }, businessStatus: 'CLOSED_PERMANENTLY' }],
+    now: () => NOW,
+  });
+  const result = await feed({ location: { lat: 59.91, lng: 10.75 } });
+  assert.equal(result.status, 'no_results', JSON.stringify(result));
+  assert.ok(result.diagnostics, JSON.stringify(result));
+  assert.equal(result.diagnostics.stage, 'places');
+  assert.equal(result.diagnostics.acceptedItems, 1);
+  assert.equal(result.diagnostics.placeLookupCount, 1);
+  assert.equal(result.diagnostics.placeIneligibleResults, 1);
+  assert.match(result.text, /could not confirm matching venues/);
+});
+
+test('does not let a legacy empty cooldown hide new diagnostic searches', async () => {
+  const store = makeStore(); let searches = 0;
+  await store.collection('new_openings_refresh_state').doc('oslo-no').set({ lastEmptyAt: NOW, city: 'Oslo', country: 'Norway' });
+  const place = { id: 'ChI12345678901234567890', displayName: { text: 'Noma New' }, location: { latitude: 59.9, longitude: 10.7 }, businessStatus: 'OPERATIONAL', priceLevel: 'PRICE_LEVEL_EXPENSIVE', rating: 4.6, userRatingCount: 25, photos: [] };
+  const feed = createNewOpeningsFeed({ store, reverseGeocode,
+    searchGrounded: async () => { searches++; return { ok: true, text: JSON.stringify([candidate]), groundingMetadata: { groundingChunks: [source] } }; },
+    hydratePlace: async () => [place], now: () => NOW,
+  });
+  const result = await feed({ location: { lat: 59.91, lng: 10.75 } });
+  assert.equal(searches, 1);
+  assert.equal(result.status, 'ready');
 });
 
 test('coalesces concurrent refreshes and stores only verified Place results', async () => {
