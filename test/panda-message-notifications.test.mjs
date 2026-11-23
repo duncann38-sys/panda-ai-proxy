@@ -4,7 +4,7 @@ import {
   buildMessageNotification,
   buildMessageTest,
   validateMessageTest,
-} from './.panda-message-notifications.js';
+} from '../api/panda-message-notifications.js';
 
 const token = 'android-device-fcm-token';
 const now = Date.parse('2026-11-23T12:00:00Z');
