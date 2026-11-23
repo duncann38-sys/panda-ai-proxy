@@ -10,18 +10,18 @@ const token = 'android-device-fcm-token';
 const now = Date.parse('2026-11-23T12:00:00Z');
 
 test('message test requires opt-in and the same registered device token', () => {
-  assert.equal(validateMessageTest({ messageNotificationsEnabled: false, fcmTokens: [token] }, token, now).status,
+  assert.equal(validateMessageTest({ messageNotificationsEnabled: false, pandaMessageTokens: [token] }, token, now).status,
     'notifications_not_enabled');
-  assert.equal(validateMessageTest({ messageNotificationsEnabled: true, fcmTokens: ['other-token'] }, token, now).status,
+  assert.equal(validateMessageTest({ messageNotificationsEnabled: true, pandaMessageTokens: ['other-token'] }, token, now).status,
     'device_not_registered');
-  assert.equal(validateMessageTest({ messageNotificationsEnabled: true, fcmTokens: [token] }, token, now).status,
+  assert.equal(validateMessageTest({ messageNotificationsEnabled: true, pandaMessageTokens: [token] }, token, now).status,
     'ready');
 });
 
 test('message test respects a one-minute cooldown', () => {
   const result = validateMessageTest({
     messageNotificationsEnabled: true,
-    fcmTokens: [token],
+    pandaMessageTokens: [token],
     lastPandaMessageTestAt: now - 30_000,
   }, token, now);
   assert.equal(result.status, 'test_cooldown');
