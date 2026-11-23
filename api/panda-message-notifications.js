@@ -92,6 +92,17 @@ export function buildMessageNotification(token, senderName, threadId, messageId)
   };
 }
 
+export function buildMessageMulticast(tokens, senderName, threadId, messageId) {
+  const notification = buildMessageNotification(tokens[0] || '', senderName, threadId, messageId);
+  return {
+    tokens,
+    notification: notification.notification,
+    data: notification.data,
+    android: notification.android,
+    apns: notification.apns,
+  };
+}
+
 export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'private, no-store');
   if (applyGuard(req, res, { methods: ['GET', 'POST', 'OPTIONS'], limit: true })) return;
@@ -231,7 +242,7 @@ export default async function handler(req, res) {
     try {
       const snapshots = await Promise.all(recipientIds.map((uid) => store.collection('users').doc(uid).get()));
       const byToken = new Map();
-      snapshots.forEach((snapshot, index) => {
+      snapshots.forEach((snapshot) => {
         if (!snapshot.exists) return;
         const user = snapshot.data() || {};
         if (user.messageNotificationsEnabled !== true) return;
@@ -243,7 +254,7 @@ export default async function handler(req, res) {
           byToken.set(token, owners);
         }
       });
-      const tokens = [...byToken.keys()].slice(0, 500);
+      const tokens = [...byToken.keys()].slice(0, 1500);
       if (!tokens.length) return res.status(200).json({ status: 'no_enabled_recipients', sent: 0 });
 
       const claimRef = threadRef.collection('message_push_claims').doc(messageId);
@@ -266,19 +277,9 @@ export default async function handler(req, res) {
       try {
         for (let offset = 0; offset < tokens.length; offset += 500) {
           const chunk = tokens.slice(offset, offset + 500);
-          const result = await admin.messaging().sendEachForMulticast({
-            tokens: chunk,
-            notification: {
-              title: senderName + ' sent you a message',
-              body: 'Open Panda Me to reply.',
-            },
-            data: { type: 'PANDA_MESSAGE', threadId, messageId },
-            android: {
-              priority: 'high',
-              notification: { channelId: 'panda-messages', sound: 'default' },
-            },
-            apns: { payload: { aps: { sound: 'default' } } },
-          });
+          const result = await admin.messaging().sendEachForMulticast(
+            buildMessageMulticast(chunk, senderName, threadId, messageId),
+          );
           sent += result.successCount;
           const removals = [];
           result.responses.forEach((response, index) => {
