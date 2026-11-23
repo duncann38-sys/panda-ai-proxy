@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildMessageNotification,
+  buildMessageMulticast,
   buildMessageTest,
   validateMessageTest,
 } from '../api/panda-message-notifications.js';
@@ -38,7 +38,8 @@ test('test alert uses the message channel, sound and vibration path', () => {
 });
 
 test('incoming alert opens the correct thread without exposing message text', () => {
-  const payload = buildMessageNotification(token, 'Duncan', 'thread-1', 'message-1');
+  const payload = buildMessageMulticast([token], 'Duncan', 'thread-1', 'message-1');
+  assert.deepEqual(payload.tokens, [token]);
   assert.equal(payload.notification.title, 'Duncan sent you a message');
   assert.equal(payload.data.type, 'PANDA_MESSAGE');
   assert.equal(payload.data.threadId, 'thread-1');
