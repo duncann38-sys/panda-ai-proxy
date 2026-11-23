@@ -48,7 +48,7 @@ export function validateMessageTest(user, token, now = Date.now()) {
   if (!user || user.messageNotificationsEnabled !== true) {
     return { status: 'notifications_not_enabled' };
   }
-  const registered = Array.isArray(user.fcmTokens) ? user.fcmTokens : [];
+  const registered = Array.isArray(user.pandaMessageTokens) ? user.pandaMessageTokens : [];
   if (!registered.includes(token)) return { status: 'device_not_registered' };
   const lastTest = toMillis(user.lastPandaMessageTestAt);
   if (lastTest && now - lastTest < TEST_COOLDOWN_MS) {
@@ -144,7 +144,9 @@ export default async function handler(req, res) {
       await userRef.set({
         messageNotificationsEnabled: body.enabled,
         messageNotificationsUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        ...(body.enabled ? { fcmTokens: admin.firestore.FieldValue.arrayUnion(token) } : {}),
+        ...(body.enabled
+          ? { pandaMessageTokens: admin.firestore.FieldValue.arrayUnion(token) }
+          : { pandaMessageTokens: [] }),
       }, { merge: true });
       return res.status(200).json({ status: 'saved', enabled: body.enabled });
     } catch {
@@ -183,7 +185,9 @@ export default async function handler(req, res) {
       return res.status(200).json({ status: 'test_sent', target: 'signed_in_device' });
     } catch (error) {
       if (['messaging/registration-token-not-registered', 'messaging/invalid-registration-token'].includes(error?.code)) {
-        await userRef.set({ fcmTokens: admin.firestore.FieldValue.arrayRemove(token) }, { merge: true }).catch(() => {});
+        await userRef.set({
+          pandaMessageTokens: admin.firestore.FieldValue.arrayRemove(token),
+        }, { merge: true }).catch(() => {});
       }
       await userRef.set({
         lastPandaMessageTestAt: admin.firestore.FieldValue.delete(),
@@ -231,7 +235,7 @@ export default async function handler(req, res) {
         if (!snapshot.exists) return;
         const user = snapshot.data() || {};
         if (user.messageNotificationsEnabled !== true) return;
-        const tokens = Array.isArray(user.fcmTokens) ? user.fcmTokens : [];
+        const tokens = Array.isArray(user.pandaMessageTokens) ? user.pandaMessageTokens : [];
         for (const token of tokens) {
           if (!validToken(token)) continue;
           const owners = byToken.get(token) || [];
@@ -284,7 +288,7 @@ export default async function handler(req, res) {
             ].includes(response.error?.code)) return;
             for (const ownerRef of byToken.get(chunk[index]) || []) {
               removals.push(ownerRef.set({
-                fcmTokens: admin.firestore.FieldValue.arrayRemove(chunk[index]),
+                pandaMessageTokens: admin.firestore.FieldValue.arrayRemove(chunk[index]),
               }, { merge: true }));
             }
           });
