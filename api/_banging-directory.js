@@ -8,7 +8,6 @@ import { luxuryEvidence } from './_banging-curation.js';
 
 const TTL = 3 * 60 * 60 * 1000;
 const BANGING_LIVE_DEADLINE_MS = 4_300;
-const BANGING_FALLBACK_RESPONSE_TTL_MS = 5 * 60 * 1000;
 const flights = new Map();
 const CACHE = 'banging_directory_cache_v1';
 const failures = new Map();
@@ -187,104 +186,37 @@ async function directory(origin, signal) {
     longitude: Math.round(origin.longitude * 10) / 10,
   };
   const key = isLondon ? 'luxury-london-v2' : `luxury-area-v2:${centre.latitude}:${centre.longitude}`;
-  return refresh(key, async liveSignal => {
-    const queries = BANGING_SEARCH_TERMS.map(term => isLondon
-      ? `${term} in London`
-      : `${term} near ${centre.latitude}, ${centre.longitude}`);
-    // Query broad metro zones from the user's origin; price/review density,
-    // not a fixed list of neighbourhood names, identifies upscale clusters.
-    const attempts = await Promise.allSettled(queries.map(async query => {
-      if (liveSignal?.aborted) throw error('Banging lookup cancelled.');
-      await withBudget('places');
-      recordCostEvent('banging_directory_search', { area: key });
-      return searchVenueListings(query, centre, {
-        ttlMs: TTL,
-        signal: liveSignal,
-        timeoutMs: BANGING_LIVE_DEADLINE_MS,
-        biasRadiusMeters: 45_000,
-      });
-    }));
-    const pool = attempts.flatMap(result => result.status === 'fulfilled' && Array.isArray(result.value)
-      ? result.value : []);
-    const found = new Map();
-    for (const venue of rankedBangingPool(pool)) {
-      found.set(venue.id, venue);
-    }
-    if (!found.size) {
-      if (liveSignal?.aborted) throw error('Banging Google lookup timed out.');
-      const failed = attempts.find(result => result.status === 'rejected');
-      if (failed?.status === 'rejected') throw failed.reason;
-      throw error('No verified high-end restaurants are available for this area yet.', 404);
-    }
-    return [...found.values()].sort((a, b) => Number(b.rating) - Number(a.rating) ||
-      Number(b.ratingCount) - Number(a.ratingCount)).slice(0, 90);
-  }, TTL, { signal });
-}
-
-function areaDirectoryKeys(origin, wide = false) {
-  const latitude = Math.round(origin.latitude * 10) / 10;
-  const longitude = Math.round(origin.longitude * 10) / 10;
-  const offsets = wide ? [-3, -2, -1, 0, 1, 2, 3] : [-1, 0, 1];
-  const keys = new Set();
-  for (const latOffset of offsets) {
-    for (const lngOffset of offsets) {
-      const lat = Math.round((latitude + latOffset / 10) * 10) / 10;
-      const lng = Math.round((longitude + lngOffset / 10) * 10) / 10;
-      keys.add(`luxury-area-v2:${lat}:${lng}`);
-      keys.add(`luxury-area-v1:${lat}:${lng}`);
-    }
+  const queries = BANGING_SEARCH_TERMS.map(term => isLondon
+    ? `${term} in London`
+    : `${term} near ${centre.latitude}, ${centre.longitude}`);
+  // Banging must not read, write, or coalesce Google Places results across users.
+  const attempts = await Promise.allSettled(queries.map(async query => {
+    if (signal?.aborted) throw error('Banging lookup cancelled.');
+    await withBudget('places');
+    recordCostEvent('banging_directory_search', { area: key });
+    return searchVenueListings(query, centre, {
+      bypassCache: true,
+      signal,
+      timeoutMs: BANGING_LIVE_DEADLINE_MS,
+      biasRadiusMeters: 45_000,
+    });
+  }));
+  const pool = attempts.flatMap(result => result.status === 'fulfilled' && Array.isArray(result.value)
+    ? result.value : []);
+  const found = new Map();
+  for (const venue of rankedBangingPool(pool)) found.set(venue.id, venue);
+  if (!found.size) {
+    if (signal?.aborted) throw error('Banging Google lookup timed out.');
+    const failed = attempts.find(result => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
+    throw error('No verified high-end restaurants are available for this area yet.', 404);
   }
-  return [...keys];
-}
-
-async function readStoredDirectory(origin, { wide = false } = {}) {
-  const isLondon = meters(origin, london) <= 150_000;
-  const keys = isLondon
-    ? ['luxury-london-v2', 'luxury-london-v1']
-    : areaDirectoryKeys(origin, wide);
-  const entries = await Promise.all(keys.map(key => readSharedCache(CACHE, key, TTL)));
-  const candidates = new Map();
-  let expiresAt = Date.now() + BANGING_FALLBACK_RESPONSE_TTL_MS;
-  for (const entry of entries) {
-    if (!entry || !Array.isArray(entry.value)) continue;
-    expiresAt = Math.min(expiresAt, entry.ts + TTL);
-    for (const venue of entry.value) {
-      if (venue?.id && !candidates.has(venue.id)) candidates.set(venue.id, venue);
-    }
-  }
-  const values = [...candidates.values()];
   return {
-    venues: rankedBangingPool(values),
-    expiresAt,
+    value: [...found.values()].sort((a, b) => Number(b.rating) - Number(a.rating)
+      || Number(b.ratingCount) - Number(a.ratingCount)).slice(0, 90),
+    ts: Date.now(),
   };
 }
-
-function estimatedFallbackBody(origin, stored, premiumIds = []) {
-  const results = stored.venues.flatMap(venue => {
-    const minutes = estimateBangingTransitMinutes(origin, venue);
-    return minutes === null ? [] : [{
-      ...venue,
-      bangingFallback: true,
-      bangingFallbackSource: 'storage',
-      bangingTransitEstimated: true,
-      bangingTransitMinutes: minutes,
-      bangingVerifiedAt: undefined,
-    }];
-  }).sort((a, b) => Number(b.rating) - Number(a.rating)
-    || Number(b.ratingCount) - Number(a.ratingCount))
-    .slice(0, premiumIds.length ? 40 : 50);
-  return {
-    results,
-    premiumJourneys: {},
-    premiumVerification: { requested: premiumIds.length, verified: 0 },
-    complete: results.length >= (premiumIds.length ? 40 : 50),
-    expiresAt: Math.min(stored.expiresAt, Date.now() + BANGING_FALLBACK_RESPONSE_TTL_MS),
-    travelMode: 'estimated',
-    maxMinutes: 120,
-    fallbackReason: results.length ? 'google_unavailable_using_stored_venues' : 'google_unavailable_no_stored_venues',
-  };
-}
-
 async function activePlacements(signal) {
   return refresh('active-placements-v1', async () => {
     const response = await fetch('https://panda-partners-api.vercel.app/api/public/sponsored-venues',
@@ -316,9 +248,7 @@ async function getVerifiedBangingDirectory(origin, premiumIds, signal) {
   const premium = premiumPlacements(premiumIds, feed.value);
   const paidIds = new Set(feed.value.map(item => item.place_id));
   const organic = curated.value.filter(venue => !paidIds.has(venue.id));
-  const prove = (candidates, role) => refresh(
-    `transit-v1:${role === 'premium' ? 'premium-place-id-v1' : role}:${anchor.latitude}:${anchor.longitude}:${candidates.map(item => item.id).sort().join(',')}`,
-    async () => {
+  const prove = async (candidates, role) => {
     const durations = {};
     for (let offset = 0; offset < candidates.length; offset += 50) {
       const chunk = candidates.slice(offset, offset + 50);
@@ -331,39 +261,43 @@ async function getVerifiedBangingDirectory(origin, premiumIds, signal) {
       for (let index = 0; index < chunk.length; index++) {
         const venue = chunk[index];
         let minutes = times[index];
-        // A venue at the boarding location may have no transit leg at all.
-        // Only a real, verified short walking route can admit this case.
         if (minutes === null && (role === 'premium' || meters(anchor, venue) <= 250)) {
           if (role === 'premium') await withBudget('routes', 1);
           const walking = await getWalkingRoute(anchor, role === 'premium'
             ? { placeId: venue.id } : { latitude: venue.latitude, longitude: venue.longitude }, {
               signal,
               timeoutMs: BANGING_LIVE_DEADLINE_MS,
+              bypassCache: true,
             }).catch(cause => {
               if (role !== 'premium' || cause?.status === 429) throw cause;
               console.warn('[Panda Banging] A Premium walking proof was unavailable', cause?.status || 'provider_error');
               return null;
             });
-          // Without a transit leg, retain only an actual short boarding-location
-          // walk, never a guessed distance or an arbitrary two-hour walk.
           minutes = walking && (role !== 'premium' || walking.distanceMeters <= 250)
             ? walking.durationMinutes : null;
         }
         durations[venue.id] = minutes;
       }
     }
-    return durations;
-  }, TTL, { signal });
+    return { value: durations, ts: Date.now() };
+  };
   // A new paid cohort must not repeat the whole organic route matrix.
   const [proof, paidProof] = await Promise.all([prove(organic, 'organic'), prove(premium, 'premium')]);
   // Verify access to the shared anchor too; straight-line radius is not a
   // public transport proof. Cache this inexpensive access leg across visits.
-  const access = await refresh(`access-v1:${origin.latitude.toFixed(4)}:${origin.longitude.toFixed(4)}`, async () => {
-    if (meters(origin, anchor) < 15) return { durationMinutes: 1 };
-    const route = await getWalkingRoute(origin, anchor, { signal, timeoutMs: BANGING_LIVE_DEADLINE_MS });
-    if (!route) throw error('Could not verify public transport access from your location.');
-    return { durationMinutes: route.durationMinutes };
-  }, TTL, { signal });
+  const access = {
+    value: await (async () => {
+      if (meters(origin, anchor) < 15) return { durationMinutes: 1 };
+      const route = await getWalkingRoute(origin, anchor, {
+        signal,
+        timeoutMs: BANGING_LIVE_DEADLINE_MS,
+        bypassCache: true,
+      });
+      if (!route) throw error('Could not verify public transport access from your location.');
+      return { durationMinutes: route.durationMinutes };
+    })(),
+    ts: Date.now(),
+  };
   const eligible = (venue, verified) => withinTransitLimit(verified.value[venue.id], access.value.durationMinutes);
   const journey = (venue, verified) => ({
     bangingTransitMinutes: verified.value[venue.id] + access.value.durationMinutes,
@@ -384,46 +318,8 @@ async function getVerifiedBangingDirectory(origin, premiumIds, signal) {
   };
 }
 
-function waitAtMost(promise, milliseconds) {
-  let timer;
-  return Promise.race([
-    promise,
-    new Promise(resolve => { timer = setTimeout(() => resolve(null), milliseconds); }),
-  ]).finally(() => clearTimeout(timer));
-}
-
-function mergeVerifiedAndStored(verified, stored, premiumIds) {
-  const target = premiumIds.length ? 40 : 50;
-  const seen = new Set();
-  const results = [...(verified?.results || []), ...(stored?.results || [])].filter(venue => {
-    if (!venue?.id || seen.has(venue.id)) return false;
-    seen.add(venue.id);
-    return true;
-  }).slice(0, target);
-  return {
-    ...(verified || {}),
-    results,
-    premiumJourneys: verified?.premiumJourneys || {},
-    premiumVerification: verified?.premiumVerification || {
-      requested: premiumIds.length,
-      verified: 0,
-    },
-    complete: results.length >= target,
-    expiresAt: Math.min(
-      verified?.expiresAt || Date.now() + BANGING_FALLBACK_RESPONSE_TTL_MS,
-      stored?.expiresAt || Date.now() + BANGING_FALLBACK_RESPONSE_TTL_MS,
-    ),
-    travelMode: stored?.results?.length ? 'transit_or_estimated' : verified?.travelMode || 'transit',
-    maxMinutes: 120,
-    ...(stored?.results?.length
-      ? { fallbackReason: 'google_unavailable_using_stored_venues' }
-      : {}),
-  };
-}
-
 export async function getBangingDirectory(origin, premiumIds = [], { timeoutMs = BANGING_LIVE_DEADLINE_MS } = {}) {
   const safePremiumIds = [...new Set(premiumIds)].slice(0, 10);
-  const storedCurrentPromise = readStoredDirectory(origin);
   const controller = new AbortController();
   let timer;
   const deadline = new Promise((_, reject) => {
@@ -438,49 +334,14 @@ export async function getBangingDirectory(origin, premiumIds = [], { timeoutMs =
       deadline,
     ]);
     const target = safePremiumIds.length ? 40 : 50;
-    if (verified.results.length >= target) return verified;
-    let current = await waitAtMost(storedCurrentPromise, 250);
-    let estimated = current
-      ? estimatedFallbackBody(origin, current, safePremiumIds)
-      : null;
-    if ((!estimated?.results?.length || verified.results.length + estimated.results.length < target)
-        && meters(origin, london) > 150_000) {
-      const wider = await waitAtMost(readStoredDirectory(origin, { wide: true }), 350);
-      if (wider) {
-        const widerEstimate = estimatedFallbackBody(origin, wider, safePremiumIds);
-        if ((widerEstimate.results?.length || 0) > (estimated?.results?.length || 0)) {
-          current = wider;
-          estimated = widerEstimate;
-        }
-      }
-    }
-    if (!estimated?.results?.length) {
-      return {
-        ...verified,
-        fallbackReason: verified.results.length
-          ? 'verified_results_below_target'
-          : 'google_unavailable_no_stored_venues',
-      };
-    }
-    return mergeVerifiedAndStored(verified, estimated, safePremiumIds);
+    return {
+      ...verified,
+      complete: verified.results.length >= target,
+      ...(verified.results.length < target
+        ? { fallbackReason: verified.results.length ? 'verified_results_below_target' : 'google_unavailable_no_device_fallback' }
+        : {}),
+    };
   } catch (cause) {
-    let current = await waitAtMost(storedCurrentPromise, 250);
-    let fallback = current
-      ? estimatedFallbackBody(origin, current, safePremiumIds)
-      : null;
-    const target = safePremiumIds.length ? 40 : 50;
-    if ((fallback?.results?.length || 0) < target && meters(origin, london) > 150_000) {
-      const widerPromise = readStoredDirectory(origin, { wide: true });
-      const wider = await waitAtMost(widerPromise, 350);
-      if (wider) {
-        const widerFallback = estimatedFallbackBody(origin, wider, safePremiumIds);
-        if ((widerFallback.results?.length || 0) > (fallback?.results?.length || 0)) {
-          current = wider;
-          fallback = widerFallback;
-        }
-      }
-    }
-    if (fallback?.results?.length) return fallback;
     return {
       results: [],
       premiumJourneys: {},
@@ -490,8 +351,8 @@ export async function getBangingDirectory(origin, premiumIds = [], { timeoutMs =
       travelMode: 'estimated',
       maxMinutes: 120,
       fallbackReason: cause?.name === 'AbortError' || controller.signal.aborted
-        ? 'google_unavailable_no_stored_venues'
-        : 'google_error_no_stored_venues',
+        ? 'google_unavailable_no_device_fallback'
+        : 'google_error_no_device_fallback',
     };
   } finally {
     clearTimeout(timer);
