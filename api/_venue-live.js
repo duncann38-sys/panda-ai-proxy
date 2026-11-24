@@ -239,9 +239,18 @@ function getTodayHours(place) {
 }
 
 async function googleJson(url, options, fallbackMessage) {
+  const {
+    timeoutMs = 10_000,
+    signal: parentSignal,
+    ...requestOptions
+  } = options;
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const signal = parentSignal
+    ? AbortSignal.any([parentSignal, timeoutSignal])
+    : timeoutSignal;
   const response = await fetch(url, {
-    ...options,
-    signal: options.signal ?? AbortSignal.timeout(10_000),
+    ...requestOptions,
+    signal,
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -282,10 +291,17 @@ export function sendVenueError(res, error, fallbackMessage) {
   res.status(status).json({ error: error?.message || fallbackMessage });
 }
 
-export async function searchVenueListings(query, locationBias = null, { ttlMs = SEARCH_CACHE_TTL_MS, rankByDistance = false } = {}) {
+export async function searchVenueListings(query, locationBias = null, {
+  ttlMs = SEARCH_CACHE_TTL_MS,
+  rankByDistance = false,
+  signal,
+  timeoutMs = 10_000,
+  biasRadiusMeters = 8_000,
+} = {}) {
   const normalized = [
     (ttlMs === SEARCH_CACHE_TTL_MS ? 'planner-facts-v3' : `curated-facts-v1:${ttlMs}`) +
-      (rankByDistance ? ':distance' : ''),
+      (rankByDistance ? ':distance' : '') +
+      (biasRadiusMeters === 8_000 ? '' : `:bias:${biasRadiusMeters}`),
     query.trim().toLocaleLowerCase('en-GB'),
     locationBias?.latitude?.toFixed(3) || '',
     locationBias?.longitude?.toFixed(3) || '',
@@ -314,6 +330,8 @@ export async function searchVenueListings(query, locationBias = null, { ttlMs = 
       GOOGLE_NEARBY_URL,
       {
         method: 'POST',
+        signal,
+        timeoutMs,
         headers: {
           'Content-Type': 'application/json',
           'X-Goog-Api-Key': apiKey(),
@@ -378,6 +396,8 @@ export async function searchVenueListings(query, locationBias = null, { ttlMs = 
     GOOGLE_SEARCH_URL,
     {
       method: 'POST',
+      signal,
+      timeoutMs,
       headers: {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': apiKey(),
@@ -405,7 +425,7 @@ export async function searchVenueListings(query, locationBias = null, { ttlMs = 
               locationBias: {
                 circle: {
                   center: locationBias,
-                  radius: 8000,
+                  radius: biasRadiusMeters,
                 },
               },
             }
@@ -597,7 +617,7 @@ function routeWaypoint(point) {
   return { location: { latLng: { latitude: point.latitude, longitude: point.longitude } } };
 }
 
-export async function getWalkingRoute(origin, destination, { signal } = {}) {
+export async function getWalkingRoute(origin, destination, { signal, timeoutMs = 10_000 } = {}) {
     const originWaypoint = routeWaypoint(origin);
     const destinationWaypoint = routeWaypoint(destination);
     const destinationKey = destinationWaypoint.placeId ||
@@ -612,6 +632,7 @@ export async function getWalkingRoute(origin, destination, { signal } = {}) {
         {
           method: 'POST',
           signal,
+          timeoutMs,
           headers: {
             'Content-Type': 'application/json',
             'X-Goog-Api-Key': apiKey(),
@@ -686,13 +707,15 @@ export async function getWalkingRoute(origin, destination, { signal } = {}) {
 
 // Banging needs only a bounded travel-time proof, not a costly full detail,
 // station, live departures or photo lookup for every candidate.
-export async function getBangingTransitDurations(origin, destinations) {
+export async function getBangingTransitDurations(origin, destinations, { signal, timeoutMs = 10_000 } = {}) {
   if (!destinations.length || destinations.length > 50) throw requestError('Invalid Banging route batch.', 400);
   recordCostEvent('banging_transit_matrix', { elements: destinations.length });
   const payload = await googleJson(
     'https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix',
     {
       method: 'POST',
+      signal,
+      timeoutMs,
       headers: {
         'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey(),
         'X-Goog-FieldMask': 'originIndex,destinationIndex,duration,condition,status',
