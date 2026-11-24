@@ -87,5 +87,5 @@ export function luxuryEvidence(venue) {
 export function qualifiesLuxuryResult(venue) {
   return Boolean(venue?.id && Number(venue.rating) >= 4.3 &&
     Number.isFinite(venue.latitude) && Number.isFinite(venue.longitude) &&
-    venue.photoNames?.length && luxuryEvidence(venue));
+    luxuryEvidence(venue));
 }

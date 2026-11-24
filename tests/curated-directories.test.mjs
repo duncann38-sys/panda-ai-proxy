@@ -109,6 +109,8 @@ test('shared luxury pool, two-hour proofs, Premium separation and planner reuse'
   assert(wider.results.length >= pool.results.length);
   const curation = (await load('../api/_banging-curation.js')).namespace;
   assert(curation.luxuryEvidence(fixture('fine')));
+  assert.equal(curation.qualifiesLuxuryResult(fixture('fine', { photoNames: [] })), true);
+  assert.equal(curation.qualifiesLuxuryResult(fixture('low rating', { rating: 4.2, photoNames: [] })), false);
   assert.equal(curation.luxuryEvidence(fixture('ordinary expensive', { category: 'Pub' })), null);
   assert(curation.luxuryEvidence(fixture('core', { name: 'CORE by Clare Smyth', category: 'Restaurant' })));
   assert.equal(curation.luxuryEvidence(fixture('fake other city', {
