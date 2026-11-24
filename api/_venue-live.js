@@ -297,6 +297,7 @@ export async function searchVenueListings(query, locationBias = null, {
   signal,
   timeoutMs = 10_000,
   biasRadiusMeters = 8_000,
+  bypassCache = false,
 } = {}) {
   const normalized = [
     (ttlMs === SEARCH_CACHE_TTL_MS ? 'planner-facts-v3' : `curated-facts-v1:${ttlMs}`) +
@@ -306,10 +307,10 @@ export async function searchVenueListings(query, locationBias = null, {
     locationBias?.latitude?.toFixed(3) || '',
     locationBias?.longitude?.toFixed(3) || '',
   ].join(':');
-  const cached = searchCache.get(normalized);
-  if (cached && cached.expiresAt > Date.now()) return cached.results;
-  const shared = await readSharedCache('venue_search_cache_v1', normalized, ttlMs);
-  if (Array.isArray(shared?.value)) {
+  const cached = bypassCache ? null : searchCache.get(normalized);
+  if (!bypassCache && cached && cached.expiresAt > Date.now()) return cached.results;
+  const shared = bypassCache ? null : await readSharedCache('venue_search_cache_v1', normalized, ttlMs);
+  if (!bypassCache && Array.isArray(shared?.value)) {
     recordCostEvent('venue_search_cache_hit', { layer: 'firestore' });
     searchCache.set(normalized, {
       results: shared.value,
@@ -322,7 +323,7 @@ export async function searchVenueListings(query, locationBias = null, {
     });
     return shared.value;
   }
-  if (inFlightSearches.has(normalized)) return inFlightSearches.get(normalized);
+  if (!bypassCache && inFlightSearches.has(normalized)) return inFlightSearches.get(normalized);
   const request = (async () => {
 
   if (locationBias && /\bnear me\b/i.test(query)) {
@@ -386,8 +387,10 @@ export async function searchVenueListings(query, locationBias = null, {
         : [],
     );
     if (nearbyResults.length) {
-      searchCache.set(normalized, { results: nearbyResults, expiresAt: Date.now() + CACHE_TTL_MS });
-      await writeSharedCache('venue_search_cache_v1', normalized, nearbyResults);
+      if (!bypassCache) {
+        searchCache.set(normalized, { results: nearbyResults, expiresAt: Date.now() + CACHE_TTL_MS });
+        await writeSharedCache('venue_search_cache_v1', normalized, nearbyResults);
+      }
       return nearbyResults;
     }
   }
@@ -456,10 +459,13 @@ export async function searchVenueListings(query, locationBias = null, {
         }]
       : [],
   );
-  searchCache.set(normalized, { results, expiresAt: Date.now() + CACHE_TTL_MS });
-  await writeSharedCache('venue_search_cache_v1', normalized, results);
+  if (!bypassCache) {
+    searchCache.set(normalized, { results, expiresAt: Date.now() + CACHE_TTL_MS });
+    await writeSharedCache('venue_search_cache_v1', normalized, results);
+  }
   return results;
   })();
+  if (bypassCache) return request;
   inFlightSearches.set(normalized, request);
   try {
     return await request;
@@ -617,14 +623,14 @@ function routeWaypoint(point) {
   return { location: { latLng: { latitude: point.latitude, longitude: point.longitude } } };
 }
 
-export async function getWalkingRoute(origin, destination, { signal, timeoutMs = 10_000 } = {}) {
+export async function getWalkingRoute(origin, destination, { signal, timeoutMs = 10_000, bypassCache = false } = {}) {
     const originWaypoint = routeWaypoint(origin);
     const destinationWaypoint = routeWaypoint(destination);
     const destinationKey = destinationWaypoint.placeId ||
       [destination.latitude, destination.longitude].map(value => value.toFixed(5)).join(':');
     const cacheKey = `${origin.latitude.toFixed(5)}:${origin.longitude.toFixed(5)}:${destinationKey}`;
-    const cached = walkingRouteCache.get(cacheKey);
-    if (cached && cached.expires > Date.now()) return cached.route;
+    const cached = bypassCache ? null : walkingRouteCache.get(cacheKey);
+    if (!bypassCache && cached && cached.expires > Date.now()) return cached.route;
     let payload;
     try {
       payload = await googleJson(
@@ -698,8 +704,10 @@ export async function getWalkingRoute(origin, destination, { signal, timeoutMs =
       ...(route.polyline?.encodedPolyline ? { polyline: route.polyline.encodedPolyline } : {}),
       source: 'google_routes',
     };
-    walkingRouteCache.set(cacheKey, { route: walkingResult, expires: Date.now() + 3 * 60 * 60 * 1000 });
-    if (walkingRouteCache.size > 1000) walkingRouteCache.delete(walkingRouteCache.keys().next().value);
+    if (!bypassCache) {
+      walkingRouteCache.set(cacheKey, { route: walkingResult, expires: Date.now() + 3 * 60 * 60 * 1000 });
+      if (walkingRouteCache.size > 1000) walkingRouteCache.delete(walkingRouteCache.keys().next().value);
+    }
     return walkingResult;
     }
 
