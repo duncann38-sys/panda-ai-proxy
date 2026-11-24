@@ -15,7 +15,10 @@ test('shared luxury pool, two-hour proofs, Premium separation and planner reuse'
   }
   const records = new Map();
   const counters = { searches: 0, matrices: 0, walks: 0 };
+  const searchOptions = [];
+  const routeOptions = [];
   let available = true;
+  let routeShouldHang = false;
   const doc = (collection, key) => ({
     path: `${collection}/${key}`,
     async get() { return { exists: records.has(this.path), data: () => records.get(this.path) }; },
@@ -41,14 +44,17 @@ test('shared luxury pool, two-hour proofs, Premium separation and planner reuse'
       const value = records.get(`${collection}/${createHash('sha256').update(key).digest('base64url')}`);
       return value && Date.now() - value.ts < ttl ? { value: value.value, ts: value.ts } : null;
     },
-    searchVenueListings: async query => {
+    searchVenueListings: async (query, _location, options) => {
       counters.searches++;
+      searchOptions.push(options);
       return Array.from({ length: 20 }, (_, index) => fixture(`${query}:${index}`));
     },
     getVenueProfile: async id => fixture(id),
-    getBangingTransitDurations: async (_origin, destinations) => {
+    getBangingTransitDurations: async (_origin, destinations, options) => {
       counters.matrices++;
+      routeOptions.push(options);
       assert(destinations.length <= 50);
+      if (routeShouldHang) return new Promise(() => {});
       return destinations.map((_, index) => index === 0 ? 116 : index === 1 ? null : 45);
     },
     getWalkingRoute: async () => { counters.walks++; return { durationMinutes: 5 }; },
@@ -88,7 +94,10 @@ test('shared luxury pool, two-hour proofs, Premium separation and planner reuse'
   assert(result.results.length >= 40);
   assert(result.results.every(venue => venue.bangingTransitMinutes <= 120 && venue.luxurySource && venue.bangingVerifiedAt));
   assert.equal(Object.hasOwn(result.premiumJourneys, 'ChIJdiscovery'), false);
-  assert.equal(counters.searches, 15);
+  assert.equal(counters.searches, 6);
+  assert.ok(searchOptions.every(options => options.timeoutMs <= 5_000
+    && options.biasRadiusMeters === 45_000 && options.signal));
+  assert.ok(routeOptions.every(options => options.timeoutMs <= 5_000 && options.signal));
   const before = { ...counters };
   await Promise.all(Array.from({ length: 5 }, () => directory.getBangingDirectory(origin, ['ChIJpremium01', 'ChIJpremium02'])));
   assert.deepEqual(counters, before);
@@ -96,6 +105,21 @@ test('shared luxury pool, two-hour proofs, Premium separation and planner reuse'
   assert.equal(counters.searches, before.searches);
   assert.equal(counters.matrices, before.matrices);
   assert.equal(counters.walks, before.walks + 1);
+  routeShouldHang = true;
+  const startedAt = Date.now();
+  const offline = await directory.getBangingDirectory(origin, [], { timeoutMs: 60 });
+  assert(Date.now() - startedAt < 1_000, 'storage fallback must not wait for the hung Routes request');
+  assert.equal(offline.results.length, 50);
+  assert.ok(offline.results.every(venue =>
+    venue.bangingFallback === true
+    && venue.bangingFallbackSource === 'storage'
+    && venue.bangingTransitEstimated === true
+    && venue.bangingTransitMinutes < 120
+    && venue.bangingVerifiedAt === undefined));
+  assert.equal(offline.travelMode, 'estimated');
+  assert.equal(directory.estimateBangingTransitMinutes(origin, { latitude: 51.5, longitude: -0.1 }), 15);
+  assert.equal(directory.estimateBangingTransitMinutes(origin, { latitude: 53.48, longitude: -2.24 }), null);
+  routeShouldHang = false;
   assert.equal(directory.withinTransitLimit(115, 5), true);
   assert.equal(directory.withinTransitLimit(116, 5), false);
   assert.equal(directory.withinTransitLimit(null, 0), false);

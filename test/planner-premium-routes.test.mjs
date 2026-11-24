@@ -10,7 +10,9 @@ const origin = { latitude: 51.48, longitude: -0.14 };
 const id = 'ChIJpaidAlpha1';
 const plain = value => JSON.parse(JSON.stringify(value));
 const stripExports = source => source.replace(/\bexport (?:default )?/g, '');
-const globals = { AbortSignal, console, Date, Math, Map, Set, Number, Promise };
+const globals = {
+  AbortController, AbortSignal, clearTimeout, console, Date, Math, Map, Set, Number, Promise, setTimeout,
+};
 const error = (message, status) => Object.assign(new Error(message), { status });
 
 function routeContext(googleJson) {
@@ -131,18 +133,22 @@ test('route quota denial is explicit and never starts a second provider request'
 
 test('planner requests use one bounded deadline without changing other route requests', () => {
   assert.match(transit, /planner \? AbortSignal\.timeout\(13_000\) : undefined/);
-  assert.match(live, /signal: options\.signal \?\? AbortSignal\.timeout\(10_000\)/);
+  assert.match(live, /timeoutSignal = AbortSignal\.timeout\(timeoutMs\)/);
+  assert.match(live, /AbortSignal\.any\(\[parentSignal, timeoutSignal\]\)/);
 });
 
 function bangingContext({ denyWalk = false, walkDistance, paidMinutes = 15 } = {}) {
   const now = Date.now();
   const source = banging.slice(banging.indexOf('export function premiumPlacements('));
   const globalsForBanging = {
-    ...globals, TTL: 3 * 60 * 60 * 1000, error, meters: () => 0,
+    ...globals, TTL: 3 * 60 * 60 * 1000, BANGING_LIVE_DEADLINE_MS: 4_300,
+    BANGING_FALLBACK_RESPONSE_TTL_MS: 5 * 60 * 1000, error, london: origin, meters: () => 0,
     directory: async () => ({ value: [{ id: 'organic' }], ts: now }),
     activePlacements: async () => ({ value: [{ place_id: id, tier: 'banging' },
       { place_id: 'ChIJpaidBeta22', tier: 'banging' }, { place_id: 'ChIJdiscovery', tier: 'discovery' }], ts: now }),
     refresh: async (_, loader) => ({ value: await loader(), ts: now }),
+    readStoredDirectory: async () => ({ venues: [], expiresAt: Date.now() + 300_000 }),
+    estimatedFallbackBody: () => ({ results: [], expiresAt: Date.now() + 300_000 }),
     withBudget: async () => {},
     getBangingTransitDurations: async (_, destinations) => destinations.map((v, index) =>
       v.placeId ? index === 0 ? paidMinutes : null : 30),
@@ -172,9 +178,11 @@ test('one unavailable Premium walking proof does not suppress other genuinely ve
   assert.equal(body.results.length, 1);
 });
 
-test('Premium fallback still obeys route budgets and never hides a 429 quota denial', async () => {
-  await assert.rejects(bangingContext({ denyWalk: true }).getBangingDirectory(origin, [id, 'ChIJpaidBeta22']),
-    /unavailable/);
+test('Banging falls back cleanly when a Premium route proof is denied', async () => {
+  const body = await bangingContext({ denyWalk: true }).getBangingDirectory(origin, [id, 'ChIJpaidBeta22']);
+  assert.equal(body.premiumVerification.verified, 0);
+  assert.equal(body.results.length, 0);
+  assert.match(body.fallbackReason, /google_error_no_stored_venues/);
   assert.match(banging, /await withBudget\('routes', 1\)/);
   assert.match(banging, /walking\.distanceMeters <= 250/);
   assert.match(banging, /minutes \+ accessMinutes <= 120/);
