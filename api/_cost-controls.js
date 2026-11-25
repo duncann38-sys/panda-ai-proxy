@@ -2,6 +2,10 @@ import { createHash } from 'node:crypto';
 
 const DEFAULT_MAX_CONVERSATION_ITEMS = 24;
 const DEFAULT_MAX_CONVERSATION_CHARS = 60_000;
+const SAFE_METRIC_FIELDS = new Set([
+  'areaHash', 'category', 'count', 'elements', 'layer', 'modelCount',
+  'openNow', 'page', 'responseType', 'scope', 'status',
+]);
 
 function positiveInteger(value, fallback) {
   const parsed = Number.parseInt(String(value ?? ''), 10);
@@ -65,11 +69,23 @@ export function clientFingerprint(req, salt = process.env.PANDA_CLIENT_HASH_SALT
 
 export function recordCostEvent(event, fields = {}) {
   if (process.env.PANDA_USAGE_METRICS !== 'true') return;
+  const safeEvent = typeof event === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(event)
+    ? event
+    : 'unknown_event';
+  const safeFields = {};
+  for (const [key, value] of Object.entries(fields || {})) {
+    if (!SAFE_METRIC_FIELDS.has(key)) continue;
+    if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) {
+      safeFields[key] = value;
+    } else if (typeof value === 'string' && value.length <= 128) {
+      safeFields[key] = value;
+    }
+  }
   console.info(JSON.stringify({
     type: 'panda_cost',
-    event,
+    event: safeEvent,
     timestamp: new Date().toISOString(),
-    ...fields,
+    ...safeFields,
   }));
 }
 
@@ -133,34 +149,45 @@ export async function writeSharedGeminiCall(store, key, result, now = Date.now()
 }
 
 export function configuredDailyLimit(value) {
-  const parsed = Number.parseInt(String(value ?? ''), 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  const normalized = String(value ?? '').trim();
+  if (!/^\d+$/.test(normalized)) return null;
+  const parsed = Number(normalized);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
 export async function consumeDailyBudget(store, kind, configuredLimit, now = new Date()) {
   const limit = configuredDailyLimit(configuredLimit);
-  if (!limit) return { allowed: true, enabled: false };
-  if (!store) return { allowed: true, enabled: true, shared: false };
+  if (!limit) return { allowed: false, enabled: false, reason: 'not_configured' };
+  if (!store) return { allowed: false, enabled: true, shared: false, reason: 'storage_unavailable' };
 
   const day = now.toISOString().slice(0, 10);
-  const field = kind === 'places' ? 'placesRequests' : 'geminiRequests';
+  const fields = {
+    places: 'placesRequests',
+    gemini: 'geminiRequests',
+    photos: 'photoRequests',
+    routes: 'routesRequests',
+  };
+  const field = fields[kind];
+  if (!field) return { allowed: false, enabled: true, shared: false, reason: 'invalid_budget_kind' };
   const ref = store.collection('panda_usage_budgets_v1').doc(day);
 
   try {
     return await store.runTransaction(async (transaction) => {
       const snapshot = await transaction.get(ref);
-      const current = Number(snapshot.data()?.[field] || 0);
+      const rawCurrent = snapshot.data()?.[field];
+      const current = rawCurrent === undefined ? 0 : Number(rawCurrent);
+      if (!Number.isSafeInteger(current) || current < 0) {
+        return { allowed: false, enabled: true, shared: true, reason: 'counter_invalid' };
+      }
       if (current >= limit) {
-        return { allowed: false, enabled: true, shared: true, current, limit };
+        return { allowed: false, enabled: true, shared: true, current, limit, reason: 'limit' };
       }
       const next = current + 1;
       transaction.set(ref, { day, updatedAt: Date.now(), [field]: next }, { merge: true });
       return { allowed: true, enabled: true, shared: true, current: next, limit };
     });
   } catch {
-    // Availability wins if Firestore has a transient problem. Provider-side
-    // quotas remain the final hard stop.
-    return { allowed: true, enabled: true, shared: false };
+    return { allowed: false, enabled: true, shared: false, reason: 'storage_unavailable' };
   }
 }
 
@@ -171,18 +198,22 @@ export async function consumeClientDailyBudget(
   now = new Date(),
 ) {
   const limit = configuredDailyLimit(configuredLimit);
-  if (!limit) return { allowed: true, enabled: false };
-  if (!clientKey) return { allowed: true, enabled: true, shared: false, misconfigured: true };
-  if (!store) return { allowed: true, enabled: true, shared: false };
+  if (!limit) return { allowed: false, enabled: false, reason: 'not_configured' };
+  if (!clientKey) return { allowed: false, enabled: true, shared: false, reason: 'client_fingerprint_unavailable' };
+  if (!store) return { allowed: false, enabled: true, shared: false, reason: 'storage_unavailable' };
 
   const day = now.toISOString().slice(0, 10);
   const ref = store.collection('panda_client_budgets_v1').doc(`${day}_${clientKey}`);
   try {
     return await store.runTransaction(async (transaction) => {
       const snapshot = await transaction.get(ref);
-      const current = Number(snapshot.data()?.aiRequests || 0);
+      const rawCurrent = snapshot.data()?.aiRequests;
+      const current = rawCurrent === undefined ? 0 : Number(rawCurrent);
+      if (!Number.isSafeInteger(current) || current < 0) {
+        return { allowed: false, enabled: true, shared: true, reason: 'counter_invalid' };
+      }
       if (current >= limit) {
-        return { allowed: false, enabled: true, shared: true, current, limit };
+        return { allowed: false, enabled: true, shared: true, current, limit, reason: 'limit' };
       }
       const next = current + 1;
       transaction.set(ref, {
@@ -193,6 +224,6 @@ export async function consumeClientDailyBudget(
       return { allowed: true, enabled: true, shared: true, current: next, limit };
     });
   } catch {
-    return { allowed: true, enabled: true, shared: false };
+    return { allowed: false, enabled: true, shared: false, reason: 'storage_unavailable' };
   }
 }

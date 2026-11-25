@@ -194,11 +194,7 @@ import {
       res.status(200).json(result);
     } catch (error) {
       if (planner && ['AbortError', 'TimeoutError'].includes(error?.name)) {
-        res.status(504).json({ error: 'The live journey check timed out. Please retry.' });
-        return;
-      }
-      if (Number.isInteger(error?.status)) {
-        res.status(error.status).json({ error: error.message });
+        sendVenueError(res, { status: 504 }, 'The live journey check timed out. Please retry.');
         return;
       }
       sendVenueError(res, error, 'Live transit information could not be loaded right now.');

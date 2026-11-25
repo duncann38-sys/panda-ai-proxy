@@ -1,7 +1,7 @@
 // Panda AI proxy — Vercel serverless function.
 // - venuesOnly mode: direct Google Places search for the Discover feed (no Gemini).
 // - chat mode: Gemini decides (via function calling) WHEN to search venues.
-// CACHING: every Google Places lookup goes through searchVenues(), cached ~10 min.
+// Standard Discover/AI searches use shared query caching; Banging bypasses it.
 // HARDENED: origin allow-list + rate limiting via ./_guard.js.
 // UPGRADE: find_places accepts optional `area` (e.g. "Mayfair"), geocoded so the
 //   search centres on that place, not the user's GPS.
@@ -201,7 +201,10 @@ async function googleSearch(query,lat,lng,pageToken,openNow){
   try{
     if(Date.now()<placesQuotaBlockedUntil)return {venues:[],nextPageToken:null,providerFailed:true,providerStatus:429};
     const budget=await consumeDailyBudget(db(),'places',process.env.PANDA_DAILY_PLACES_LIMIT);
-    if(!budget.allowed)return {venues:[],nextPageToken:null,budgetExceeded:true};
+    if(!budget.allowed)return {
+      venues:[],nextPageToken:null,budgetExceeded:true,
+      budgetUnavailable:budget.reason!=='limit',
+    };
     recordCostEvent('places_provider_call',{openNow:openNow===true,page:Boolean(pageToken)});
     const reqBody={textQuery:query,maxResultCount:20,rankPreference:'DISTANCE',locationBias:{circle:{center:{latitude:lat,longitude:lng},radius:6000.0}}};
     if(openNow===true) reqBody.openNow=true;
@@ -251,7 +254,7 @@ async function hydrateIndexedPlace(placeId, identity, category) {
     return { providerFailed: true, providerStatus: 429 };
   }
   const budget = await consumeDailyBudget(db(), 'places', process.env.PANDA_DAILY_PLACES_LIMIT);
-  if (!budget.allowed) return { budgetExceeded: true };
+  if (!budget.allowed) return { budgetExceeded: true, budgetUnavailable: budget.reason !== 'limit' };
 
   const startAt = Math.max(Date.now(), nextIndexedDetailRequestAt);
   nextIndexedDetailRequestAt = startAt + 75;
@@ -709,7 +712,10 @@ async function gemini(token,projectId,body,cacheContext={},options={}){
     }
   }
   const budget=await consumeDailyBudget(db(),'gemini',process.env.PANDA_DAILY_GEMINI_LIMIT);
-  if(!budget.allowed)return {ok:false,status:429,data:{},budgetExceeded:true};
+  if(!budget.allowed)return {
+    ok:false,status:budget.reason==='limit'?429:503,data:{},budgetExceeded:true,
+    budgetUnavailable:budget.reason!=='limit',
+  };
   recordCostEvent('gemini_provider_call',{modelCount:selectedModels.length});
   let last={ok:false,status:0,data:{}};
   for(const model of selectedModels){
@@ -821,7 +827,12 @@ async function searchGroundedOpenings({city,country,maxCandidates,focus}){
 async function searchOpeningPlace(candidate,city){
   if(!MAPS_KEY) throw new Error('places_key_unavailable');
   const budget=await consumeDailyBudget(db(),'places',process.env.PANDA_DAILY_PLACES_LIMIT);
-  if(!budget.allowed) throw new Error('places_budget_exceeded');
+  if(!budget.allowed) {
+    throw Object.assign(
+      new Error(budget.reason === 'limit' ? 'places_budget_exceeded' : 'places_budget_unavailable'),
+      { status: budget.reason === 'limit' ? 429 : 503 },
+    );
+  }
   const query=[candidate.name,candidate.cuisine,city.city,city.country].filter(Boolean).join(' ');
   const majorCity=/^(london|new york|paris|tokyo|dubai|los angeles|singapore|hong kong)$/i.test(city.city);
   const radiusMeters=majorCity?50000:30000;
@@ -915,7 +926,11 @@ export default async function handler(req,res){
           res.setHeader('Cache-Control','private, no-store');
           res.status(200).json(await coverDiscovery(body));
         }catch(error){
-          res.status(error?.status || 503).json({error:error?.status === 400 ? error.message : 'Discovery is temporarily unavailable.'});
+          const invalid = error?.status === 400;
+          res.status(invalid ? 400 : 503).json({
+            error: invalid ? 'Invalid discovery request.' : 'Discovery is temporarily unavailable.',
+            code: invalid ? 'invalid_request' : 'service_unavailable',
+          });
         }
         return;
       }
@@ -1184,11 +1199,10 @@ export default async function handler(req,res){
     try{ credentials=JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT); }
     catch(e){ await degrade('credentials-config'); return; }
     if(!vertexAuth){
-      // Private runtime logs identify the IAM principal without exposing any credential/key.
+      // Keep runtime diagnostics to presence only; do not log account identifiers.
       console.info(JSON.stringify({
         event:'panda_vertex_identity',
-        projectId:credentials.project_id,
-        serviceAccountEmail:credentials.client_email,
+        configured:Boolean(credentials.project_id&&credentials.client_email),
       }));
       vertexAuth=new GoogleAuth({credentials,scopes:['https://www.googleapis.com/auth/cloud-platform']});
     }

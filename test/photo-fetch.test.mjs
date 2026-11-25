@@ -57,6 +57,21 @@ test('long cooldown and exhausted retry allowance are not bypassed', async () =>
   assert.equal(calls, 1);
 });
 
+test('billable callers can disable retries so budgets count each provider request', async () => {
+  let calls = 0;
+  const fetchPhoto = createPhotoFetch({
+    fetchImpl: async () => {
+      calls++;
+      return new Response('', { status: 503 });
+    },
+  });
+  assert.equal(
+    (await fetchPhoto('https://example.test', undefined, { retries: 0 })).status,
+    503,
+  );
+  assert.equal(calls, 1);
+});
+
 test('parallel requests are staggered and bounded to two upstream calls', async () => {
   let active = 0, peak = 0;
   const starts = [];

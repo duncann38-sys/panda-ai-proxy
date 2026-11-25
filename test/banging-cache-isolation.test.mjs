@@ -31,8 +31,27 @@ test('searchVenueListings bypasses process and Firestore caches only when reques
   const originalFetch = globalThis.fetch;
   const originalGoogleKey = process.env.GOOGLE_MAPS_API_KEY;
   const originalFirebaseAccount = process.env.FIREBASE_SERVICE_ACCOUNT;
+  const originalPlacesLimit = process.env.PANDA_DAILY_PLACES_LIMIT;
   let fetchCount = 0;
+  const rows = new Map();
+  const budgetStore = {
+    collection(name) {
+      return { doc: id => ({ collection: name, id }) };
+    },
+    runTransaction(callback) {
+      return callback({
+        async get(ref) {
+          return { data: () => rows.get(`${ref.collection}/${ref.id}`) || {} };
+        },
+        set(ref, value) {
+          const key = `${ref.collection}/${ref.id}`;
+          rows.set(key, { ...(rows.get(key) || {}), ...value });
+        },
+      });
+    },
+  };
   process.env.GOOGLE_MAPS_API_KEY = 'test-only-key';
+  process.env.PANDA_DAILY_PLACES_LIMIT = '10';
   delete process.env.FIREBASE_SERVICE_ACCOUNT;
   globalThis.fetch = async () => {
     fetchCount += 1;
@@ -55,13 +74,13 @@ test('searchVenueListings bypasses process and Firestore caches only when reques
   try {
     const { searchVenueListings } = await import('../api/_venue-live.js?banging-cache-isolation');
     const bypassQuery = 'Banging bypass cache test ' + Date.now();
-    await searchVenueListings(bypassQuery, null, { bypassCache: true });
-    await searchVenueListings(bypassQuery, null, { bypassCache: true });
+    await searchVenueListings(bypassQuery, null, { bypassCache: true, budgetStore });
+    await searchVenueListings(bypassQuery, null, { bypassCache: true, budgetStore });
     assert.equal(fetchCount, 2);
 
     const normalQuery = 'Banging default cache test ' + Date.now();
-    await searchVenueListings(normalQuery);
-    await searchVenueListings(normalQuery);
+    await searchVenueListings(normalQuery, null, { budgetStore });
+    await searchVenueListings(normalQuery, null, { budgetStore });
     assert.equal(fetchCount, 3);
   } finally {
     globalThis.fetch = originalFetch;
@@ -69,5 +88,7 @@ test('searchVenueListings bypasses process and Firestore caches only when reques
     else process.env.GOOGLE_MAPS_API_KEY = originalGoogleKey;
     if (originalFirebaseAccount === undefined) delete process.env.FIREBASE_SERVICE_ACCOUNT;
     else process.env.FIREBASE_SERVICE_ACCOUNT = originalFirebaseAccount;
+    if (originalPlacesLimit === undefined) delete process.env.PANDA_DAILY_PLACES_LIMIT;
+    else process.env.PANDA_DAILY_PLACES_LIMIT = originalPlacesLimit;
   }
 });
