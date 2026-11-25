@@ -3,13 +3,13 @@ import {
   db, sharedStorageFailure, readSharedCache, searchVenueListings,
   getBangingTransitDurations, getWalkingRoute,
 } from './_venue-live.js';
-import { consumeDailyBudget, recordCostEvent } from './_cost-controls.js';
+import { configuredDailyLimit, recordCostEvent } from './_cost-controls.js';
 import { luxuryEvidence } from './_banging-curation.js';
 
 const TTL = 3 * 60 * 60 * 1000;
 const BANGING_LIVE_DEADLINE_MS = 4_300;
 const flights = new Map();
-const CACHE = 'banging_directory_cache_v1';
+const CACHE = 'banging_directory_cache_v1'; // Only public partner placements; never Google venue results.
 const failures = new Map();
 const london = { latitude: 51.5074, longitude: -0.1278 };
 const BANGING_SEARCH_TERMS = [
@@ -156,27 +156,29 @@ export async function refresh(key, loader, ttl = TTL, { signal } = {}) {
   return request;
 }
 
-export async function withBudget(kind, amount = 1) {
-  // Retain the existing shared Places counter. Matrix elements have their
-  // own optional daily cap because one request can bill many destinations.
+export async function withBangingRouteElementBudget(amount = 1) {
   const store = db();
-  if (kind === 'places') {
-    const limit = process.env.PANDA_PLACES_DAILY_LIMIT || process.env.PANDA_PLACES_DAILY_REQUEST_LIMIT;
-    const result = await consumeDailyBudget(store, 'places', limit);
-    if (!result.allowed) throw error('Panda’s daily venue-search allowance has been reached.', 429);
-  } else {
-    const configured = Number(process.env.PANDA_BANGING_DAILY_ROUTE_ELEMENTS);
-    if (Number.isFinite(configured) && configured > 0) {
-      const ref = store.collection('panda_banging_budgets_v1').doc(new Date().toISOString().slice(0, 10));
-      const allowed = await store.runTransaction(async transaction => {
-        const current = Number((await transaction.get(ref)).data()?.elements || 0);
-        if (current + amount > configured) return false;
-        transaction.set(ref, { elements: current + amount, updatedAt: Date.now() });
-        return true;
-      });
-      if (!allowed) throw error('Panda’s daily Banging travel allowance has been reached.', 429);
-    }
+  const configured = configuredDailyLimit(process.env.PANDA_BANGING_DAILY_ROUTE_ELEMENTS);
+  if (!configured || !store || !Number.isSafeInteger(amount) || amount < 1) {
+    throw error('Banging is temporarily unavailable.', 503);
   }
+  const ref = store.collection('panda_banging_budgets_v1').doc(new Date().toISOString().slice(0, 10));
+  let outcome;
+  try {
+    outcome = await store.runTransaction(async transaction => {
+      const rawCurrent = (await transaction.get(ref)).data()?.elements;
+      const current = rawCurrent === undefined ? 0 : Number(rawCurrent);
+      if (!Number.isSafeInteger(current) || current < 0
+          || !Number.isSafeInteger(current + amount)) return 'storage_unavailable';
+      if (current + amount > configured) return 'limit';
+      transaction.set(ref, { elements: current + amount, updatedAt: Date.now() });
+      return 'allowed';
+    });
+  } catch {
+    throw error('Banging is temporarily unavailable.', 503);
+  }
+  if (outcome === 'storage_unavailable') throw error('Banging is temporarily unavailable.', 503);
+  if (outcome === 'limit') throw error('Panda’s daily Banging travel allowance has been reached.', 429);
 }
 
 async function directory(origin, signal) {
@@ -185,15 +187,13 @@ async function directory(origin, signal) {
     latitude: Math.round(origin.latitude * 10) / 10,
     longitude: Math.round(origin.longitude * 10) / 10,
   };
-  const key = isLondon ? 'luxury-london-v2' : `luxury-area-v2:${centre.latitude}:${centre.longitude}`;
   const queries = BANGING_SEARCH_TERMS.map(term => isLondon
     ? `${term} in London`
     : `${term} near ${centre.latitude}, ${centre.longitude}`);
   // Banging must not read, write, or coalesce Google Places results across users.
   const attempts = await Promise.allSettled(queries.map(async query => {
     if (signal?.aborted) throw error('Banging lookup cancelled.');
-    await withBudget('places');
-    recordCostEvent('banging_directory_search', { area: key });
+    recordCostEvent('banging_directory_search', { scope: isLondon ? 'london' : 'regional' });
     return searchVenueListings(query, centre, {
       bypassCache: true,
       signal,
@@ -252,7 +252,7 @@ async function getVerifiedBangingDirectory(origin, premiumIds, signal) {
     const durations = {};
     for (let offset = 0; offset < candidates.length; offset += 50) {
       const chunk = candidates.slice(offset, offset + 50);
-      await withBudget('routes', chunk.length);
+      await withBangingRouteElementBudget(chunk.length);
       const times = await getBangingTransitDurations(anchor, chunk.map(venue => role === 'premium'
         ? { placeId: venue.id } : { latitude: venue.latitude, longitude: venue.longitude }), {
           signal,
@@ -262,7 +262,7 @@ async function getVerifiedBangingDirectory(origin, premiumIds, signal) {
         const venue = chunk[index];
         let minutes = times[index];
         if (minutes === null && (role === 'premium' || meters(anchor, venue) <= 250)) {
-          if (role === 'premium') await withBudget('routes', 1);
+          await withBangingRouteElementBudget(1);
           const walking = await getWalkingRoute(anchor, role === 'premium'
             ? { placeId: venue.id } : { latitude: venue.latitude, longitude: venue.longitude }, {
               signal,

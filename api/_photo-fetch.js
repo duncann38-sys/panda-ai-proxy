@@ -12,6 +12,7 @@ export function createPhotoFetch({
   const pending = [];
   const maximum = Math.min(2, Math.max(1, concurrency));
   const spacing = Math.min(100, Math.max(50, staggerMs));
+  const configuredRetries = Math.min(2, Math.max(0, retries));
   async function dispatch(input, init) {
     while (active >= maximum) await new Promise(resolve => pending.push(resolve));
     active++;
@@ -25,18 +26,20 @@ export function createPhotoFetch({
       pending.shift()?.();
     }
   }
-  return async function fetchPhoto(input, init) {
-    const attempts = Math.min(2, Math.max(0, retries));
+  return async function fetchPhoto(input, init, options = {}) {
+    const retryCount = Number.isInteger(options.retries)
+      ? Math.min(configuredRetries, Math.max(0, options.retries))
+      : configuredRetries;
     for (let attempt = 0; ; attempt++) {
       let response;
       try {
         response = await dispatch(input, init);
       } catch (error) {
-        if (attempt >= attempts || init?.signal?.aborted || error?.name === 'AbortError') throw error;
+        if (attempt >= retryCount || init?.signal?.aborted || error?.name === 'AbortError') throw error;
         await wait(250 * 2 ** attempt + Math.floor(random() * 100));
         continue;
       }
-      if (attempt >= attempts || ![429, 500, 502, 503, 504].includes(response.status)) return response;
+      if (attempt >= retryCount || ![429, 500, 502, 503, 504].includes(response.status)) return response;
       if (response.status === 429) {
         const payload = await response.clone().json().catch(() => ({}));
         if (providerQuotaInfo(payload.error || {}).period === 'day') return response;

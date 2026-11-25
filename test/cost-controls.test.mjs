@@ -13,8 +13,30 @@ import {
   placesMemoryEntry,
   readSharedGeminiCall,
   requestFingerprint,
+  recordCostEvent,
   writeSharedGeminiCall,
 } from '../api/_cost-controls.js';
+
+function createBudgetStore(initialRows = {}) {
+  const rows = new Map(Object.entries(initialRows));
+  return {
+    rows,
+    collection(name) {
+      return { doc: id => ({ collection: name, id }) };
+    },
+    async runTransaction(callback) {
+      return callback({
+        async get(ref) {
+          return { data: () => rows.get(`${ref.collection}/${ref.id}`) || {} };
+        },
+        set(ref, value) {
+          const key = `${ref.collection}/${ref.id}`;
+          rows.set(key, { ...(rows.get(key) || {}), ...value });
+        },
+      });
+    },
+  };
+}
 
 test('successful empty searches remain cacheable but provider failures and budget denials do not', () => {
   assert.equal(cacheablePlacesResult({ venues: [], nextPageToken: null }), true);
@@ -75,24 +97,48 @@ test('request fingerprints are stable and distinguish different requests', () =>
   assert.notEqual(requestFingerprint(request), requestFingerprint({ ...request, location: { lat: 1 } }));
 });
 
-test('daily limits are opt-in positive integers', () => {
+test('configured daily limits must be positive integers', () => {
   assert.equal(configuredDailyLimit(undefined), null);
   assert.equal(configuredDailyLimit('0'), null);
   assert.equal(configuredDailyLimit('-1'), null);
+  assert.equal(configuredDailyLimit('500x'), null);
+  assert.equal(configuredDailyLimit('1.5'), null);
+  assert.equal(configuredDailyLimit('9007199254740992'), null);
   assert.equal(configuredDailyLimit('5000'), 5000);
 });
 
-test('disabled daily budgets do not require Firestore or block requests', async () => {
+test('missing daily budget configuration fails closed', async () => {
   assert.deepEqual(
     await consumeDailyBudget(null, 'gemini', undefined),
-    { allowed: true, enabled: false },
+    { allowed: false, enabled: false, reason: 'not_configured' },
   );
 });
 
-test('enabled daily budgets fail open when shared storage is unavailable', async () => {
+test('configured daily budgets fail closed when shared storage is unavailable', async () => {
   assert.deepEqual(
     await consumeDailyBudget(null, 'places', '5000'),
-    { allowed: true, enabled: true, shared: false },
+    { allowed: false, enabled: true, shared: false, reason: 'storage_unavailable' },
+  );
+});
+
+test('daily budgets fail closed when the Firestore transaction throws', async () => {
+  const store = {
+    collection() { return { doc() { return {}; } }; },
+    async runTransaction() { throw new Error('private storage detail'); },
+  };
+  assert.deepEqual(
+    await consumeDailyBudget(store, 'photos', '5000'),
+    { allowed: false, enabled: true, shared: false, reason: 'storage_unavailable' },
+  );
+});
+
+test('daily budgets fail closed on malformed shared counters', async () => {
+  const store = createBudgetStore({
+    'panda_usage_budgets_v1/2026-01-02': { placesRequests: -1 },
+  });
+  assert.deepEqual(
+    await consumeDailyBudget(store, 'places', '5000', new Date('2026-01-02T12:00:00Z')),
+    { allowed: false, enabled: true, shared: true, reason: 'counter_invalid' },
   );
 });
 
@@ -118,6 +164,36 @@ test('daily budgets reject calls after the configured shared limit', async () =>
   const blocked = await consumeDailyBudget(store, 'gemini', '2');
   assert.equal(blocked.allowed, false);
   assert.equal(blocked.current, 2);
+  assert.equal(blocked.reason, 'limit');
+});
+
+test('photo media has its own shared daily counter', async () => {
+  let count = 0;
+  const store = {
+    collection() {
+      return { doc() { return {}; } };
+    },
+    async runTransaction(callback) {
+      return callback({
+        async get() { return { data: () => ({ photoRequests: count }) }; },
+        set(_ref, value) { count = value.photoRequests; },
+      });
+    },
+  };
+  assert.equal((await consumeDailyBudget(store, 'photos', '1')).allowed, true);
+  const blocked = await consumeDailyBudget(store, 'photos', '1');
+  assert.equal(blocked.allowed, false);
+  assert.equal(blocked.reason, 'limit');
+});
+
+test('Google Routes requests use an independent shared daily counter', async () => {
+  const store = createBudgetStore();
+  assert.equal((await consumeDailyBudget(store, 'routes', '2')).allowed, true);
+  assert.equal((await consumeDailyBudget(store, 'routes', '2')).allowed, true);
+  assert.deepEqual(
+    await consumeDailyBudget(store, 'routes', '2'),
+    { allowed: false, enabled: true, shared: true, current: 2, limit: 2, reason: 'limit' },
+  );
 });
 
 test('client fingerprints are stable without retaining raw network identifiers', () => {
@@ -142,6 +218,31 @@ test('client fingerprints are stable without retaining raw network identifiers',
   assert.equal(clientFingerprint(req, ''), null);
 });
 
+test('usage metrics discard unapproved fields such as prompts and coordinates', () => {
+  const oldEnabled = process.env.PANDA_USAGE_METRICS;
+  const oldInfo = console.info;
+  let output = '';
+  process.env.PANDA_USAGE_METRICS = 'true';
+  console.info = value => { output = value; };
+  try {
+    recordCostEvent('banging_directory_search', {
+      scope: 'regional',
+      query: 'private prompt',
+      latitude: 51.5,
+      clientIp: '192.0.2.1',
+    });
+  } finally {
+    console.info = oldInfo;
+    if (oldEnabled === undefined) delete process.env.PANDA_USAGE_METRICS;
+    else process.env.PANDA_USAGE_METRICS = oldEnabled;
+  }
+  const event = JSON.parse(output);
+  assert.equal(event.scope, 'regional');
+  assert.equal('query' in event, false);
+  assert.equal('latitude' in event, false);
+  assert.equal('clientIp' in event, false);
+});
+
 test('per-client daily AI budgets reject only after the configured count', async () => {
   let count = 0;
   const store = {
@@ -162,8 +263,23 @@ test('per-client daily AI budgets reject only after the configured count', async
   assert.equal((await consumeClientDailyBudget(store, 'client', '1')).allowed, true);
   assert.equal((await consumeClientDailyBudget(store, 'client', '1')).allowed, false);
   const missingSalt = await consumeClientDailyBudget(store, null, '1');
-  assert.equal(missingSalt.allowed, true);
-  assert.equal(missingSalt.misconfigured, true);
+  assert.equal(missingSalt.allowed, false);
+  assert.equal(missingSalt.reason, 'client_fingerprint_unavailable');
+  assert.deepEqual(
+    await consumeClientDailyBudget(store, 'client', undefined),
+    { allowed: false, enabled: false, reason: 'not_configured' },
+  );
+});
+
+test('per-client budgets fail closed when Firestore is unavailable', async () => {
+  const store = {
+    collection() { return { doc() { return {}; } }; },
+    async runTransaction() { throw new Error('private storage detail'); },
+  };
+  assert.deepEqual(
+    await consumeClientDailyBudget(store, 'client', '10'),
+    { allowed: false, enabled: true, shared: false, reason: 'storage_unavailable' },
+  );
 });
 
 test('bounded integers preserve defaults and clamp configured tool rounds', () => {

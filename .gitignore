@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.p12
+*.p8
+*.pem
+*.key
+service-account*.json
+*-service-account*.json
+firebase-adminsdk-*.json

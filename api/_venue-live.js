@@ -1,9 +1,10 @@
 import { applyGuard } from './_guard.js';
 import { createHash } from 'node:crypto';
 import admin from 'firebase-admin';
-import { boundedCacheExpiry, recordCostEvent } from './_cost-controls.js';
+import { boundedCacheExpiry, consumeDailyBudget, recordCostEvent } from './_cost-controls.js';
 import { addTransitStops, chooseTransitRoute } from './_transit-stops.js';
 import { parseServiceAccount } from './_firebase-service-account.js';
+import { safePublicError } from './_public-errors.js';
 
 const GOOGLE_DETAILS_URL = 'https://places.googleapis.com/v1/places';
 const GOOGLE_NEARBY_URL = 'https://places.googleapis.com/v1/places:searchNearby';
@@ -238,7 +239,17 @@ function getTodayHours(place) {
   return descriptions[mondayFirstIndex] || null;
 }
 
-async function googleJson(url, options, fallbackMessage) {
+async function googleJson(url, options, fallbackMessage, budgetKind = null, budgetStore = null) {
+  // Reserve a shared daily allowance before every billable provider request.
+  if (budgetKind) {
+    const limit = budgetKind === 'places'
+      ? process.env.PANDA_DAILY_PLACES_LIMIT
+      : process.env.PANDA_DAILY_ROUTES_LIMIT;
+    const budget = await consumeDailyBudget(budgetStore || db(), budgetKind, limit);
+    if (!budget.allowed) {
+      throw requestError(fallbackMessage, budget.reason === 'limit' ? 429 : 503);
+    }
+  }
   const {
     timeoutMs = 10_000,
     signal: parentSignal,
@@ -262,7 +273,7 @@ async function googleJson(url, options, fallbackMessage) {
   return payload;
 }
 
-export function applyVenueGuard(req, res, { limit = false } = {}) {
+export function applyVenueGuard(req, res, { limit = true } = {}) {
   return applyGuard(req, res, { methods: ['GET', 'OPTIONS'], limit });
 }
 
@@ -287,8 +298,8 @@ export function readCoordinates(query) {
 }
 
 export function sendVenueError(res, error, fallbackMessage) {
-  const status = Number.isInteger(error?.status) ? error.status : 502;
-  res.status(status).json({ error: error?.message || fallbackMessage });
+  const result = safePublicError(error?.status, fallbackMessage);
+  res.status(result.status).json(result.body);
 }
 
 export async function searchVenueListings(query, locationBias = null, {
@@ -298,6 +309,7 @@ export async function searchVenueListings(query, locationBias = null, {
   timeoutMs = 10_000,
   biasRadiusMeters = 8_000,
   bypassCache = false,
+  budgetStore = null,
 } = {}) {
   const normalized = [
     (ttlMs === SEARCH_CACHE_TTL_MS ? 'planner-facts-v3' : `curated-facts-v1:${ttlMs}`) +
@@ -364,6 +376,8 @@ export async function searchVenueListings(query, locationBias = null, {
         }),
       },
       'Google nearby venue search is unavailable right now.',
+      'places',
+      budgetStore,
     );
     const nearbyResults = (nearbyPayload.places || []).flatMap((place) =>
       place?.id && place?.displayName?.text && place?.formattedAddress && isHospitalityType(place.primaryType)
@@ -436,6 +450,8 @@ export async function searchVenueListings(query, locationBias = null, {
       }),
     },
     'Google venue search is unavailable right now.',
+    'places',
+    budgetStore,
   );
 
   const results = (payload.places || []).flatMap((place) =>
@@ -489,6 +505,7 @@ export async function getVenueProfile(placeId) {
         },
       },
       'Google venue details are unavailable right now.',
+      'places',
     );
   } catch (error) {
     if (error?.status === 404) return null;
@@ -584,6 +601,7 @@ export async function findNearestTransitStation(latitude, longitude) {
       }),
     },
     'Google transit search is unavailable right now.',
+    'places',
   );
 
   const station = (payload.places || []).find((place) =>
@@ -663,6 +681,7 @@ export async function getWalkingRoute(origin, destination, { signal, timeoutMs =
           }),
         },
         'Google walking directions are unavailable right now.',
+        'routes',
       );
     } catch (error) {
       if (error?.status === 403 || error?.status === 404) return null;
@@ -735,6 +754,7 @@ export async function getBangingTransitDurations(origin, destinations, { signal,
       }),
     },
     'Banging public transport verification is unavailable.',
+    'routes',
   );
   if (!Array.isArray(payload)) throw requestError('Invalid public transport response.');
   return destinations.map((_, index) => {
@@ -788,6 +808,7 @@ export async function getTransitRoute(origin, destination, { includeLive = true,
           }),
         },
         'Google public transport directions are unavailable right now.',
+        'routes',
       );
     } catch (error) {
       if (error?.status === 403 || error?.status === 404) return null;
