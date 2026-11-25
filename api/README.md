@@ -114,10 +114,29 @@ Firestore collections:
 - `panda_usage_budgets_v1` — UTC daily request counters.
 - `panda_client_budgets_v1` — optional hashed-client daily AI counters.
 
-## Rollout
+## Current Production state — 25 November 2026
 
-1. Deploy code with daily limits, shared Gemini caching and conversation compaction unset. This enables exact in-process duplicate-call protection plus safe shared venue/photo caching without blocking or trimming traffic.
-2. Confirm the production endpoint response contract with a few canary requests after billing is restored.
-3. Set budgets below the matching Google Cloud quotas, leaving capacity for operational checks.
-4. Monitor cache-hit rate, fallback rate, Gemini calls per conversation, and Places calls per discovery session.
-5. Raise budgets gradually as verified revenue and traffic grow.
+The production branch is at commit 2b09ff1d4f5379adfbaac9d52ab2ae02d3d6d4fc. Its Vercel deployment reached READY. A safe public status request was intercepted by Vercel Authentication before reaching the app, so deployment readiness is verified but endpoint runtime behavior is not.
+
+These starting daily caps are configured in the Vercel Production environment only. Preview variables were left unchanged:
+
+| Variable | Production starting cap |
+|---|---:|
+| PANDA_DAILY_GEMINI_LIMIT | 5,000 per UTC day |
+| PANDA_DAILY_PLACES_LIMIT | 5,000 per UTC day for direct Places; discovery-index allowance is separate |
+| PANDA_DAILY_PHOTO_LIMIT | 10,000 per UTC day |
+| PANDA_DAILY_ROUTES_LIMIT | 2,000 per UTC day |
+| PANDA_DAILY_CLIENT_AI_LIMIT | 1,000 per client per UTC day |
+| PANDA_BANGING_DAILY_ROUTE_ELEMENTS | 10,000 per UTC day |
+| PANDA_CLIENT_HASH_SALT | Required sensitive secret; never commit or print its value |
+
+Values can change in Vercel independently of Git; inspect the Production settings before relying on this snapshot. Missing required budget configuration or unavailable Firestore accounting fails closed for new paid calls. Existing local-device Banging fallback is separate from shared Google-result caching.
+
+Banging bypasses shared and in-process Google venue-result caches. The server cache named banging_directory_cache_v1 is for public partner placements, not Google venue results. Do not re-enable cross-user Google-result reuse for Banging without a separate policy review.
+
+## Future rollout checklist
+
+1. Keep each required budget set below the matching Google Cloud quota and verify Firestore budget accounting before changing limits.
+2. Configure Preview budgets and its data store separately before testing paid calls in a Vercel Preview deployment; Preview is currently not configured with these Production caps.
+3. After a production merge, verify the exact Vercel deployment commit and READY state. Do not bypass Vercel Authentication to probe a protected endpoint.
+4. Confirm the app’s fallback state separately; deployment readiness alone does not prove every API route returned live data.
